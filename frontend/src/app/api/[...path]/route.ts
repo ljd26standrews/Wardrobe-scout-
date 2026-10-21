@@ -3,6 +3,11 @@
 //
 // Optional LAN protection: if WS_ACCESS_CODE is set, every API call must carry the `ws_access` cookie,
 // obtained once on the /unlock page. start.sh requires it whenever the app is exposed to your network.
+//
+// Browser boundary: this proxy holds the backend token, so it only serves pages of this app. Requests from
+// other websites (foreign Origin or Sec-Fetch-Site: cross-site) and requests addressed to an unknown host
+// name (DNS rebinding) are refused, and CORS headers are never passed back. The bookmarklet is unaffected:
+// it calls the backend directly with its own copy of the token.
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { timingSafeEqual } from "node:crypto";
@@ -11,7 +16,52 @@ import type { NextRequest } from "next/server";
 export const dynamic = "force-dynamic";
 
 const BACKEND = (process.env.BACKEND_URL ?? "http://127.0.0.1:8000").replace(/\/$/, "");
-const HOP_BY_HOP = ["connection", "keep-alive", "transfer-encoding", "upgrade", "host", "content-length", "cookie", "x-ws-token"];
+const HOP_BY_HOP = ["connection", "keep-alive", "transfer-encoding", "upgrade", "host", "content-length", "cookie", "x-ws-token", "origin", "referer"];
+// Extra host names you reach the app by (comma-separated), e.g. a local DNS name for your computer.
+const EXTRA_HOSTS = (process.env.WS_ALLOWED_HOSTS ?? "")
+  .split(",")
+  .map((h) => h.trim().toLowerCase())
+  .filter(Boolean);
+
+function hostName(hostHeader: string): string {
+  const h = hostHeader.trim().toLowerCase();
+  if (h.startsWith("[")) return h.slice(0, h.indexOf("]") + 1); // [::1]:3000
+  return h.replace(/:\d+$/, "");
+}
+
+/** Loopback, an IP address (LAN use by address) or a configured name. DNS-rebinding attacks need a domain. */
+function allowedHost(hostHeader: string | null): boolean {
+  if (!hostHeader) return false;
+  const h = hostName(hostHeader);
+  if (h === "localhost" || h.endsWith(".localhost") || EXTRA_HOSTS.includes(h)) return true;
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(h)) return true;
+  return h.startsWith("[") && h.endsWith("]"); // IPv6 literal
+}
+
+/** null if the request may proceed, otherwise the refusal. */
+function guard(req: NextRequest): Response | null {
+  const host = req.headers.get("host");
+  if (!allowedHost(host)) {
+    return Response.json({ detail: "Unknown host name. Add it to WS_ALLOWED_HOSTS if this is your computer." }, { status: 403 });
+  }
+  const site = req.headers.get("sec-fetch-site");
+  if (site === "cross-site" || site === "same-site") {
+    return Response.json({ detail: "Requests from other websites are not allowed" }, { status: 403 });
+  }
+  const origin = req.headers.get("origin");
+  if (origin) {
+    let originHost = "";
+    try {
+      originHost = new URL(origin).host.toLowerCase();
+    } catch {
+      originHost = "invalid";
+    }
+    if (originHost !== (host ?? "").toLowerCase()) {
+      return Response.json({ detail: "Requests from other websites are not allowed" }, { status: 403 });
+    }
+  }
+  return null;
+}
 const ACCESS_CODE = process.env.WS_ACCESS_CODE ?? "";
 
 let cachedToken: string | null = null;
@@ -48,6 +98,8 @@ async function unlock(req: NextRequest) {
 
 async function proxy(req: NextRequest, ctx: { params: Promise<{ path: string[] }> }) {
   const { path: parts } = await ctx.params;
+  const refused = guard(req);
+  if (refused) return refused;
   if (parts.length === 1 && parts[0] === "unlock") {
     if (req.method === "POST") return unlock(req);
     return Response.json({ required: !!ACCESS_CODE });
@@ -76,6 +128,8 @@ async function proxy(req: NextRequest, ctx: { params: Promise<{ path: string[] }
     if (res.status === 401) cachedToken = null; // token may have been regenerated
     const out = new Headers(res.headers);
     ["content-encoding", "transfer-encoding", "connection"].forEach((h) => out.delete(h));
+    // Never grant other origins access to what the proxy fetched with the backend token.
+    [...out.keys()].filter((h) => h.startsWith("access-control-")).forEach((h) => out.delete(h));
     return new Response(res.body, { status: res.status, statusText: res.statusText, headers: out });
   } catch {
     return Response.json({ detail: `Backend not reachable at ${BACKEND}. Start it with ./scripts/start.sh (or uvicorn).` }, { status: 502 });

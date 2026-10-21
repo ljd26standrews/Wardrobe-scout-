@@ -99,6 +99,7 @@ Everything lives in `.env` at the repo root (copied from `.env.example`) and in 
 | `WS_LAN` | `0` | `1` makes the app reachable from other devices on your network (requires `WS_ACCESS_CODE`) |
 | `WS_ACCESS_CODE` | – | Passphrase other devices enter once (stored as a cookie) |
 | `WS_API_TOKEN` | generated | Per-install API key. Leave unset: it is generated in `<data dir>/api_token` (mode 600) |
+| `WS_ALLOWED_HOSTS` | – | Extra host names (comma-separated) you open the app by, besides `localhost` and IP addresses — e.g. `mymac.local`. Other names are refused (DNS-rebinding protection) |
 | `WS_ALLOW_PRIVATE_URLS` | `false` | Allow fetching LAN/localhost addresses (only for local test servers) |
 | `WS_MAX_DOWNLOAD_BYTES` | 25 MB | Size cap for any downloaded page or image |
 | `BACKEND_URL` | `http://127.0.0.1:8000` | Where the Next.js server proxies `/api` (read at runtime) |
@@ -109,6 +110,7 @@ API keys are only read from the environment and are never stored in the database
 ### Security model
 
 - **Every `/api` call needs a per-install key.** Without one, any website open in your browser could read or change your data through the localhost API. The key is generated on first start, the app's own server adds it to requests, and you never handle it except inside the bookmarklet.
+- **Only this app's own pages can use its API.** The app server, which holds the key, refuses requests from other websites: a foreign `Origin`, or a browser-reported cross-site request. It also refuses requests addressed to unknown host names, which blocks DNS-rebinding tricks, and it never passes cross-origin permissions back to the browser. The bookmarklet is unaffected because it talks to the backend directly with its own key.
 - **Both servers listen on `127.0.0.1` only.** Sharing on your network is opt-in (`WS_LAN=1`) and always requires an access code.
 - **Server-side fetches refuse private, loopback and cloud-metadata addresses**, including via redirects. Downloads are size-capped.
 - **The bookmarklet contains your key.** Treat it like a password and don't share it. It only works against your own computer's backend.
