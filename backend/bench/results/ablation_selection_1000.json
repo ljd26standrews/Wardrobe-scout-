@@ -1,0 +1,100 @@
+[
+ {
+  "strategy": "baseline",
+  "fetched_per_product": 8.74,
+  "contaminated_pct": 86.3,
+  "knn": 0.354,
+  "taste_auc": 0.753
+ },
+ {
+  "strategy": "first_k_1",
+  "fetched_per_product": 1.0,
+  "contaminated_pct": 12.9,
+  "knn": 0.378,
+  "taste_auc": 0.718
+ },
+ {
+  "strategy": "first_k_2",
+  "fetched_per_product": 2.0,
+  "contaminated_pct": 15.3,
+  "knn": 0.356,
+  "taste_auc": 0.744
+ },
+ {
+  "strategy": "first_k_3",
+  "fetched_per_product": 2.99,
+  "contaminated_pct": 19.2,
+  "knn": 0.367,
+  "taste_auc": 0.751
+ },
+ {
+  "strategy": "all_garment",
+  "fetched_per_product": 8.9,
+  "contaminated_pct": 6.6,
+  "knn": 0.384,
+  "taste_auc": 0.766
+ },
+ {
+  "strategy": "select_1",
+  "fetched_per_product": 8.9,
+  "contaminated_pct": 1.8,
+  "knn": 0.387,
+  "taste_auc": 0.753
+ },
+ {
+  "strategy": "select_2",
+  "fetched_per_product": 8.9,
+  "contaminated_pct": 5.7,
+  "knn": 0.354,
+  "taste_auc": 0.754
+ },
+ {
+  "strategy": "select_3",
+  "fetched_per_product": 8.9,
+  "contaminated_pct": 6.2,
+  "knn": 0.338,
+  "taste_auc": 0.755
+ },
+ {
+  "strategy": "select_4",
+  "fetched_per_product": 8.9,
+  "contaminated_pct": 6.5,
+  "knn": 0.348,
+  "taste_auc": 0.754
+ },
+ {
+  "strategy": "select_6",
+  "fetched_per_product": 8.9,
+  "contaminated_pct": 6.6,
+  "knn": 0.343,
+  "taste_auc": 0.754
+ },
+ {
+  "strategy": "progressive_1",
+  "fetched_per_product": 1.13,
+  "contaminated_pct": 0.8,
+  "knn": 0.41,
+  "taste_auc": 0.772
+ },
+ {
+  "strategy": "progressive_2",
+  "fetched_per_product": 3.13,
+  "contaminated_pct": 1.1,
+  "knn": 0.384,
+  "taste_auc": 0.771
+ },
+ {
+  "strategy": "progressive_3",
+  "fetched_per_product": 4.68,
+  "contaminated_pct": 1.8,
+  "knn": 0.364,
+  "taste_auc": 0.761
+ },
+ {
+  "strategy": "progressive_4",
+  "fetched_per_product": 5.49,
+  "contaminated_pct": 2.1,
+  "knn": 0.354,
+  "taste_auc": 0.758
+ }
+]

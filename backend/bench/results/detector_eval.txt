@@ -1,0 +1,18 @@
+truth                                n  roles
+garment:alt                        200  garment=193, detail=7
+garment:collage                    200  garment=154, detail=46
+garment:colourway                  200  garment=191, detail=9
+garment:detail                     200  garment=197, detail=3
+garment:measure_overlay            200  garment=190, detail=10
+garment:real_photo                3781  garment=3644, detail=135, text_graphic=1, uncertain=1
+garment:watermark                  200  garment=193, detail=7
+non_garment:text_card              200  size_chart=200
+size_chart:size_dark               200  size_chart=200
+size_chart:size_diagram            200  size_chart=164, text_graphic=30, garment=6
+size_chart:size_photo              200  text_graphic=107, size_chart=56, garment=33, uncertain=4
+size_chart:size_table_cn           200  size_chart=200
+size_chart:size_table_en           200  size_chart=200
+
+garment photos wrongly excluded: 1/4981 (0.02%), of which real photos 1/3781
+size charts / text graphics excluded: 1157/1200 (96.4%)
+analysis time per image: median 10.4 ms

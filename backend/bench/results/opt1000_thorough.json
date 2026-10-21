@@ -1,0 +1,208 @@
+{
+ "label": "optimised",
+ "args": {
+  "products": 1000,
+  "sellers": 3,
+  "seed": 7,
+  "scale": 0.02,
+  "delay": 2.0,
+  "mode": "full",
+  "label": "optimised",
+  "out": "/tmp/claude-0/-home-user-wardrobe-scout-/430a51ab-ef74-5816-a32e-44f4f5b4aeb3/scratchpad/suite/opt1000_thorough.json",
+  "repeat": "none",
+  "quality": true,
+  "keep": null,
+  "server_args": ""
+ },
+ "catalogue": {
+  "products": 1000,
+  "images": 8904,
+  "images_per_product": 8.9,
+  "garment": 7008,
+  "size_chart": 1314,
+  "non_garment": 582
+ },
+ "app_code": "/home/user/wardrobe-scout-/backend/app",
+ "scan1": {
+  "wall_s": 212.37,
+  "cpu_s": 117.02,
+  "cpu_utilisation": 0.55,
+  "requests": {
+   "bench1.x.yupoo.com": 366,
+   "bench3.x.yupoo.com": 332,
+   "bench2.x.yupoo.com": 332,
+   "photo.yupoo.com": 3506
+  },
+  "requests_total": 4536,
+  "requests_per_product": 4.54,
+  "page_requests": 1030,
+  "image_requests": 3506,
+  "bytes": {
+   "bench1.x.yupoo.com": 1098201,
+   "bench3.x.yupoo.com": 981437,
+   "bench2.x.yupoo.com": 974118,
+   "photo.yupoo.com": 140795029
+  },
+  "image_mb": 140.8,
+  "conditional_requests": 0,
+  "http_status": {
+   "200": 4536
+  },
+  "politeness_floor_s": {
+   "if_hosts_serial": 9072.0,
+   "if_hosts_parallel": 7012.0
+  },
+  "scan_runs": [
+   {
+    "status": "succeeded",
+    "message": "356 albums seen (whole catalogue read), 356 new, 0 changed, 0 unchanged",
+    "pages_fetched": 9,
+    "products_seen": 356,
+    "products_new": 356,
+    "products_updated": 0
+   },
+   {
+    "status": "succeeded",
+    "message": "322 albums seen (whole catalogue read), 322 new, 0 changed, 0 unchanged",
+    "pages_fetched": 9,
+    "products_seen": 322,
+    "products_new": 322,
+    "products_updated": 0
+   },
+   {
+    "status": "succeeded",
+    "message": "322 albums seen (whole catalogue read), 322 new, 0 changed, 0 unchanged",
+    "pages_fetched": 9,
+    "products_seen": 322,
+    "products_new": 322,
+    "products_updated": 0
+   }
+  ]
+ },
+ "timers_s": {
+  "http_transfer": 241.99,
+  "image_analyse": 44.48,
+  "embed_image": 22.51,
+  "image_decode_resize_store": 10.89,
+  "db_upsert": 7.76,
+  "parse_album": 5.72,
+  "db_commit": 4.04,
+  "phash": 3.81,
+  "politeness_wait": 3.68,
+  "parse_listing": 2.43,
+  "dedup_match": 1.93,
+  "image_select": 0.02,
+  "dedup_groups": 0.01
+ },
+ "timer_calls": {
+  "db_commit": 4371,
+  "politeness_wait": 4536,
+  "http_transfer": 4533,
+  "parse_listing": 27,
+  "image_decode_resize_store": 3506,
+  "image_analyse": 3506,
+  "phash": 3506,
+  "embed_image": 3506,
+  "image_select": 1084,
+  "dedup_match": 1082,
+  "parse_album": 1000,
+  "db_upsert": 1000,
+  "dedup_groups": 1
+ },
+ "peak_rss_mb": 334.6,
+ "rss_before_scan_mb": 183.2,
+ "drain": {
+  "wall_s": 0.0,
+  "requests": {}
+ },
+ "accuracy": {
+  "catalogue_products": 1000,
+  "products_found": 1000,
+  "products_active": 1000,
+  "products_with_image_vector": 1000,
+  "removed_from_catalogue": 0,
+  "removed_still_active": 0,
+  "analysis_states": {
+   "analysed": 918,
+   "deep": 82
+  },
+  "vector_images_per_product": 1.9,
+  "products_vector_contaminated_pct": 1.2,
+  "products_vector_first_image_not_garment_pct": 0.8,
+  "products_vector_without_any_garment_pct": 0.0,
+  "vector_images_non_garment_pct": 0.6,
+  "vector_images_by_kind": {
+   "hero": 841,
+   "detail": 554,
+   "alt": 246,
+   "colourway": 107,
+   "neardup": 88,
+   "collage": 32,
+   "watermark": 16,
+   "size_photo": 12,
+   "measure_overlay": 5
+  },
+  "stored_image_files": 3513,
+  "role_confusion": {
+   "garment": {
+    "garment": 3100,
+    "detail": 108,
+    "text_graphic": 5,
+    "size_chart": 1
+   },
+   "non_garment": {
+    "repeated": 35,
+    "size_chart": 5
+   },
+   "size_chart": {
+    "size_chart": 204,
+    "text_graphic": 25,
+    "uncertain": 3,
+    "repeated": 17,
+    "garment": 10
+   }
+  },
+  "dedup": {
+   "true_duplicate_pairs": 83,
+   "found_strong": 78,
+   "found_any_photo_match": 80,
+   "colourway_pairs": 72,
+   "colourway_wrongly_photo_matched": 10,
+   "colourway_wrongly_strong": 6,
+   "false_strong_other": 6,
+   "false_photo_match_other": 10
+  },
+  "visual_5nn_class_accuracy": 0.392
+ },
+ "recommendation": {
+  "dark_outerwear": {
+   "p10_by_round": [
+    0.3,
+    0.2,
+    0.4,
+    0.5,
+    0.3,
+    0.5,
+    0.7,
+    0.5
+   ],
+   "p10_mean": 0.425,
+   "p10_rounds_2_8": 0.443
+  },
+  "light_summer": {
+   "p10_by_round": [
+    0.0,
+    0.5,
+    0.1,
+    0.4,
+    0.7,
+    0.3,
+    0.4,
+    0.2
+   ],
+   "p10_mean": 0.325,
+   "p10_rounds_2_8": 0.371
+  },
+  "p10_mean_all": 0.375
+ }
+}

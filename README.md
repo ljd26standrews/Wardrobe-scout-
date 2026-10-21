@@ -85,7 +85,7 @@ Everything lives in `.env` at the repo root (copied from `.env.example`) and in 
 | `WS_REQUEST_DELAY_SECONDS` | `2.0` | Minimum delay between requests to the same host (each host is limited separately; hosts run in parallel) |
 | `WS_IMAGE_REQUEST_DELAY_SECONDS` | same as above | Minimum delay between requests to an image host (CDN). Unset = unchanged politeness |
 | `WS_MAX_PAGES_PER_SCAN` | `250` | Catalogue listing pages per scan (about 40 products each). If this is reached, the scan says the listing was not read to the end |
-| `WS_ANALYSIS_IMAGES` | `1` | Useful garment photos analysed per product in a normal scan. `2` doubles photo requests and finds more cross-seller duplicates (see `backend/bench/RESULTS.md`) |
+| `WS_ANALYSIS_IMAGES` | `1` | Useful garment photos analysed per product in a normal scan. `2` uses ~1.9× the photo requests (~1.6× all requests) and finds more cross-seller duplicates: 78 of 83 instead of 54 of 83 in the 1,000-product benchmark, with a few more false matches (see `backend/bench/RESULTS.md`) |
 | `WS_MAX_EXAMINE_IMAGES` | `6` | At most this many photos are downloaded per product when looking for that many useful views (size charts and banners are skipped) |
 | `WS_DEEP_IMAGES` | `8` | Photos fetched for products that get deep analysis: duplicate candidates, and products you love, save or buy |
 | `WS_REFRESH_DAYS` | `14` | Unchanged product pages are re-read after this long, spread across scans |
@@ -226,7 +226,7 @@ Matches are tiered, and the UI never blurs the tiers:
 | One similar photograph | a single photo matches | no (hint only) |
 | Visually similar | embedding + title similarity | no |
 
-The per-photo rule was chosen on a synthetic benchmark (crop / resize / watermark / recompression of re-posted photos versus different products). It cut false photo matches by about 85% while finding more genuine re-posts than the previous rule. Re-tune it on real labelled pairs. You can confirm or reject any suggestion, and your decision is never overridden.
+The per-photo rule was chosen on a synthetic benchmark during development (crop / resize / watermark / recompression of re-posted photos versus different products). That benchmark is not checked in, so treat its reported improvement (about 85% fewer false photo matches) as unverified here. Re-tune it on real labelled pairs. You can confirm or reject any suggestion, and your decision is never overridden.
 
 ## Optional AI (Anthropic Claude)
 
@@ -314,8 +314,8 @@ backend/eval/    recommender evaluation with simulated shoppers
 - **Without CLIP**, visual similarity is approximate (colour, tone and shape). Install CLIP for real garment understanding.
 - The **landed-cost** figure is an estimate from editable assumptions (shipping rates, agent fee, VAT 20%, 12% duty above £135). Check current UK rules and your agent's prices.
 - **Scanning speed was measured against a local simulated catalogue.** It uses real garment photos, rendered size charts and modelled network latency (`backend/bench/`). It was not measured against live sellers.
-  - **Size-chart detection.** It wrongly excluded 1 of 3,781 real garment photos. It recognised 96% of rendered charts; photographed charts, at ~83%, are the weakest case. Real sellers' chart designs may differ, so a chart that slips through is labelled *uncertain* or *garment* rather than causing an error.
-  - **Duplicate detection.** Analysing one photo per product finds fewer cross-seller duplicates than downloading every photo did (about two thirds of re-posts, against nearly all). Duplicate candidates and anything you love or save get a deep check. Set `WS_ANALYSIS_IMAGES=2` for more thorough matching at roughly twice the photo requests.
+  - **Size-chart detection.** It wrongly excluded 1 of 3,781 real garment photos. It recognised 96% of rendered charts; photographed charts, at 81.5%, are the weakest case (`backend/bench/RESULTS.md`). Real sellers' chart designs may differ, so a chart that slips through is labelled *uncertain* or *garment* rather than causing an error.
+  - **Duplicate detection.** Analysing one photo per product finds fewer cross-seller duplicates than downloading every photo did (54 of 83 re-posts against 81 of 83 at 1,000 products, and 132 of 257 against 254 of 257 at 3,000, where the deep-check budget ran out; the original's extra 'matches' were mostly false — see `backend/bench/RESULTS.md`). Duplicate candidates and anything you love or save get a deep check. Set `WS_ANALYSIS_IMAGES=2` for more thorough matching at roughly twice the photo requests.
 - **Outfit suggestions** use colour-harmony and layering rules, not a learned fashion model.
 - Duplicate grouping by **shared photos** is a strong hint but not proof of the same batch. The UI says so, and only your confirmation (or a shared purchase link) makes a match "confirmed". The photo-matching thresholds were tuned on synthetic images and still need checking on real seller photos.
 - Some catalogues may contain replicas of branded goods. Check your local rules on importing them; UK Border Force can seize counterfeit goods.

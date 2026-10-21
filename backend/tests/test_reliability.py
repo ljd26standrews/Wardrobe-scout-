@@ -133,8 +133,15 @@ def _rich_history(db):
 
 
 def _counts(db) -> dict:
-    from app.models import (Evidence, Feedback, InspirationImage, Product, ProductRelation, SavedItem,
-                            WardrobeItem)  # fmt: skip
+    from app.models import (
+        Evidence,
+        Feedback,
+        InspirationImage,
+        Product,
+        ProductRelation,
+        SavedItem,
+        WardrobeItem,  # fmt: skip
+    )
 
     return {
         "products": db.query(Product).count(),
@@ -315,7 +322,9 @@ def test_wrapped_purchase_links_resolve_to_their_destination():
     from app.ingestion.parsing import canonical_url, extract_purchase_links, weidian_item_id
     from app.ingestion.yupoo import parse_album_page
 
-    assert extract_purchase_links(f"购买链接 {WRAPPED}") == {"weidian": "https://weidian.com/item.html?itemID=7707075268"}
+    assert extract_purchase_links(f"购买链接 {WRAPPED}") == {
+        "weidian": "https://weidian.com/item.html?itemID=7707075268"
+    }
     assert weidian_item_id(WRAPPED) == "7707075268"  # links stored before this fix still match
     html = (f'<span class="showalbumheader__gallerytitle">coat ¥500</span><div class="showalbumheader__gallerysubtitle">'
             f'<a href="{WRAPPED}">微店</a></div>')  # fmt: skip
@@ -346,12 +355,16 @@ def test_blocked_thumbnail_is_not_retried_through_the_original(env, web):
     web.add("https://photo.yupoo.com/s/a/medium.jpg", "forbidden", status=403)
     web.add("https://photo.yupoo.com/s/a/big.jpg", make_image(), ctype="image/jpeg")
     with web.client() as c, pytest.raises(BlockedError):
-        fetch_and_analyse(c, "https://photo.yupoo.com/s/a/medium.jpg", None, fallback="https://photo.yupoo.com/s/a/big.jpg")
+        fetch_and_analyse(
+            c, "https://photo.yupoo.com/s/a/medium.jpg", None, fallback="https://photo.yupoo.com/s/a/big.jpg"
+        )
     assert not any(str(r.url).endswith("big.jpg") for r in web.requests)
     # A merely missing thumbnail still falls back to the original.
     web.add("https://photo.yupoo.com/s/b/big.jpg", make_image(), ctype="image/jpeg")
     with web.client() as c:
-        fetch_and_analyse(c, "https://photo.yupoo.com/s/b/medium.jpg", None, fallback="https://photo.yupoo.com/s/b/big.jpg")
+        fetch_and_analyse(
+            c, "https://photo.yupoo.com/s/b/medium.jpg", None, fallback="https://photo.yupoo.com/s/b/big.jpg"
+        )
 
 
 def test_import_stops_at_a_blocked_image_host(db, web):

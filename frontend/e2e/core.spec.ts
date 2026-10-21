@@ -80,9 +80,19 @@ test("product page: add independent evidence changes the quality label", async (
 });
 
 test("compare shows same-photo alternative across sellers", async ({ page }) => {
-  await page.goto("/browse");
-  await page.getByTestId("browse-search").fill("two-way zip wool jacket");
-  await page.getByTestId("product-card").first().getByRole("link").first().click();
+  // Pick the listing that has a shared-photo match. Browse order depends on ranking, which earlier tests'
+  // feedback changes, so "the first search result" made this test flaky.
+  const found = await (await page.request.get("/api/products?q=two-way%20zip%20wool%20jacket&page_size=12")).json();
+  let target: number | null = null;
+  for (const p of found.items as { id: number }[]) {
+    const cmp = await (await page.request.get(`/api/products/${p.id}/compare`)).json();
+    if (JSON.stringify(cmp).includes("shared_photos")) {
+      target = p.id;
+      break;
+    }
+  }
+  expect(target, "a jacket listing with a shared-photo match").not.toBeNull();
+  await page.goto(`/product/${target}`);
   await page.locator('main a[href^="/compare?id="]').first().click();
   await expect(page.getByText(/Several identical photographs/).first()).toBeVisible();
   await expect(page.getByText(/appears to be the same product/)).toBeVisible();
@@ -102,7 +112,8 @@ test("scan panel shows catalogue coverage from the server", async ({ page }) => 
   await page.goto("/sellers");
   const panel = page.getByTestId("scan-panel");
   await expect(panel.getByText("Catalogue coverage")).toBeVisible();
-  await expect(panel.getByText(/Demo Seller A/)).toBeVisible();
+  // The seller may appear twice (active scan card and coverage list) while the demo scan's last steps run.
+  await expect(panel.getByText(/Demo Seller A/).first()).toBeVisible();
   await expect(panel.getByText(/analysed/).first()).toBeVisible();
   // Survives a reload: the state lives on the server, not in this tab
   await page.reload();
