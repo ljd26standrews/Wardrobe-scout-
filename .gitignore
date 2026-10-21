@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+backend/.venv/
+backend/data/
+.pytest_cache/
+.ruff_cache/
+# Node
+frontend/node_modules/
+frontend/.next/
+frontend/test-results/
+frontend/next-env.d.ts
+frontend/tsconfig.tsbuildinfo
+# Local
+.env
+.e2e-data/
+*.db

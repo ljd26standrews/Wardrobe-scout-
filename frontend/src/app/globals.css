@@ -1,0 +1,130 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Palette: warm paper, ink, taupe. HSL triplets consumed by Tailwind. */
+@layer base {
+  :root {
+    --background: 38 30% 96%;
+    --foreground: 30 8% 11%;
+    --card: 40 33% 98%;
+    --card-foreground: 30 8% 11%;
+    --popover: 40 33% 99%;
+    --popover-foreground: 30 8% 11%;
+    --primary: 30 8% 12%;
+    --primary-foreground: 40 33% 97%;
+    --secondary: 36 20% 90%;
+    --secondary-foreground: 30 8% 15%;
+    --muted: 36 18% 91%;
+    --muted-foreground: 30 6% 42%;
+    --accent: 34 16% 86%;
+    --accent-foreground: 30 8% 12%;
+    --destructive: 4 55% 45%;
+    --destructive-foreground: 40 33% 97%;
+    --positive: 140 22% 34%;
+    --caution: 32 62% 40%;
+    --love: 352 45% 46%;
+    --div-pos: 206 54% 40%;
+    --div-neg: 17 55% 46%;
+    --border: 34 16% 84%;
+    --input: 34 16% 82%;
+    --ring: 30 8% 30%;
+    --radius: 0.75rem;
+    color-scheme: light;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --background: 30 6% 7%;
+      --foreground: 38 22% 90%;
+      --card: 30 6% 9.5%;
+      --card-foreground: 38 22% 90%;
+      --popover: 30 6% 10%;
+      --popover-foreground: 38 22% 90%;
+      --primary: 38 25% 90%;
+      --primary-foreground: 30 8% 9%;
+      --secondary: 30 5% 15%;
+      --secondary-foreground: 38 22% 88%;
+      --muted: 30 5% 14%;
+      --muted-foreground: 34 8% 62%;
+      --accent: 30 5% 18%;
+      --accent-foreground: 38 22% 90%;
+      --destructive: 4 55% 58%;
+      --positive: 140 25% 55%;
+      --caution: 34 60% 58%;
+      --love: 352 50% 62%;
+      --div-pos: 207 50% 54%;
+      --div-neg: 19 53% 54%;
+      --border: 30 5% 20%;
+      --input: 30 5% 22%;
+      --ring: 38 20% 70%;
+      color-scheme: dark;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --background: 30 6% 7%;
+    --foreground: 38 22% 90%;
+    --card: 30 6% 9.5%;
+    --card-foreground: 38 22% 90%;
+    --popover: 30 6% 10%;
+    --popover-foreground: 38 22% 90%;
+    --primary: 38 25% 90%;
+    --primary-foreground: 30 8% 9%;
+    --secondary: 30 5% 15%;
+    --secondary-foreground: 38 22% 88%;
+    --muted: 30 5% 14%;
+    --muted-foreground: 34 8% 62%;
+    --accent: 30 5% 18%;
+    --accent-foreground: 38 22% 90%;
+    --destructive: 4 55% 58%;
+    --positive: 140 25% 55%;
+    --caution: 34 60% 58%;
+    --love: 352 50% 62%;
+    --div-pos: 207 50% 54%;
+    --div-neg: 19 53% 54%;
+    --border: 30 5% 20%;
+    --input: 30 5% 22%;
+    --ring: 38 20% 70%;
+    color-scheme: dark;
+  }
+
+  * {
+    @apply border-border;
+  }
+  html {
+    -webkit-tap-highlight-color: transparent;
+  }
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-feature-settings: "ss01", "cv11";
+  }
+  h1,
+  h2,
+  h3 {
+    @apply font-serif font-medium tracking-tight;
+  }
+}
+
+@layer components {
+  .label {
+    @apply text-[11px] font-medium uppercase tracking-label text-muted-foreground;
+  }
+  .hairline {
+    @apply border-border/80;
+  }
+  .page-title {
+    @apply font-serif text-4xl font-medium leading-none tracking-tight md:text-5xl;
+  }
+  .safe-bottom {
+    padding-bottom: max(env(safe-area-inset-bottom), 0.5rem);
+  }
+}
+
+/* Hide scrollbars on horizontal galleries while keeping them scrollable */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  scrollbar-width: none;
+}

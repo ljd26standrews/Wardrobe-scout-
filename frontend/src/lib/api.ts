@@ -1,0 +1,244 @@
+// Typed client for the FastAPI backend (proxied at /api by Next.js).
+
+export type Dimension = {
+  score: number | null;
+  label: string;
+  confidence: number;
+  evidence_counts?: Record<string, number>;
+  notes?: string[];
+};
+
+export type Quality = {
+  status: "Unverified" | "Limited evidence" | "Evidence-backed";
+  overall_confidence: number;
+  quality_score: number | null;
+  dimensions: {
+    design_compatibility: Dimension;
+    construction: Dimension;
+    material: Dimension;
+    seller_reliability: Dimension;
+    value: Dimension;
+  };
+};
+
+export type LandedCost = {
+  goods_gbp: number;
+  domestic_shipping_gbp: number;
+  agent_fee_gbp: number;
+  international_shipping_gbp: number;
+  estimated_weight_kg: number;
+  duty_gbp: number;
+  vat_gbp: number;
+  handling_gbp: number;
+  total_gbp: number;
+  assumptions: string;
+};
+
+export type Recommendation = {
+  score: number;
+  design_score: number;
+  components: Record<string, number>;
+  contributions: Record<string, number>;
+  reasons: string[];
+  cautions: string[];
+  nearest_positive: { label: string; product_id: number | null; kind: string } | null;
+  explore: boolean;
+};
+
+export type Evidence = {
+  id: number;
+  kind: string;
+  kind_label: string;
+  aspect: string;
+  claim: string;
+  polarity: number;
+  strength: number;
+  source_url: string | null;
+  source_title: string | null;
+  is_affiliate: boolean;
+  captured_at: string | null;
+  created_by: string;
+  scope?: "seller";
+};
+
+export type Product = {
+  id: number;
+  title: string;
+  title_original: string;
+  seller: { id: number; name: string; platform: string; reputation: string } | null;
+  seller_item_code: string | null;
+  brand: string | null;
+  category: string | null;
+  colours: string[];
+  materials: { fibre: string; pct: number | null }[];
+  material_text: string | null;
+  gsm: number | null;
+  sizes: string[];
+  seasons: string[];
+  fit_tags: string[];
+  logo_level: string;
+  price: number | null;
+  currency: string;
+  price_gbp: number | null;
+  landed_cost: LandedCost | null;
+  source_url: string | null;
+  links: Record<string, string>;
+  images: { id: number; src: string | null; remote_url: string | null; status: string }[];
+  status: string;
+  data_origin: "scraped" | "manual" | "csv" | "json" | "bookmarklet" | "seed";
+  completeness: "complete" | "partial" | "seed_unverified";
+  is_new: boolean;
+  first_seen_at: string | null;
+  last_seen_at: string | null;
+  group_id: number | null;
+  quality: Quality;
+  pros: string[];
+  cons: string[];
+  saved: { list: string; priority: number; note: string | null; target_size?: string | null; added_at?: string } | null;
+  recommendation?: Recommendation;
+  // detail only
+  description?: string | null;
+  description_original?: string | null;
+  translation_method?: string | null;
+  evidence?: Evidence[];
+  observations?: { observed_at: string; price: number | null; sizes: string[]; status: string; change: string | null; source_url: string }[];
+  missing?: string[];
+};
+
+export type Seller = {
+  id: number;
+  name: string;
+  slug: string;
+  platform: string;
+  base_url: string | null;
+  status: "active" | "paused";
+  priority: number;
+  notes: string | null;
+  scan_interval_hours: number;
+  reputation_status: string;
+  evidence_count: number;
+  products: { active: number; unavailable: number; scraped: number; manual: number; seed: number; new: number; images_downloaded: number };
+  last_scan_at: string | null;
+  last_scan_status: string | null;
+  last_scan_message: string | null;
+  last_run: { pages_fetched: number; products_seen: number; new: number; updated: number; errors: string[]; status: string } | null;
+};
+
+export type Job = {
+  id: number;
+  kind: string;
+  status: "queued" | "running" | "succeeded" | "failed" | "partial";
+  params: Record<string, unknown>;
+  progress: number;
+  message: string | null;
+  result: Record<string, unknown>;
+  log: string[];
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+};
+
+export type Comparison = {
+  product: Product;
+  alternatives: { relation: string; relation_label: string; score: number; signals: Record<string, unknown>; user_confirmed: boolean | null; product: Product }[];
+  verdict: { recommendation: string; notes: string[] };
+};
+
+export type WardrobeItem = {
+  id: number;
+  name: string;
+  category: string | null;
+  brand: string | null;
+  colours: string[];
+  materials: { fibre: string; pct: number | null }[];
+  seasons: string[];
+  notes: string | null;
+  rating: number | null;
+  source_url: string | null;
+  product_id: number | null;
+  image: string | null;
+  added_at: string;
+};
+
+export type OutfitPiece = { id: number; name: string; category: string | null; colours: string[]; kind: "owned" | "candidate"; image: string | null };
+
+export type WardrobeResponse = {
+  items: WardrobeItem[];
+  analysis: {
+    count: number;
+    by_category: Record<string, number>;
+    by_group: Record<string, number>;
+    gaps: { season: string; category: string; colours: string[]; have: number; want: number }[];
+    redundancy: { category: string; colour_family: string; count: number; advice: string }[];
+    outfits: { pieces: OutfitPiece[]; score: number; uses_candidates: number }[];
+  };
+  budget: { monthly_gbp: number | null; season_gbp: number | null };
+};
+
+export type Facets = {
+  brands: { value: string; count: number }[];
+  categories: { value: string; count: number }[];
+  materials: { value: string; count: number }[];
+  sizes: { value: string; count: number }[];
+  seasons: { value: string; count: number }[];
+  sellers: { value: number; label: string; count: number }[];
+  price_range: [number | null, number | null];
+  total: number;
+};
+
+export class ApiError extends Error {
+  constructor(public status: number, message: string) {
+    super(message);
+  }
+}
+
+async function handle<T>(res: Response): Promise<T> {
+  if (!res.ok) {
+    let msg = `${res.status} ${res.statusText}`;
+    try {
+      const body = await res.json();
+      msg = typeof body.detail === "string" ? body.detail : Array.isArray(body.detail) ? body.detail.map((d: { msg: string }) => d.msg).join("; ") : body.error ?? msg;
+    } catch {
+      /* not JSON */
+    }
+    if (res.status === 500 || res.status === 502 || res.status === 504) msg = `The backend is not responding (${res.status}). Is it running?`;
+    throw new ApiError(res.status, msg);
+  }
+  return res.json() as Promise<T>;
+}
+
+export const fetcher = <T,>(url: string): Promise<T> => fetch(url).then((r) => handle<T>(r));
+
+export const api = {
+  get: <T,>(url: string) => fetch(url).then((r) => handle<T>(r)),
+  post: <T,>(url: string, body?: unknown) =>
+    fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) }).then((r) => handle<T>(r)),
+  put: <T,>(url: string, body: unknown) =>
+    fetch(url, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then((r) => handle<T>(r)),
+  patch: <T,>(url: string, body: unknown) =>
+    fetch(url, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then((r) => handle<T>(r)),
+  del: <T,>(url: string) => fetch(url, { method: "DELETE" }).then((r) => handle<T>(r)),
+  form: <T,>(url: string, data: FormData) => fetch(url, { method: "POST", body: data }).then((r) => handle<T>(r)),
+};
+
+export function qs(params: Record<string, string | number | boolean | string[] | number[] | null | undefined>): string {
+  const sp = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) {
+    if (v == null || v === "" || (Array.isArray(v) && v.length === 0)) continue;
+    if (Array.isArray(v)) v.forEach((x) => sp.append(k, String(x)));
+    else sp.set(k, String(v));
+  }
+  const s = sp.toString();
+  return s ? `?${s}` : "";
+}
+
+export const REASONS: { value: string; label: string; hint: string }[] = [
+  { value: "silhouette", label: "Dislike the silhouette", hint: "Learns about cut/fit" },
+  { value: "colour", label: "Dislike the colour", hint: "Only this colour is down-weighted" },
+  { value: "logo", label: "Dislike the logo", hint: "Learns about branding visibility" },
+  { value: "fabric", label: "Fabric doesn't appeal", hint: "Learns about materials" },
+  { value: "construction", label: "Poor apparent construction", hint: "Raises quality strictness" },
+  { value: "too_expensive", label: "Too expensive for the quality", hint: "Sets a value ceiling — not a taste dislike" },
+  { value: "already_own", label: "Already own something similar", hint: "Avoids redundancy — not a taste dislike" },
+  { value: "specific_item", label: "Don't like this specific item", hint: "Hides near-identical listings only" },
+];

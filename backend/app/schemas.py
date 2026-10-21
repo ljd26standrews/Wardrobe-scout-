@@ -1,0 +1,135 @@
+"""Pydantic request models (input validation)."""
+
+from __future__ import annotations
+
+from typing import Literal
+
+from pydantic import BaseModel, Field, HttpUrl, field_validator
+
+from .services.recommender import REASONS
+
+Action = Literal["love", "like", "maybe", "dislike", "skip", "purchased", "unsave"]
+EvidenceKindT = Literal["verified", "seller_claim", "buyer_report", "ai_visual", "user_note"]
+Aspect = Literal[
+    "material",
+    "gsm",
+    "construction",
+    "stitching",
+    "hardware",
+    "fit",
+    "accuracy",
+    "defect",
+    "sizing",
+    "reputation",
+    "service",
+    "consistency",
+    "batch",
+    "value",
+]
+
+
+class FeedbackIn(BaseModel):
+    product_id: int
+    action: Action
+    reasons: list[str] = Field(default_factory=list)
+    note: str | None = Field(default=None, max_length=2000)
+    context: dict = Field(default_factory=dict)
+
+    @field_validator("reasons")
+    @classmethod
+    def _valid_reasons(cls, v: list[str]) -> list[str]:
+        bad = [r for r in v if r not in REASONS]
+        if bad:
+            raise ValueError(f"unknown reasons: {bad}")
+        return v
+
+
+class SavedPatch(BaseModel):
+    list_name: Literal["loved", "liked", "maybe", "wishlist"] | None = None
+    priority: int | None = Field(default=None, ge=1, le=3)
+    note: str | None = Field(default=None, max_length=2000)
+    target_size: str | None = Field(default=None, max_length=20)
+
+
+class EvidenceIn(BaseModel):
+    kind: EvidenceKindT
+    aspect: Aspect
+    claim: str = Field(min_length=3, max_length=4000)
+    polarity: int = Field(default=0, ge=-1, le=1)
+    strength: float = Field(default=0.7, ge=0, le=1)
+    source_url: str | None = Field(default=None, max_length=1000)
+    source_title: str | None = Field(default=None, max_length=300)
+    is_affiliate: bool = False
+
+
+class SellerIn(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    base_url: HttpUrl | None = None
+    platform: Literal["yupoo", "weidian", "shopify", "website", "manual"] = "yupoo"
+    priority: int = Field(default=3, ge=1, le=5)
+    notes: str | None = None
+    scan_interval_hours: int = Field(default=24, ge=1, le=24 * 30)
+
+
+class SellerPatch(BaseModel):
+    name: str | None = None
+    base_url: HttpUrl | None = None
+    platform: Literal["yupoo", "weidian", "shopify", "website", "manual"] | None = None
+    status: Literal["active", "paused"] | None = None
+    priority: int | None = Field(default=None, ge=1, le=5)
+    notes: str | None = None
+    scan_interval_hours: int | None = Field(default=None, ge=1, le=24 * 30)
+    reputation_status: Literal["unassessed", "insufficient evidence", "trusted", "mixed", "concerns"] | None = None
+
+
+class ScanIn(BaseModel):
+    mode: Literal["incremental", "full"] = "incremental"
+
+
+class UrlImportIn(BaseModel):
+    url: HttpUrl
+    seller_id: int | None = None
+    watch: bool = True
+
+
+class BookmarkletIn(BaseModel):
+    url: HttpUrl
+    html: str = Field(max_length=8_000_000)
+    seller_id: int | None = None
+
+
+class ProductPatch(BaseModel):
+    title_en: str | None = None
+    brand: str | None = None
+    category: str | None = None
+    colours: list[str] | None = None
+    material_text: str | None = None
+    gsm: int | None = Field(default=None, ge=50, le=1200)
+    price: float | None = Field(default=None, ge=0)
+    currency: str | None = None
+    sizes: list[str] | None = None
+    seasons: list[str] | None = None
+    fit_tags: list[str] | None = None
+    logo_level: Literal["none", "subtle", "visible", "unknown"] | None = None
+    status: Literal["active", "unavailable", "removed"] | None = None
+
+
+class MatchDecision(BaseModel):
+    other_id: int
+    same: bool
+
+
+class LeadAccept(BaseModel):
+    aspect: Aspect = "reputation"
+    polarity: int = Field(ge=-1, le=1)
+    claim: str = Field(min_length=3, max_length=4000)
+    product_id: int | None = None
+    seller_id: int | None = None
+    is_affiliate: bool | None = None
+    strength: float = Field(default=0.7, ge=0, le=1)
+
+
+class CommunitySearchIn(BaseModel):
+    query: str = Field(min_length=2, max_length=200)
+    seller_id: int | None = None
+    product_id: int | None = None

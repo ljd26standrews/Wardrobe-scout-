@@ -1,0 +1,6 @@
+# Optional CLIP image embeddings (much better visual similarity). ~600 MB model download on first use.
+# CPU-only PyTorch keeps the install smaller:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+open_clip_torch>=2.24
+torch>=2.2
+torchvision>=0.17
