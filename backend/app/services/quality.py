@@ -98,36 +98,45 @@ def assess(
     material = score_dimension([e for e in ev if e.aspect in DIMENSIONS["material"]])
     seller_dim = score_dimension(seller_evidence + [e for e in ev if e.aspect in {"sizing", "service"}])
 
-    # Value: price relative to category median, only meaningful with quality evidence
-    value = {"score": None, "label": "Unknown", "confidence": 0.0, "notes": []}
+    # Value = what you get for the price. Price alone says nothing about value: a cheap unverified item is
+    # not "good value", so without quality evidence the score stays unknown. The one exception is a
+    # like-for-like comparison: the very same item listed cheaper elsewhere makes this listing worse value.
+    value = {
+        "score": None,
+        "label": "Unknown — quality not yet demonstrated",
+        "confidence": 0.0,
+        "notes": [],
+        "price_position": None,
+    }
     if p.price:
         stats = price_stats if price_stats is not None else category_price_stats(db)
         med = stats.get(p.category or "other")
         q_scores = [d["score"] for d in (construction, material) if d["score"] is not None]
         q = sum(q_scores) / len(q_scores) if q_scores else None
         notes = []
+        ratio = None
         if med:
             ratio = p.price / med
+            value["price_position"] = round(ratio, 2)
             notes.append(f"{ratio:.1f}× the median price for {p.category or 'this category'} in your catalogue")
-            base = 60 - 25 * math.log2(max(ratio, 0.1))
-            if q is not None:
-                base += (q - 55) * 0.6
-            value["score"] = round(max(0, min(100, base)))
+        score = None
+        if q is not None:
+            # Quality dominates; price matters, but less (you will pay more when quality justifies it).
+            score = 50 + (q - 55) * 0.8 - (15 * math.log2(max(ratio, 0.1)) if ratio else 0)
         if cheaper_equivalent:
             notes.append(
-                f"Same photos listed at {cheaper_equivalent['price']:g} by {cheaper_equivalent['seller']} "
-                f"({cheaper_equivalent['saving_pct']:.0f}% cheaper)"
+                f"Very likely the same item listed at {cheaper_equivalent['price']:g} by "
+                f"{cheaper_equivalent['seller']} ({cheaper_equivalent['saving_pct']:.0f}% cheaper)"
             )
-            if value["score"] is not None:
-                value["score"] = max(0, value["score"] - min(30, cheaper_equivalent["saving_pct"]))
+            score = (score if score is not None else 50) - min(40, cheaper_equivalent["saving_pct"])
         value["notes"] = notes
-        value["confidence"] = round(0.25 + (0.5 if q is not None else 0) + (0.15 if med else 0), 2)
-        if value["score"] is None:
-            value["label"] = "Unknown"
-        elif q is None:
-            value["label"] = "Uncertain — quality not demonstrated"
-        else:
-            value["label"] = "Good" if value["score"] >= 60 else "Fair" if value["score"] >= 40 else "Weak"
+        if score is not None:
+            value["score"] = round(max(0, min(100, score)))
+            value["confidence"] = round((0.3 if cheaper_equivalent else 0) + (0.5 if q is not None else 0) + 0.1, 2)
+            if q is None:
+                value["label"] = "Same item cheaper elsewhere"
+            else:
+                value["label"] = "Good" if value["score"] >= 60 else "Fair" if value["score"] >= 40 else "Weak"
 
     dims_conf = [construction["confidence"], material["confidence"], seller_dim["confidence"]]
     overall_conf = round(sum(dims_conf) / 3, 2)

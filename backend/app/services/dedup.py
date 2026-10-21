@@ -4,12 +4,17 @@ Relation types (strongest first) - the UI keeps these clearly distinct:
 
 * ``confirmed_identical``   you confirmed two listings are the same product.
 * ``same_purchase_link``    both listings point at the same Weidian/Taobao item.
-* ``shared_photos``         listings use near-identical photographs (perceptual
-                            hash). Strong sign of the same source / batch, but
-                            NOT proof: sellers re-use factory photos.
-* ``visually_similar``      embeddings + text are close; may be a different
-                            product of a similar design.
+* ``shared_photos``         at least TWO different photographs match (perceptual hash + embedding).
+                            Strong hint of the same source photos - still NOT proof of the same batch,
+                            because sellers re-use factory photos.
+* ``similar_photo``         exactly one photo matches. Shown as a weak hint only; it does not affect
+                            value scores, groups or verdicts.
+* ``visually_similar``      embeddings + text are close; may be a different product of a similar design.
 * ``not_same``              you rejected a suggested match (never re-suggested).
+
+Per-photo thresholds were chosen on a synthetic benchmark (audit, Oct 2026): ``phash <= 10`` and lite
+cosine ``>= 0.97`` cut false photo matches by ~85% versus the old ``<= 6 / 0.90`` rule while finding more
+re-posted photos (crop/resize/watermark/recompression). They should be re-tuned on real labelled pairs.
 """
 
 from __future__ import annotations
@@ -19,58 +24,63 @@ from collections import defaultdict
 
 import numpy as np
 from rapidfuzz import fuzz
-from sqlalchemy import or_
+from sqlalchemy import String, cast, or_
 from sqlalchemy.orm import Session
 
 from ..ingestion.parsing import weidian_item_id
 from ..models import Product, ProductImage, ProductRelation
 from . import embeddings as emb
-from .images import hamming
 
-PHASH_MAX_DISTANCE = 6
+PHASH_MAX_DISTANCE = 10
+# Perceptual hashes ignore colour, so the same silhouette in another colourway collides.
+# A hash hit therefore also needs the per-image embeddings (which encode colour/content) to agree.
+SAME_PHOTO_MIN_COSINE = {"lite": 0.97, "clip": 0.95}
+MIN_PHOTOS_FOR_SHARED = 2
 STRONG_RELATIONS = {"confirmed_identical", "same_purchase_link", "shared_photos"}
 
 
-def _chunks(h: str) -> list[str]:
-    # 64-bit hash -> 8 chunks of 8 bits; distance <= 7 guarantees one exact chunk match.
-    return [f"{i}:{h[i * 2 : (i + 1) * 2]}" for i in range(len(h) // 2)]
+def _min_cosine(backend: str | None) -> float:
+    return SAME_PHOTO_MIN_COSINE["clip" if (backend or "").startswith("clip") else "lite"]
 
 
-# Perceptual hashes ignore colour, so the same silhouette in another colourway collides.
-# A phash hit therefore also needs the per-image embeddings (which encode colour) to agree.
-SAME_PHOTO_MIN_COSINE = 0.9
+def _popcount64(x: np.ndarray) -> np.ndarray:
+    return np.unpackbits(x.view(np.uint8).reshape(-1, 8), axis=1).sum(1)
 
 
 class PhashIndex:
+    """Exact nearest-photo search over all perceptual hashes (vectorised; fine for ~100k photos)."""
+
     def __init__(self) -> None:
-        self.buckets: dict[str, set[tuple[int, str, int]]] = defaultdict(set)
+        self._hashes: list[int] = []
+        self._pids: list[int] = []
+        self._image_ids: list[int] = []
         self.vectors: dict[int, np.ndarray] = {}
+        self._arr: np.ndarray | None = None
 
     def add(self, product_id: int, h: str, image_id: int = 0, vector: np.ndarray | None = None) -> None:
-        for c in _chunks(h):
-            self.buckets[c].add((product_id, h, image_id))
+        self._hashes.append(int(h, 16))
+        self._pids.append(product_id)
+        self._image_ids.append(image_id)
         if vector is not None:
             self.vectors[image_id] = vector
+        self._arr = None
 
-    def query(self, h: str, max_dist: int = PHASH_MAX_DISTANCE, vector: np.ndarray | None = None) -> dict[int, int]:
-        """Return {product_id: best distance} for near-identical photos."""
-        cands: set[tuple[int, str, int]] = set()
-        for c in _chunks(h):
-            cands |= self.buckets.get(c, set())
-        out: dict[int, int] = {}
-        for pid, other, image_id in cands:
-            d = hamming(h, other)
-            if d > max_dist or d >= out.get(pid, 99):
-                continue
+    def query(
+        self, h: str, max_dist: int = PHASH_MAX_DISTANCE, vector: np.ndarray | None = None, min_cos: float = 0.97
+    ) -> dict[int, list[tuple[int, int]]]:
+        """Return {product_id: [(distance, matched image id), ...]} for near-identical photos."""
+        if not self._hashes:
+            return {}
+        if self._arr is None:
+            self._arr = np.array(self._hashes, dtype=np.uint64)
+        dist = _popcount64(self._arr ^ np.uint64(int(h, 16)))
+        out: dict[int, list[tuple[int, int]]] = defaultdict(list)
+        for i in np.nonzero(dist <= max_dist)[0]:
+            image_id = self._image_ids[i]
             ov = self.vectors.get(image_id)
-            if (
-                vector is not None
-                and ov is not None
-                and len(ov) == len(vector)
-                and float(ov @ vector) < SAME_PHOTO_MIN_COSINE
-            ):
+            if vector is not None and ov is not None and len(ov) == len(vector) and float(ov @ vector) < min_cos:
                 continue  # same shape, different colours/content
-            out[pid] = d
+            out[self._pids[i]].append((int(dist[i]), image_id))
         return out
 
 
@@ -101,16 +111,18 @@ def _purchase_ids(p: Product) -> set[str]:
     return ids
 
 
+RANK = ["visually_similar", "similar_photo", "shared_photos", "same_purchase_link", "confirmed_identical"]
+
+
 def _upsert_relation(db: Session, a: int, b: int, relation: str, score: float, signals: dict) -> None:
     a, b = min(a, b), max(a, b)
     rel = db.query(ProductRelation).filter_by(a_id=a, b_id=b).one_or_none()
-    rank = ["visually_similar", "shared_photos", "same_purchase_link", "confirmed_identical"]
     if rel is None:
         db.add(ProductRelation(a_id=a, b_id=b, relation=relation, score=score, signals=signals))
         return
     if rel.user_confirmed is not None:  # never override your decision
         return
-    if rel.relation in rank and relation in rank and rank.index(relation) < rank.index(rel.relation):
+    if rel.relation in RANK and relation in RANK and RANK.index(relation) < RANK.index(rel.relation):
         return
     rel.relation, rel.score, rel.signals = relation, score, signals
 
@@ -128,28 +140,34 @@ def match_product(
     db.query(ProductRelation).filter(
         or_(ProductRelation.a_id == p.id, ProductRelation.b_id == p.id), ProductRelation.user_confirmed.is_(None)
     ).delete(synchronize_session=False)
+    db.flush()
     idx = phash_index or build_phash_index(db)
-    hits: dict[int, list[int]] = defaultdict(list)
+    min_cos = _min_cosine(p.embedding_backend)
+    # For each other product: which of MY photos matched which of THEIR photos
+    pairs: dict[int, list[tuple[int, int, int]]] = defaultdict(list)
     for img in p.images:
         if img.phash:
-            for pid, d in idx.query(img.phash, vector=emb.from_bytes(img.embedding)).items():
+            for pid, matches in idx.query(img.phash, vector=emb.from_bytes(img.embedding), min_cos=min_cos).items():
                 if pid != p.id:
-                    hits[pid].append(d)
+                    pairs[pid].extend((d, img.id, other_img) for d, other_img in matches)
 
     my_ids = _purchase_ids(p)
-    if my_ids:
-        for other in db.query(Product).filter(Product.id != p.id, Product.links.isnot(None)):
+    for pid_key in my_ids:
+        raw_id = pid_key.split(":", 1)[1]
+        # Narrow by text search on the stored links JSON, then verify exactly.
+        for other in db.query(Product).filter(Product.id != p.id, cast(Product.links, String).contains(raw_id)):
             shared = my_ids & _purchase_ids(other)
             if shared:
                 _upsert_relation(db, p.id, other.id, "same_purchase_link", 1.0, {"purchase_ids": sorted(shared)})
                 written += 1
 
-    for pid, dists in hits.items():
-        n = len(dists)
-        score = min(1.0, 0.55 + 0.15 * n - 0.02 * min(dists))
-        _upsert_relation(
-            db, p.id, pid, "shared_photos", round(score, 3), {"matching_photos": n, "best_hamming": min(dists)}
-        )
+    for pid, matches in pairs.items():
+        # Count DISTINCT photos on both sides: one photo matching twice is still one photo.
+        distinct = min(len({m[1] for m in matches}), len({m[2] for m in matches}))
+        best = min(m[0] for m in matches)
+        relation = "shared_photos" if distinct >= MIN_PHOTOS_FOR_SHARED else "similar_photo"
+        score = min(1.0, 0.5 + 0.15 * distinct - 0.02 * best)
+        _upsert_relation(db, p.id, pid, relation, round(score, 3), {"matching_photos": distinct, "best_hamming": best})
         written += 1
 
     # Visual + text similarity
@@ -164,7 +182,7 @@ def match_product(
             my_title = clean_title(p.title_en)
             for i in np.argsort(-sims)[:25]:
                 other_id = ids[i]
-                if other_id == p.id or other_id in hits or sims[i] < thr:
+                if other_id == p.id or other_id in pairs or sims[i] < thr:
                     continue
                 other = db.get(Product, other_id)
                 if other is None or (other.category and p.category and other.category != p.category):
@@ -207,8 +225,6 @@ def recompute_groups(db: Session) -> int:
 
     for rel in db.query(ProductRelation).filter(ProductRelation.relation.in_(STRONG_RELATIONS)):
         if rel.user_confirmed is False:
-            continue
-        if rel.relation == "shared_photos" and rel.signals.get("matching_photos", 0) < 2 and not rel.user_confirmed:
             continue
         ra, rb = find(rel.a_id), find(rel.b_id)
         if ra != rb:

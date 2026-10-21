@@ -84,7 +84,7 @@ test("compare shows same-photo alternative across sellers", async ({ page }) => 
   await page.getByTestId("browse-search").fill("two-way zip wool jacket");
   await page.getByTestId("product-card").first().getByRole("link").first().click();
   await page.locator('main a[href^="/compare?id="]').first().click();
-  await expect(page.getByText("Same photographs — likely same source/batch (unconfirmed)")).toBeVisible();
+  await expect(page.getByText(/Several identical photographs/).first()).toBeVisible();
   await expect(page.getByText(/appears to be the same product/)).toBeVisible();
   await shot(page, "compare");
 });

@@ -8,6 +8,7 @@ import { Skeleton } from "@/components/ui/misc";
 import { formatPrice } from "@/lib/utils";
 
 export function relationTone(rel: string) {
+  // Only an identical purchase link or your confirmation is positive; photo-based matches stay cautious.
   return rel === "confirmed_identical" || rel === "same_purchase_link" ? "positive" : rel === "shared_photos" ? "caution" : "muted";
 }
 

@@ -14,7 +14,8 @@ from .settings_store import get_setting
 RELATION_LABEL = {
     "confirmed_identical": "Confirmed identical (you confirmed)",
     "same_purchase_link": "Same purchase link — same underlying listing",
-    "shared_photos": "Same photographs — likely same source/batch (unconfirmed)",
+    "shared_photos": "Several identical photographs — likely the same source photos (not proof of the same batch)",
+    "similar_photo": "One similar photograph — may well be a different product",
     "visually_similar": "Visually similar — may be a different product",
 }
 
@@ -31,6 +32,7 @@ class Context:
         self.saved = {s.product_id: s for s in db.query(SavedItem).all()}
         self._seller_ev: dict[int, list[Evidence]] = {}
         self._quality: dict[int, dict] = {}
+        self._strong: dict[int, list[int]] | None = None
 
     def seller_evidence(self, seller_id: int | None) -> list[Evidence]:
         if not seller_id:
@@ -41,13 +43,23 @@ class Context:
             )
         return self._seller_ev[seller_id]
 
+    def _strong_neighbours(self, product_id: int) -> list[int]:
+        # Loaded once per request instead of one query per product (feeds rank many products).
+        if self._strong is None:
+            from ..models import ProductRelation
+
+            self._strong = {}
+            for r in self.db.query(ProductRelation).filter(ProductRelation.relation.in_(dedup.STRONG_RELATIONS)):
+                self._strong.setdefault(r.a_id, []).append(r.b_id)
+                self._strong.setdefault(r.b_id, []).append(r.a_id)
+        return self._strong.get(product_id, [])
+
     def cheaper_equivalent(self, p: Product) -> dict | None:
+        """A cheaper listing that is very likely the same item (purchase link, confirmed, or several shared photos)."""
         if not p.price:
             return None
         best = None
-        for rel, other_id in dedup.relations_for(self.db, p.id):
-            if rel.relation not in dedup.STRONG_RELATIONS:
-                continue
+        for other_id in self._strong_neighbours(p.id):
             o = self.db.get(Product, other_id)
             if o and o.price and o.status == "active" and o.currency == p.currency and o.price < p.price * 0.9:
                 if best is None or o.price < best.price:
@@ -244,7 +256,7 @@ def comparison(ctx: Context, p: Product) -> dict:
                 "product": card,
             }
         )
-    order = ["confirmed_identical", "same_purchase_link", "shared_photos", "visually_similar"]
+    order = ["confirmed_identical", "same_purchase_link", "shared_photos", "similar_photo", "visually_similar"]
     rows.sort(key=lambda r: (order.index(r["relation"]) if r["relation"] in order else 9, -(r["score"] or 0)))
     base = product_card(ctx, p, detail=True)
     verdict = price_verdict(base, rows)
@@ -253,7 +265,7 @@ def comparison(ctx: Context, p: Product) -> dict:
 
 def price_verdict(base: dict, rows: list[dict]) -> dict:
     same = [r for r in rows if r["relation"] in ("confirmed_identical", "same_purchase_link", "shared_photos")]
-    similar = [r for r in rows if r["relation"] == "visually_similar"]
+    similar = [r for r in rows if r["relation"] in ("visually_similar", "similar_photo")]
     price = base["price"]
     notes = []
     recommendation = "insufficient_data"

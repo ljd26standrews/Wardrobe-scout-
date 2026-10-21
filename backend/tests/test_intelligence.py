@@ -182,18 +182,27 @@ def test_buyer_reports_score_and_affiliate_discount():
 # ---------------------------------------------------------------------- dedup
 def test_shared_photos_across_sellers_grouped_but_not_confirmed(db, web):
     s1, s2, s3 = _seller(db, "s1"), _seller(db, "s2"), _seller(db, "s3")
-    a, img = _product(db, s1, "a", "Margiela 双头拉链夹克", price=528, web=web)
+    imgs = [make_image((30, 30, 30), "hoodie", seed=1), make_image((30, 30, 30), "tee", seed=2)]
+    raw_a = RawListing(
+        "a",
+        "https://example.com/s1/a",
+        "Margiela 双头拉链夹克",
+        price=528,
+        image_urls=["https://img.example.com/s1/a1.jpg", "https://img.example.com/s1/a2.jpg"],
+    )
     raw_b = RawListing(
-        external_id="b",
-        source_url="https://example.com/s2/b",
-        title="MM 夹克",
+        "b",
+        "https://example.com/s2/b",
+        "MM 夹克",
         price=420,
         image_urls=["https://img.example.com/s2/b1.jpg", "https://img.example.com/s2/b2.jpg"],
     )
-    b = upsert_listing(db, s2, raw_b).product
-    web.add(raw_b.image_urls[0], img, ctype="image/jpeg")
-    web.add(raw_b.image_urls[1], img, ctype="image/jpeg")
+    a, b = upsert_listing(db, s1, raw_a).product, upsert_listing(db, s2, raw_b).product
+    for raw in (raw_a, raw_b):
+        for url, data in zip(raw.image_urls, imgs, strict=True):
+            web.add(url, data, ctype="image/jpeg")
     with web.client() as c:
+        process_images(db, a, c)
         process_images(db, b, c)
     c3, _ = _product(db, s3, "c", "trousers", shape="trousers", colour=(200, 190, 170), web=web, img_seed=7)
     dedup.match_product(db, b)
@@ -202,12 +211,34 @@ def test_shared_photos_across_sellers_grouped_but_not_confirmed(db, web):
     rels = {other: r.relation for r, other in dedup.relations_for(db, b.id)}
     assert rels.get(a.id) == "shared_photos"
     assert c3.id not in rels
+    db.refresh(a)
+    db.refresh(b)
+    assert a.group_id == b.group_id is not None
     rel = dedup.relations_for(db, b.id)[0][0]
     assert rel.user_confirmed is None  # suggestion, not a confirmed identity
     # User rejects the match -> never re-suggested
     dedup.set_user_decision(db, a.id, b.id, same=False)
     dedup.match_product(db, b)
     assert dedup.relations_for(db, b.id) == []
+
+
+def test_one_photo_reused_twice_counts_once(db, web):
+    s1, s2 = _seller(db, "s1"), _seller(db, "s2")
+    a, img = _product(db, s1, "a", "jacket", web=web)
+    raw_b = RawListing(
+        "b",
+        "https://example.com/s2/b",
+        "jacket",
+        price=420,
+        image_urls=["https://img.example.com/s2/b1.jpg", "https://img.example.com/s2/b2.jpg"],
+    )
+    b = upsert_listing(db, s2, raw_b).product
+    for u in raw_b.image_urls:
+        web.add(u, img, ctype="image/jpeg")
+    with web.client() as c:
+        process_images(db, b, c)
+    dedup.match_product(db, b)
+    assert {r.relation for r, _ in dedup.relations_for(db, b.id)} == {"similar_photo"}
 
 
 def test_same_purchase_link_detected(db):
