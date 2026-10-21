@@ -50,16 +50,35 @@ _PRICE_PATTERNS = [
 ]
 
 
+# Labels meaning "boutique / original retail price" (not what this seller charges) and labels that
+# explicitly mark the seller's own selling price.
+_RETAIL_MARKERS = re.compile(r"(专柜|原价|官网|吊牌|市场价|零售|国内|代购|官方|正品价|rrp|msrp|retail|orig)", re.I)
+_SELLING_MARKERS = re.compile(r"(现价|售价|到手|特价|活动价|折后|秒杀|批发|拿货|now|sale)", re.I)
+
+
 def parse_price(text: str | None) -> float | None:
+    """The seller's own price. Retail/boutique reference prices are ignored; if only a retail price is
+    quoted the result is None (unknown) rather than a wrong number."""
     if not text:
         return None
+    candidates: list[tuple[int, float, bool, bool]] = []  # (position, value, is_retail, is_selling)
     for pat in _PRICE_PATTERNS:
-        m = pat.search(text)
-        if m:
+        for m in pat.finditer(text):
             value = float(m.group(1))
-            if 10 <= value <= 200000:
-                return value
-    return None
+            if not 10 <= value <= 200000:
+                continue
+            before = text[max(0, m.start() - 8) : m.start() + 4]
+            candidates.append(
+                (m.start(), value, bool(_RETAIL_MARKERS.search(before)), bool(_SELLING_MARKERS.search(before)))
+            )
+    if not candidates:
+        return None
+    candidates.sort()
+    selling = [c for c in candidates if c[3] and not c[2]]
+    if selling:
+        return selling[0][1]
+    plain = [c for c in candidates if not c[2]]
+    return plain[0][1] if plain else None
 
 
 # ------------------------------------------------------------------- item code
@@ -87,6 +106,19 @@ _PCT_BEFORE = r"(\d{{1,3}}(?:\.\d)?)\s*[%％]\s*({alias})"
 _PCT_AFTER = r"({alias})\s*[:：]?\s*(\d{{1,3}}(?:\.\d)?)\s*[%％]"
 
 
+def _strip_imitation_phrases(low: str, alias_re: str) -> str:
+    """Remove phrases that *describe* a fibre without claiming it: 仿羊绒, 羊绒手感, cashmere-feel, faux wool…"""
+    patterns = [
+        rf"(仿|类|似|人造|假)\s*({alias_re})",
+        rf"({alias_re})\s*(手感|感|质感|般|风|效果)",
+        rf"(faux|imitation|mock|like|-like)\s+({alias_re})",
+        rf"({alias_re})[\s-]*(feel|touch|like|look|effect|blend look)\b",
+    ]
+    for pat in patterns:
+        low = re.sub(pat, " ", low)
+    return low
+
+
 def parse_materials(text: str | None) -> list[dict]:
     """Return [{"fibre": canonical, "pct": float|None}] in order of stated percentage."""
     if not text:
@@ -96,6 +128,7 @@ def parse_materials(text: str | None) -> list[dict]:
     alias_to_fibre = [(a, f) for f, aliases in FIBRES.items() for a in aliases]
     alias_to_fibre.sort(key=lambda x: -len(x[0]))  # longest first
     alias_re = "|".join(re.escape(a) for a, _ in alias_to_fibre)
+    low = _strip_imitation_phrases(low, alias_re)
     lookup = {a: f for a, f in alias_to_fibre}
 
     for m in re.finditer(_PCT_BEFORE.format(alias=alias_re), low):

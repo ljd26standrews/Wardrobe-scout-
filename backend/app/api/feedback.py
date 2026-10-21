@@ -106,8 +106,16 @@ def undo_feedback(feedback_id: int, db: Session = Depends(get_db)):
     if fb is None:
         raise HTTPException(404, "feedback not found")
     pid = fb.product_id
+    undone_action = fb.action
     db.delete(fb)
     db.flush()
+    if pid and undone_action == "purchased":
+        still_purchased = db.query(Feedback).filter(Feedback.product_id == pid, Feedback.action == "purchased").first()
+        if still_purchased is None:
+            # Remove only the entry "purchased" created automatically, never one you added yourself.
+            for item in db.query(WardrobeItem).filter(WardrobeItem.product_id == pid):
+                if (item.notes or "").startswith("Purchased from"):
+                    db.delete(item)
     if pid:
         prev = (
             db.query(Feedback)

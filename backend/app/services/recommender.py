@@ -226,7 +226,10 @@ def build_profile(db: Session, backend_name: str | None = None) -> Profile:
                 prof.n_positive += 1
             elif w < 0:
                 prof.n_negative += 1
+        is_seed = bool((fb.context or {}).get("seed"))
         for key in product_attrs(source):
+            if is_seed and key.startswith("seller:"):
+                continue  # seed examples describe style, not endorsement of the seller
             mult = routing.attrs.get(key.split(":", 1)[0], 0.0)
             if mult:
                 prof.attr_sum[key] += w * mult
