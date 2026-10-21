@@ -113,6 +113,7 @@ const MODEL_GROUP_LABEL: Record<string, string> = { colour: "Colours", category:
 export default function InsightsPage() {
   const { data, error, isLoading, mutate } = useSWR<InsightsResponse>("/api/insights");
   const { data: history, mutate: mutateHistory } = useSWR<FeedbackRow[]>("/api/feedback?limit=60");
+  const { data: evalStatus } = useSWR<{ judgements: number; needed: number; ready: boolean }>("/api/eval/status");
 
   if (error) return <ErrorState error={error} retry={() => mutate()} />;
   if (isLoading || !data) return <Skeleton className="h-[60vh]" />;
@@ -131,6 +132,15 @@ export default function InsightsPage() {
         <Stat label="Neutral palette share" value={data.palette_neutral_share == null ? "—" : `${Math.round(data.palette_neutral_share * 100)}%`} sub="of positive colour signal" />
       </div>
       {!data.embedding.is_clip && data.embedding.note && <p className="mt-4 rounded-xl bg-muted/70 p-3 text-xs leading-relaxed text-muted-foreground">Image model: {data.embedding.image_backend}. {data.embedding.note}</p>}
+      <Card className="mt-4 flex flex-wrap items-center justify-between gap-3 p-4 text-sm" data-testid="evaluate-link">
+        <p className="max-w-xl leading-relaxed text-muted-foreground">
+          <span className="text-foreground">This page shows what the model believes, not how well it works.</span> To measure that fairly, grade
+          randomly picked pieces{evalStatus ? ` (${evalStatus.judgements} graded; at least ${evalStatus.needed} needed)` : ""}.
+        </p>
+        <Link href="/evaluate" className="underline underline-offset-2">
+          Evaluate
+        </Link>
+      </Card>
 
       <h2 className="mt-14 text-3xl">Learned preferences</h2>
       {data.engine === "bayes" && data.model ? (

@@ -3,7 +3,8 @@
 Two complementary formats:
 
 * **JSON export** (``export_all`` / ``import_all``): everything personal - settings, sellers, watched links,
-  feedback (with its product snapshot), saved items, your evidence, wardrobe, inspiration, your
+  feedback (with its product snapshot), saved items, your evidence, your evaluation judgements, wardrobe,
+  inspiration, your
   "same / not the same" match decisions, and every product any of these refer to. Photos you uploaded
   (wardrobe, inspiration, manually added products) are embedded; scraped product photos are referenced by
   URL. Import is a *merge* and is **idempotent**: importing the same file twice changes nothing the second
@@ -31,6 +32,7 @@ from ..models import (
     Evidence,
     Feedback,
     InspirationImage,
+    Judgement,
     Product,
     ProductImage,
     ProductRelation,
@@ -85,8 +87,10 @@ def export_all(db: Session, include_images: bool = True) -> dict:
     decisions = db.query(ProductRelation).filter(ProductRelation.user_confirmed.isnot(None)).all()
     user_evidence = db.query(Evidence).filter(Evidence.created_by == "user").all()
     wardrobe = db.query(WardrobeItem).all()
+    judgements = db.query(Judgement).order_by(Judgement.created_at).all()
     product_ids = (
         {f.product_id for f in db.query(Feedback) if f.product_id}
+        | {j.product_id for j in judgements if j.product_id}
         | {s.product_id for s in db.query(SavedItem)}
         | {e.product_id for e in user_evidence if e.product_id}
         | {w.product_id for w in wardrobe if w.product_id}
@@ -211,6 +215,21 @@ def export_all(db: Session, include_images: bool = True) -> dict:
             for s in db.query(SavedItem)
         ],
         "evidence": evidence_out,
+        "judgements": [
+            {
+                "product": pkey.get(j.product_id) if j.product_id else None,
+                "family_key": j.family_key,
+                "taste": j.taste,
+                "owned_similar": j.owned_similar,
+                "too_expensive": j.too_expensive,
+                "quality_unclear": j.quality_unclear,
+                "note": j.note,
+                "sampled_by": j.sampled_by,
+                "snapshot": j.snapshot,
+                "created_at": _iso(j.created_at),
+            }
+            for j in judgements
+        ],  # fmt: skip
         "match_decisions": [
             {"a": pkey.get(r.a_id), "b": pkey.get(r.b_id), "same": bool(r.user_confirmed)} for r in decisions
         ],
@@ -247,7 +266,7 @@ def import_all(db: Session, data: dict) -> dict:
         raise ValueError(f"backup version {data.get('version')} is newer than this app supports ({EXPORT_VERSION})")
     counts = dict.fromkeys(
         ("settings", "sellers", "products", "feedback", "saved", "evidence", "match_decisions", "wardrobe",
-         "inspiration", "watched_urls"),
+         "inspiration", "watched_urls", "judgements"),
         0,
     )  # fmt: skip
     for k, v in (data.get("settings") or {}).items():
@@ -346,6 +365,22 @@ def import_all(db: Session, data: dict) -> dict:
         )
         existing_fb.add((p.id if p else None, f["action"], _iso(created)))
         counts["feedback"] += 1
+    db.flush()
+    existing_j = {(j.family_key, _iso(j.created_at)) for j in db.query(Judgement)}
+    for j in data.get("judgements", []):
+        p = find_product(j.get("product"))
+        created = _dt(j.get("created_at")) or utcnow()
+        # Family keys embed local ids; on another database the product's own family is the stable identity.
+        key = (f"g{p.group_id}" if p.group_id is not None else f"p{p.id}") if p else j.get("family_key") or ""
+        if (key, _iso(created)) in existing_j:
+            continue
+        db.add(Judgement(product_id=p.id if p else None, family_key=key, taste=int(j["taste"]),
+                         owned_similar=bool(j.get("owned_similar")), too_expensive=bool(j.get("too_expensive")),
+                         quality_unclear=bool(j.get("quality_unclear")), note=j.get("note"),
+                         sampled_by=j.get("sampled_by") or "uniform", snapshot=j.get("snapshot") or {},
+                         created_at=created))  # fmt: skip
+        existing_j.add((key, _iso(created)))
+        counts["judgements"] += 1
     db.flush()
     for s in data.get("saved", []):
         p = find_product(s.get("product"))

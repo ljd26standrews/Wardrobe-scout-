@@ -294,6 +294,30 @@ class Impression(Base):
     shown_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
 
 
+class Judgement(Base):
+    """A taste label you gave in an evaluation session, kept to *measure* the recommender (it never trains it).
+
+    Products are sampled uniformly from undecided ones (not chosen by the model), one per product family.
+    Taste is graded on its own - 0 not for me, 1 unsure, 2 like, 3 love - and owning something similar, the
+    price and unclear quality are separate flags, so a purchase objection is never mistaken for a dislike."""
+
+    __tablename__ = "judgements"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    product_id: Mapped[int | None] = mapped_column(
+        ForeignKey("products.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    family_key: Mapped[str] = mapped_column(String(40), index=True)  # "g<group id>" or "p<product id>"
+    taste: Mapped[int] = mapped_column(Integer)
+    owned_similar: Mapped[bool] = mapped_column(Boolean, default=False)
+    too_expensive: Mapped[bool] = mapped_column(Boolean, default=False)
+    quality_unclear: Mapped[bool] = mapped_column(Boolean, default=False)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sampled_by: Mapped[str] = mapped_column(String(20), default="uniform")
+    snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+
+
 class SavedItem(Base):
     """Shortlist / maybe list / wishlist state (latest decision per product)."""
 

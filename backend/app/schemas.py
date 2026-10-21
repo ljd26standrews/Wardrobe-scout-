@@ -28,6 +28,15 @@ Aspect = Literal[
 ]
 
 
+class JudgementIn(BaseModel):
+    product_id: int
+    taste: int = Field(ge=0, le=3)  # 0 not for me · 1 unsure · 2 like · 3 love
+    owned_similar: bool = False
+    too_expensive: bool = False
+    quality_unclear: bool = False
+    note: str | None = Field(default=None, max_length=1000)
+
+
 class ViewedItem(BaseModel):
     product_id: int
     position: int | None = None  # informational; the server records the position it served

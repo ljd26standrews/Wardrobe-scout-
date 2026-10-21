@@ -233,6 +233,34 @@ It is then combined with quality evidence, value, wardrobe fit and seller credib
 
 These are synthetic users with synthetic images, so the table shows learning behaviour, not real-world accuracy. If your taste has drifted far from what you wrote, updating the profile still helps a lot.
 
+**Measuring it on your own taste.** Nothing in this README measures how well the recommender works for you. The app has the tools to do that fairly:
+
+1. **Grade pieces** on the **Evaluate** page (linked from Insights).
+   - Pieces are drawn uniformly at random from readable, undecided listings, not chosen by the recommender. Each garment appears once, however many sellers list it.
+   - The page hides the seller, the ranking reasons and the quality scores.
+   - You grade only the look: not for me, unsure, like or love. "I own something similar", "too expensive" and "quality unclear" are separate flags.
+   - Grades never train the recommender, and they are included in backups.
+2. **Freeze the test set** before changing any setting, so later comparisons use the same pieces:
+   ```bash
+   cd backend && .venv/bin/python -m eval.real --freeze
+   ```
+3. **Measure:**
+   ```bash
+   .venv/bin/python -m eval.real
+   ```
+   This works on a copy of your database. It removes any Discover decision about a graded piece from the training data, then ranks the graded pieces with each method:
+   - random;
+   - your written profile alone;
+   - the legacy engine;
+   - the current engine.
+
+   It reports, with 95% intervals over the graded pieces:
+   - NDCG@10, precision@10 and liked pieces in the top 20;
+   - paired differences against the current engine;
+   - a separate breakdown for sellers you have never decided on.
+
+   It reports nothing until there are at least 40 grades across 3 sellers, with 5 liked. Results are saved under `data/evaluation/`.
+
 **Image embeddings.** With CLIP installed (`WITH_CLIP=1`, OpenCLIP ViT-B-32 / LAION-2B) visual similarity understands garments semantically. Without it, a lightweight built-in model captures colour, tone, texture and rough shape. Switching models triggers an automatic re-embed.
 
 ## Cross-seller comparison
@@ -302,6 +330,7 @@ cd backend
 .venv/bin/python -m app.cli backup-full snapshot.zip   # database + all photos
 .venv/bin/python -m app.cli restore-full snapshot.zip --data-dir NEW_FOLDER
 .venv/bin/python -m app.cli recompute
+.venv/bin/python -m eval.real               # measure the recommender on your Evaluate grades (see above)
 ```
 
 ## Tests
@@ -347,6 +376,7 @@ backend/eval/    recommender evaluation with simulated shoppers
 - **Scanning speed was measured against a local simulated catalogue.** It uses real garment photos, rendered size charts and modelled network latency (`backend/bench/`). It was not measured against live sellers.
   - **Size-chart detection.** It wrongly excluded 1 of 3,781 real garment photos. It recognised 96% of rendered charts; photographed charts, at 81.5%, are the weakest case (`backend/bench/RESULTS.md`). Real sellers' chart designs may differ, so a chart that slips through is labelled *uncertain* or *garment* rather than causing an error.
   - **Duplicate detection.** Analysing one photo per product finds fewer cross-seller duplicates than downloading every photo did (54 of 83 re-posts against 81 of 83 at 1,000 products, and 132 of 257 against 254 of 257 at 3,000, where the deep-check budget ran out; the original's extra 'matches' were mostly false — see `backend/bench/RESULTS.md`). Duplicate candidates and anything you love or save get a deep check. Set `WS_ANALYSIS_IMAGES=2` for more thorough matching at roughly twice the photo requests. These figures predate a stricter rule that counts one photo posted several times as one photograph. On the 300-product catalogue, that rule moved 2 of 31 re-posts from the strong tier to a hint (25 → 23); the larger runs have not been repeated.
+- **Recommendation quality is unmeasured on real taste** until you grade pieces on the Evaluate page (see "Measuring it on your own taste"). The simulation results are about learning behaviour only.
 - **Outfit suggestions** use colour-harmony and layering rules, not a learned fashion model.
 - Duplicate grouping by **shared photos** is a strong hint but not proof of the same batch. The UI says so, and only your confirmation (or a shared purchase link) makes a match "confirmed". The photo-matching thresholds were tuned on synthetic images and still need checking on real seller photos.
 - Some catalogues may contain replicas of branded goods. Check your local rules on importing them; UK Border Force can seize counterfeit goods.
