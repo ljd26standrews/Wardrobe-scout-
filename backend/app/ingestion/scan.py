@@ -14,7 +14,7 @@ from ..models import ScanRun, Seller, WatchedUrl, utcnow
 from ..services import ai, dedup
 from .base import RawListing, SellerAdapter
 from .generic import GenericPageAdapter, ShopifyAdapter, WeidianAdapter, parse_generic_product, parse_weidian_html
-from .http import BlockedError, FetchError, PoliteClient
+from .http import BlockedError, FetchError, InvalidPageError, PoliteClient
 from .pipeline import process_images, upsert_listing
 from .yupoo import ParserError, YupooAdapter, parse_album_page, yupoo_base
 
@@ -86,6 +86,12 @@ def _ingest_one(
     return res
 
 
+PARTIAL_PAGE = (
+    "The page arrived incomplete. What it showed was saved; anything it did not reach keeps its stored value "
+    "and will be read again."
+)
+
+
 def import_url(db: Session, url: str, *, seller_id: int | None = None, client: PoliteClient | None = None) -> dict:
     """Fetch one product page from a supported site and store it."""
     own = client is None
@@ -102,13 +108,21 @@ def import_url(db: Session, url: str, *, seller_id: int | None = None, client: P
             watched.last_message = "; ".join(res.changes) or None
         dedup.recompute_groups(db)
         db.commit()
-        return {"ok": True, "product_id": res.product.id, "created": res.created, "changes": res.changes}
+        out = {"ok": True, "product_id": res.product.id, "created": res.created, "changes": res.changes}
+        if raw.partial:
+            out.update(outcome="partial", message=PARTIAL_PAGE)
+        else:
+            out["outcome"] = "complete"
+        return out
     except BlockedError as e:
         db.rollback()
-        return {"ok": False, "blocked": True, "error": BLOCKED_HELP.format(reason=str(e))}
+        return {"ok": False, "outcome": "blocked", "blocked": True, "error": BLOCKED_HELP.format(reason=str(e))}
+    except InvalidPageError as e:
+        db.rollback()
+        return {"ok": False, "outcome": "invalid", "error": f"Not a product page this app can read: {e}"}
     except FetchError as e:
         db.rollback()
-        return {"ok": False, "error": str(e)}
+        return {"ok": False, "outcome": "failed", "error": str(e)}
     finally:
         if own:
             client.close()
@@ -171,7 +185,7 @@ def check_watched_urls(db: Session, progress: Progress | None = None) -> dict:
             res = import_url(db, w.url, seller_id=w.seller_id, client=client)
             w = db.get(WatchedUrl, w.id)
             w.last_checked_at = utcnow()
-            w.last_status = "ok" if res.get("ok") else ("blocked" if res.get("blocked") else "failed")
+            w.last_status = "ok" if res.get("ok") else res.get("outcome", "failed")
             w.last_message = res.get("error") or ("; ".join(res.get("changes") or []) or None)
             if res.get("product_id"):
                 w.product_id = res["product_id"]

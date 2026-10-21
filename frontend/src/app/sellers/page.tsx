@@ -22,8 +22,11 @@ const STATUS_ICON: Record<string, React.ReactNode> = {
   blocked: <XCircle className="size-4 text-destructive" />,
   failed: <XCircle className="size-4 text-destructive" />,
   cancelled: <XCircle className="size-4 text-muted-foreground" />,
+  invalid: <XCircle className="size-4 text-destructive" />,
+  empty: <AlertTriangle className="size-4 text-caution" />,
   running: <Spinner />,
 };
+const STATUS_LABEL: Record<string, string> = { invalid: "Layout not recognised", empty: "No albums found" };
 
 function SellerDialog({ seller, onSaved, trigger }: { seller?: Seller; onSaved: () => void; trigger: React.ReactNode }) {
   const [open, setOpen] = useState(false);
@@ -191,7 +194,9 @@ function SellerRow({ s, refresh }: { s: Seller; refresh: () => void }) {
       <div className="mt-4 flex flex-wrap items-start gap-2 border-t pt-3 text-xs text-muted-foreground">
         <span className="mt-0.5">{STATUS_ICON[s.last_scan_status ?? ""] ?? <CircleDashed className="size-4" />}</span>
         <div className="min-w-0 flex-1">
-          <span className="text-foreground">{s.last_scan_status ? titleCase(s.last_scan_status) : "Never scanned"}</span>
+          <span className="text-foreground">
+            {s.last_scan_status ? STATUS_LABEL[s.last_scan_status] ?? titleCase(s.last_scan_status) : "Never scanned"}
+          </span>
           {s.last_scan_at && <span> · {timeAgo(s.last_scan_at)}</span>}
           {s.last_run && <span> · {s.last_run.pages_fetched} requests · {s.last_run.products_seen} albums seen</span>}
           {s.last_scan_message && <p className="mt-1 break-words leading-relaxed">{s.last_scan_message}</p>}

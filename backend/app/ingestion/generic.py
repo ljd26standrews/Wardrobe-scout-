@@ -25,7 +25,7 @@ from bs4 import BeautifulSoup
 from ..config import get_settings
 from ..logging_setup import get_logger
 from .base import AlbumRef, ProgressFn, RawListing, SellerAdapter
-from .http import FetchError
+from .http import FetchError, InvalidPageError
 from .parsing import normalise_space, parse_price, weidian_item_id
 
 log = get_logger(__name__)
@@ -121,7 +121,7 @@ def parse_generic_product(html: str, url: str) -> RawListing:
         price = parse_price(title) or parse_price(description)
 
     if not title:
-        raise FetchError(f"no product data recognised at {url}")
+        raise InvalidPageError(f"no product data recognised at {url}")
     return RawListing(
         external_id=external_id or url_id(url),
         source_url=url,
@@ -363,7 +363,7 @@ def parse_weidian_html(html: str, url: str) -> RawListing:
         except FetchError:
             pass
     if not title or title.lower() in _GENERIC_TITLES:
-        raise FetchError(
+        raise InvalidPageError(
             "Weidian page did not expose product data in static HTML. Enable Playwright rendering "
             "or import this item with the bookmarklet / manual form."
         )

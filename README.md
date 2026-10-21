@@ -133,6 +133,13 @@ API keys are only read from the environment and are never stored in the database
 - **Request pacing.** Each host gets at most one request at a time, never faster than its delay (2 s by default). If a host answers with errors or slows down, its delay grows automatically and then relaxes gradually. Different hosts — each seller's catalogue and the image CDN — proceed in parallel, so waiting for one never holds up another.
 - **Password-protected catalogues.** These are reported as blocked. No password is tried.
 - **Unreadable catalogues retire nothing.** A first page with no albums is reported, not treated as an empty catalogue. Nothing is marked removed.
+- **Pages cut short lose nothing.** A product page that arrives incomplete (no closing tag) updates only what it shows. Price, description, links and photos it didn't reach keep their stored values, and the page is read again on the next scan.
+- **Outcomes are told apart.** Scans and imports report:
+  - *blocked*;
+  - *layout not recognised* (not a page this app can read);
+  - *no albums found*;
+  - *partial*;
+  - *failed* (network or HTTP errors).
 - **Shop notices are not products.** Albums such as "Contact us", "New WhatsApp" or "Read before ordering" are skipped. A notice is only skipped when its title has no price, names no garment and the album has 15 photos or fewer.
 - **Referer header.** Image hosts that check the Referer header get the album page as Referer, exactly as your browser sends it.
 

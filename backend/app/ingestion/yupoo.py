@@ -26,7 +26,7 @@ from bs4 import BeautifulSoup
 
 from ..logging_setup import get_logger
 from .base import AlbumRef, ListingPage, ProgressFn, RawListing, SellerAdapter
-from .http import BlockedError, FetchError
+from .http import BlockedError, InvalidPageError
 from .parsing import (
     canonical_url,
     classify_link,
@@ -41,8 +41,16 @@ log = get_logger(__name__)
 ALBUM_HREF = re.compile(r"/albums/(\d+)")
 
 
-class ParserError(FetchError):
+class ParserError(InvalidPageError):
     """Page fetched fine but its structure was not recognised."""
+
+
+_CLOSED = re.compile(r"</html\s*>", re.I)
+
+
+def looks_truncated(html: str) -> bool:
+    """A page whose transfer was cut short has no closing tag; whatever it lacks is unknown, not removed."""
+    return not _CLOSED.search(html[-4096:])
 
 
 def _abs(url: str | None, base: str) -> str | None:
@@ -242,6 +250,7 @@ def parse_album_page(html: str, page_url: str) -> RawListing:
         price=parse_price(title) or parse_price(description),
         links=links,
         fetched_at=datetime.now(UTC).replace(tzinfo=None),
+        partial=looks_truncated(html),
     )
 
 

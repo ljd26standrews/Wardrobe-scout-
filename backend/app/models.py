@@ -340,7 +340,8 @@ class ScanRun(Base):
     job_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     started_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    status: Mapped[str] = mapped_column(String(30), default="running")  # running|succeeded|partial|failed|blocked
+    # running|succeeded|partial|failed|blocked|cancelled, plus invalid (layout not recognised) and empty (no albums)
+    status: Mapped[str] = mapped_column(String(30), default="running")
     pages_fetched: Mapped[int] = mapped_column(Integer, default=0)
     products_seen: Mapped[int] = mapped_column(Integer, default=0)
     products_new: Mapped[int] = mapped_column(Integer, default=0)

@@ -62,7 +62,7 @@ def _run(job_id: int) -> None:
         if kind == "scan_seller":
             seller = db.get(Seller, params["seller_id"])
             run = scan.scan_seller(db, seller, mode=params.get("mode", "incremental"), progress=progress, job_id=job_id)
-            status = {"succeeded": "succeeded", "partial": "partial", "cancelled": "cancelled"}.get(
+            status = {"succeeded": "succeeded", "partial": "partial", "empty": "partial", "cancelled": "cancelled"}.get(
                 run.status, "failed"
             )
             result = {
@@ -89,7 +89,7 @@ def _run(job_id: int) -> None:
             else:
                 watched, status = {}, "cancelled"
             result = {"sellers": summary, "watched": watched}
-            if status != "cancelled" and any(s["status"] in ("failed", "blocked") for s in summary):
+            if status != "cancelled" and any(s["status"] not in ("succeeded", "cancelled") for s in summary):
                 status = "partial"
         elif kind == "deep_product":
             result = deep_product(db, params["product_id"])
@@ -157,6 +157,8 @@ def outcome(status: str, result: dict) -> str:
         return status
     if result.get("error") or result.get("ok") is False:
         return "failed"
+    if result.get("outcome") == "partial":
+        return "partial"
     failed = result.get("errors") or result.get("failed")
     if failed:
         done = result.get("found") or result.get("ok") or 0

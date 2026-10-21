@@ -293,7 +293,7 @@ class Scanner:
         if isinstance(err, BlockedError):
             st.status, st.message = "blocked", BLOCKED_HELP.format(reason=str(err))
         elif isinstance(err, ParserError):
-            st.status, st.message = "failed", f"Page layout not recognised — the parser may need updating. {err}"
+            st.status, st.message = "invalid", f"Page layout not recognised — the parser may need updating. {err}"
         elif isinstance(err, FetchError):
             st.status, st.message = "failed", str(err)
         elif err is not None:
@@ -301,7 +301,7 @@ class Scanner:
             log.exception("discovery_failed", seller=st.seller.slug, exc_info=err)
         st.exhausted = err is None and bool(getattr(st.adapter, "exhausted", False))
         if err is None and getattr(st.adapter, "empty", False):
-            st.status, st.message = "partial", EMPTY_HELP
+            st.status, st.message = "empty", EMPTY_HELP
         if st.status:
             self._drop_seller(st)
             return

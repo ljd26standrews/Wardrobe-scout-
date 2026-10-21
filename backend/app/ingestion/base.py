@@ -28,6 +28,8 @@ class RawListing:
     links: dict[str, str] = field(default_factory=dict)
     category_hint: str | None = None
     available: bool | None = None
+    # The page was cut short (e.g. a truncated transfer): fields it lacks are unknown, not removed.
+    partial: bool = False
     fetched_at: datetime | None = None
     extra: dict = field(default_factory=dict)
 

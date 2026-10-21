@@ -51,6 +51,10 @@ class BlockedError(FetchError):
     """Access is restricted (robots.txt, auth, rate limiting or anti-bot)."""
 
 
+class InvalidPageError(FetchError):
+    """The page was fetched, but it is not a product or catalogue page this app can read."""
+
+
 class UnsafeURLError(FetchError):
     """The URL points at a private, loopback or metadata address (SSRF protection)."""
 

@@ -135,7 +135,7 @@ def _scanned_catalogue(db, web, n=4):
 @pytest.mark.parametrize(
     "listing, status",
     [(page("yupoo_ethanhomme_listing.html"), "blocked"),
-     ("<html><body><div class='album__list'>No albums yet</div></body></html>", "partial")],
+     ("<html><body><div class='album__list'>No albums yet</div></body></html>", "empty")],
 )  # fmt: skip
 def test_unreadable_catalogue_retires_nothing(db, web, listing, status):
     from app.ingestion.scan import scan_seller

@@ -94,6 +94,19 @@ def _apply_attributes(p: Product, raw: RawListing, use_ai: bool) -> None:
     p.links = links
 
 
+# Fields a cut-short page may simply not have reached. On such a page an empty value means "not seen",
+# so the stored value is kept rather than recorded as removed.
+_KEEP_WHEN_PARTIAL = (
+    "title_original", "title_en", "description_original", "description_en", "price", "sizes", "colours",
+    "materials", "material_text", "gsm", "fit_tags", "seasons", "brand", "category", "seller_item_code",
+    "logo_level",
+)  # fmt: skip
+
+
+def _unknown(v) -> bool:
+    return v is None or v == "" or v == [] or v == {} or v == "unknown"
+
+
 def _category_from_hint(hint: str | None) -> str | None:
     if not hint:
         return None
@@ -201,20 +214,34 @@ def upsert_listing(
             db.flush()
             return UpsertResult(p, False, changes)
 
+    # A page cut short keeps what is stored for whatever it did not reach (see _KEEP_WHEN_PARTIAL).
+    merge = raw.partial and not created
+    kept = {f: getattr(p, f) for f in _KEEP_WHEN_PARTIAL} if merge else {}
+    old_links_kept = dict(p.links or {}) if merge else {}
     _apply_attributes(p, raw, use_ai)
+    for f, old in kept.items():
+        if _unknown(getattr(p, f)) and not _unknown(old):
+            setattr(p, f, old)
+    if merge:
+        p.links = {**old_links_kept, **(p.links or {})}
     p.source_url = raw.source_url
     p.last_seen_at = now
     p.status = "active" if raw.available is not False else "unavailable"
-    p.content_hash = h
+    if not raw.partial:
+        p.content_hash = h  # a partial read is not a fingerprint of the page: the next full read refreshes it
     if origin != "scraped" or created:
         p.data_origin = origin if created or p.data_origin == "seed" else p.data_origin
     if p.data_origin == "seed" and origin == "scraped":
         p.data_origin = "scraped"  # seed record has now been verified against the live page
-    p.completeness = completeness or ("complete" if (raw.title and raw.image_urls and p.price) else "partial")
+    if not merge:
+        complete = raw.title and raw.image_urls and p.price and not raw.partial
+        p.completeness = completeness or ("complete" if complete else "partial")
 
     if not created and not first_read:
         if old_price is not None and p.price is not None and abs(old_price - p.price) > 0.009:
             changes.append(f"price {old_price:g} → {p.price:g}")
+        elif old_price is not None and p.price is None:
+            changes.append("price no longer stated")
         if sorted(old_sizes) != sorted(p.sizes or []):
             changes.append(f"sizes {old_sizes} → {p.sizes}")
         if (old_currency or "") != (p.currency or ""):
@@ -237,12 +264,19 @@ def upsert_listing(
         if thumb:
             img.thumb_url = thumb
         new_list.append(img)
-    if raw.image_urls or created:
+    if merge:  # photos the cut-short page did not reach are still the listing's photos
+        listed = set(raw.image_urls)
+        rest = [i for i in sorted(p.images, key=lambda i: i.position or 0) if i.url not in listed]
+        for pos, img in enumerate(rest, start=len(new_list)):
+            img.position = pos
+        p.images = new_list + rest
+    elif raw.image_urls or created:
         p.images = new_list if raw.image_urls else [i for i in p.images if i.fetch_status == "uploaded"]
 
-    # Replace system-generated seller claims (user/AI evidence is preserved)
-    p.evidence = [e for e in p.evidence if not (e.kind == "seller_claim" and e.created_by == "system")]
-    p.evidence.extend(_seller_claim_evidence(p, raw))
+    if not merge:
+        # Replace system-generated seller claims (user/AI evidence is preserved)
+        p.evidence = [e for e in p.evidence if not (e.kind == "seller_claim" and e.created_by == "system")]
+        p.evidence.extend(_seller_claim_evidence(p, raw))
 
     if created or changes:
         db.add(
@@ -256,7 +290,8 @@ def upsert_listing(
                 change="; ".join(changes) or "first seen",
             )
         )
-    p.detail_fetched_at = now
+    if not raw.partial:
+        p.detail_fetched_at = now  # a partial read leaves it unread (or as last fully read), so it is re-read
     update_state(p)
     db.flush()
     return UpsertResult(p, created, changes)
