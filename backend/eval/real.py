@@ -61,16 +61,32 @@ def ranking_metrics(order: list, grades: dict) -> dict:
 
 
 def scored_metrics(scores: dict, grades: dict) -> dict:
-    return ranking_metrics(sorted(grades, key=lambda i: (-scores[i], str(i))), grades)
+    """``ranking_metrics`` of ordering by ``scores``, in expectation over the order of tied scores. Exact: every
+    place in a tied block holds the block's average gain, so no method gains or loses from how ties happen to be
+    broken (a constant score is exactly the random baseline)."""
+    keys = sorted(grades, key=lambda i: -scores[i])
+    gain: list[float] = []  # expected 2^grade - 1 at each place
+    liked: list[float] = []  # expected "graded like or love" at each place
+    i = 0
+    while i < len(keys):
+        j = i
+        while j < len(keys) and scores[keys[j]] == scores[keys[i]]:
+            j += 1
+        block = keys[i:j]
+        gain += [st.mean(2 ** grades[k] - 1 for k in block)] * len(block)
+        liked += [st.mean(grades[k] >= 2 for k in block)] * len(block)
+        i = j
+    ideal = _dcg(sorted((2**g - 1 for g in grades.values()), reverse=True)[:K])
+    return {
+        "ndcg@10": _dcg(gain[:K]) / ideal if ideal else 0.0,
+        "p@10": sum(liked[:K]) / len(liked[:K]) if liked else 0.0,
+        "liked@20": float(sum(liked[:20])),
+    }
 
 
-def random_metrics(grades: dict, rng: random.Random, shuffles: int = RANDOM_SHUFFLES) -> dict:
-    keys = list(grades)
-    runs = []
-    for _ in range(shuffles):
-        rng.shuffle(keys)
-        runs.append(ranking_metrics(list(keys), grades))
-    return {m: st.mean(r[m] for r in runs) for m in runs[0]}
+def random_metrics(grades: dict, rng: random.Random | None = None, shuffles: int = RANDOM_SHUFFLES) -> dict:
+    """The random ranking's metrics, exactly (its expectation: every piece tied)."""
+    return scored_metrics(dict.fromkeys(grades, 0.0), grades)
 
 
 def evaluate_scores(methods: dict[str, dict], grades: dict, seed: int = 0) -> dict:

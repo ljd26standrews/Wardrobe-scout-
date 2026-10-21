@@ -151,3 +151,37 @@ def test_command_line_reads_a_copy_and_saves_aggregates_only(env, db, tmp_path, 
     saved = next((out / "evaluation").glob("selective-*.json")).read_text()
     assert '"label_set_hash"' in saved and '"family"' not in saved  # no per-decision records
     assert "Logged decisions, rolling origin" in capsys.readouterr().out
+
+
+def test_pieces_from_sellers_never_rated_before_are_reported_separately(env, db):
+    """The unfamiliar-seller slice: pieces from a seller first rated late are unfamiliar until a block with them has
+    been learned from (here all four fall in the last block)."""
+    from app.ingestion.base import RawListing
+    from app.ingestion.pipeline import upsert_listing
+    from app.models import Feedback, Seller, utcnow
+    from app.services.approval_data import rated_outcomes
+    from eval.selective import rolling_origin, summarise
+
+    timed_world(db)
+    late = Seller(name="late", slug="late", platform="manual")
+    db.add(late)
+    db.flush()
+    for k in range(4):  # rated after everything else, one block's worth apart
+        p = upsert_listing(
+            db, late, RawListing(f"late{k}", f"https://late.example/{k}", f"navy wool overcoat L{k}")
+        ).product
+        db.add(Feedback(product_id=p.id, action="like", created_at=utcnow() + timedelta(minutes=k)))
+    db.commit()
+    preds = rolling_origin(db, block=12)
+    first_late = {o.family for o in rated_outcomes(db)[-4:]}
+    unfamiliar = [p for p in preds if p.familiar_seller is False]
+    assert {p.family for p in unfamiliar} == first_late  # one block: none of the four had a rated predecessor
+    assert all(p.familiar_seller is not None for p in preds)
+    s = summarise(preds, {"min_labels": 30, "min_each_class": 5, **_cfg(db)})
+    assert s["unfamiliar_sellers"]["predictions"] == 4 and "refused" in s["unfamiliar_sellers"]["raw"]
+
+
+def _cfg(db):
+    from app.services.settings_store import get_setting
+
+    return get_setting(db, "selective")

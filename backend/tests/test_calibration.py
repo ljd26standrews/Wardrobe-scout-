@@ -88,7 +88,9 @@ def test_calibration_recovers_a_known_relationship(env, db):
     d = res["diagnostics"]
     # The labels are noisy draws: scoring them with the TRUE probabilities gives an AUC of 0.71 on this sample.
     assert d["n"] == 120 and d["auc_out_of_fold"] > 0.6
-    assert d["map"] in ("platt", "identity") and d["brier_chosen"] <= min(d["brier_raw"], d["brier_calibrated"])
+    assert d["map"] in ("platt", "identity")
+    # Reported nested: the choice between the maps is remade without each fold (tests/test_metrics.py).
+    assert d["brier_chosen"] == d["brier_nested"] and len(d["nested_choices"]) == 5
     assert d["ece_chosen"] <= 0.12
     amap = calibration.active_map(db)
     from app.services import preference_model as pm

@@ -22,10 +22,16 @@ Protocols
    the graded families and reported on the other.
 
 Metrics: Brier score, log loss, expected calibration error and reliability bins (with counts and intervals) for
-the raw σ(m) and the calibrated estimate; AUC; precision-coverage for gating on σ(m), the estimate and the
-conservative bounds; per mode, precision with a 95% Clopper-Pearson interval and coverage, against the taste
-ranking at the same coverage (and, representative protocol, the full Discover score); learning progression by
-how many labels the model had.
+the raw σ(m) and the calibrated estimate; AUC (ties count one half); precision-coverage for gating on σ(m), the
+estimate and the conservative bounds; per mode, precision with a 95% Clopper-Pearson interval and coverage, against
+the unchanged taste ranking at the same coverage (and, representative protocol, the full Discover score); learning
+progression by how many labels the model had; the same for pieces from sellers you had never rated before (the
+unfamiliar-seller slice). Comparisons at the same coverage count tied scores at the cut in expectation, as if
+ties were ordered at random, so no method gains from an arbitrary tie order.
+
+3. **Served feeds**, from Discover's own logs: how often a feed request came back empty, approvals per piece you
+   actually saw (useful discoveries per inspection), and how often a piece you had already seen was shown again
+   (repetition), each with counts and intervals.
 
 Refusals: no calibration metric below MIN_PREDICTIONS predictions or MIN_EACH of either outcome; no precision
 below MIN_SELECTED selected pieces. Nothing here uses synthetic data; tests/test_eval_selective.py checks the
@@ -65,6 +71,7 @@ class Prediction:
     estimate: float | None = None  # calibrated estimate (None: too few labels to calibrate)
     bounds: dict[str, float] = field(default_factory=dict)  # conservative bound per mode
     score: float | None = None  # representative protocol: the full Discover score
+    familiar_seller: bool | None = None  # had you rated a piece from its seller before? (None: seller unknown)
 
 
 # ----------------------------------------------------------------- metrics
@@ -105,22 +112,41 @@ def calibration_metrics(p, y) -> dict:
 
 
 def precision(selected_y) -> dict:
-    n, k = len(selected_y), int(sum(selected_y))
+    return precision_of(float(sum(selected_y)), len(selected_y))
+
+
+def precision_of(approved: float, n: int) -> dict:
+    """Precision with a 95% Clopper-Pearson interval; ``approved`` may be an expectation over tie orders."""
+    k = int(approved) if float(approved).is_integer() else round(approved, 2)
     out = {"selected": n, "approved": k, "precision": None, "interval": None}
     if n >= MIN_SELECTED:
-        lo, hi = clopper_pearson(k, n)
-        out.update(precision=round(k / n, 4), interval=[round(lo, 4), round(hi, 4)])
+        lo, hi = clopper_pearson(approved, n)
+        out.update(precision=round(approved / n, 4), interval=[round(lo, 4), round(hi, 4)])
     return out
 
 
+def expected_top(score, y, k: int) -> float:
+    """Approvals among the top ``k`` pieces by ``score``, in expectation over the order of tied scores (exact):
+    every piece above the cut counts, and those tied at the cut count in proportion to the places left."""
+    score, y = np.asarray(score, float), np.asarray(y, float)
+    if k <= 0:
+        return 0.0
+    if k >= len(y):
+        return float(y.sum())
+    cut = np.sort(score)[::-1][k - 1]
+    above, tied = score > cut, score == cut
+    return float(y[above].sum() + (k - above.sum()) * y[tied].mean())
+
+
 def precision_coverage(score, y, levels=(0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.75, 1.0)) -> list[dict]:
-    """Precision of the top share of pieces by ``score``, at several coverage levels."""
+    """Precision of the top share of pieces by ``score``, at several coverage levels (ties at the cut in
+    expectation)."""
     score, y = np.asarray(score, float), np.asarray(y, int)
-    order = np.argsort(-score, kind="stable")
     out = []
     for c in levels:
         k = max(1, round(c * len(y)))
-        out.append({"coverage": c, "threshold": round(float(score[order[k - 1]]), 4), **precision(y[order[:k]])})
+        cut = float(np.sort(score)[::-1][k - 1])
+        out.append({"coverage": c, "threshold": round(cut, 4), **precision_of(expected_top(score, y, k), k)})
     return out
 
 
@@ -163,14 +189,37 @@ def rolling_origin(db, *, block: int = BLOCK, first: int = FIRST_ORIGIN) -> list
     cfg = get_setting(db, "selective")
     outcomes = rated_outcomes(db)
     space = calibration._space(db)
+    seller = _sellers(db, outcomes)
     preds: list[Prediction] = []
     for b, i in enumerate(range(first, len(outcomes), block)):
         test = outcomes[i : i + block]
         cutoff = test[0].created_at
         held = frozenset(o.family for o in test)
         train = [o for o in rated_outcomes(db, before=cutoff) if o.family not in held]
-        preds += predict(db, space, cfg, test, train=train, exclude=held, before=cutoff, block=b, n_train=len(train))
+        new = predict(db, space, cfg, test, train=train, exclude=held, before=cutoff, block=b, n_train=len(train))
+        known = {seller.get(o.feedback_id) for o in train} - {None}
+        by_family = {o.family: o for o in test}  # one label per family; a piece that cannot be scored is skipped
+        for p in new:
+            s = seller.get(by_family[p.family].feedback_id)
+            p.familiar_seller = None if s is None else s in known
+        preds += new
     return preds
+
+
+def _sellers(db, outcomes) -> dict[int, str]:
+    """The seller of each rated piece (by feedback id), by name: the product's, or the one recorded with the
+    decision for a product since deleted."""
+    from app.models import Product, Seller
+
+    ids = [o.product_id for o in outcomes if o.product_id is not None]
+    names = dict(db.query(Product.id, Seller.name).join(Seller, Product.seller_id == Seller.id)
+                 .filter(Product.id.in_(ids))) if ids else {}  # fmt: skip
+    out = {}
+    for o in outcomes:
+        name = names.get(o.product_id) if o.product_id is not None else (o.snapshot or {}).get("seller")
+        if name:
+            out[o.feedback_id] = name
+    return out
 
 
 # ----------------------------------------------------------------- summarising
@@ -187,16 +236,19 @@ def gate_report(preds: list[Prediction], cfg: dict) -> dict:
         by_block: dict[int, list[Prediction]] = {}
         for p in usable:
             by_block.setdefault(p.block, []).append(p)
-        baseline = []
-        for blk, ps in by_block.items():
-            n = sum(1 for p in chosen if p.block == blk)
-            baseline += sorted(ps, key=lambda p: -p.raw)[:n]
+        # The unchanged comparator: the plain taste ranking, taking as many pieces in each block as the gate did.
+        baseline = sum(
+            expected_top([p.raw for p in ps], [p.y for p in ps], sum(1 for p in chosen if p.block == blk))
+            for blk, ps in by_block.items()
+        )
+        est_only = [p.y for p in usable if p.estimate >= t]
+        raw_only = [p.y for p in usable if p.raw >= t]
         out[mode] = {
             "target": t, "confidence": conf, "coverage": round(len(chosen) / len(usable), 4),
             "gate": precision([p.y for p in chosen]),
-            "taste_ranking_same_coverage": precision([p.y for p in baseline]),
-            "ablation_estimate_only": precision([p.y for p in usable if p.estimate >= t]),
-            "ablation_raw_probability": precision([p.y for p in usable if p.raw >= t]),
+            "taste_ranking_same_coverage": precision_of(baseline, len(chosen)),
+            "ablation_estimate_only": precision(est_only) | {"coverage": round(len(est_only) / len(usable), 4)},
+            "ablation_raw_probability": precision(raw_only) | {"coverage": round(len(raw_only) / len(usable), 4)},
         }  # fmt: skip
     return out
 
@@ -232,6 +284,20 @@ def summarise(preds: list[Prediction], cfg: dict) -> dict:
         },
         "modes": gate_report(preds, cfg),
         "learning": learning_progression(preds),
+        "unfamiliar_sellers": unfamiliar_slice(preds, cfg),
+    }  # fmt: skip
+
+
+def unfamiliar_slice(preds: list[Prediction], cfg: dict) -> dict:
+    """Pieces from sellers you had never rated before: does the model hold up where seller familiarity cannot
+    help?"""
+    ps = [p for p in preds if p.familiar_seller is False]
+    cal = [p for p in ps if p.estimate is not None]
+    return {
+        "predictions": len(ps), "approvals": int(sum(p.y for p in ps)),
+        "raw": calibration_metrics([p.raw for p in ps], [p.y for p in ps]),
+        "calibrated": calibration_metrics([p.estimate for p in cal], [p.y for p in cal]),
+        "modes": gate_report(ps, cfg),
     }  # fmt: skip
 
 
@@ -267,16 +333,19 @@ def representative(db, seed: int = 0) -> dict:
             for j in judged]  # fmt: skip
     preds = predict(db, space, cfg, test, train=train, exclude=frozenset(), before=None, block=0, n_train=len(train))
     ranked = {r.product.id: r.score for r in rank_products(db, [products[j.product_id] for j in judged])}
+    known = set(_sellers(db, train).values())
     for p, j in zip(preds, judged, strict=True):
         p.score = ranked.get(j.product_id)
+        seller = products[j.product_id].seller
+        p.familiar_seller = None if seller is None else seller.name in known
     out = {"summary": summary, **summarise(preds, cfg)}
     cal = [p for p in preds if p.estimate is not None]
     if not cal:
         return out
     for mode, (t, _) in _modes(cfg).items():  # the full Discover score (taste, quality, value, ...) as baseline
         n = sum(1 for p in cal if p.bounds[mode] >= t)
-        top = sorted(cal, key=lambda p: -(p.score if p.score is not None else -1e9))[:n]
-        out["modes"][mode]["discover_score_same_coverage"] = precision([p.y for p in top])
+        score = [p.score if p.score is not None else -1e9 for p in cal]
+        out["modes"][mode]["discover_score_same_coverage"] = precision_of(expected_top(score, [p.y for p in cal], n), n)
     out["suggested_thresholds"] = suggest_thresholds(cal, cfg, seed)
     return out
 
@@ -306,6 +375,64 @@ def suggest_thresholds(preds: list[Prediction], cfg: dict, seed: int = 0) -> dic
         out[mode] = {"target": t, "threshold": found, "validation": len(val), "test": len(test),
                      **precision([p.y for p in test if p.bounds[mode] >= found])}  # fmt: skip
     return out
+
+
+# ----------------------------------------------------------------- served feeds (Discover's own logs)
+def _rate(k: int, n: int) -> dict:
+    out = {"count": k, "of": n, "rate": None, "interval": None}
+    if n >= MIN_SELECTED:
+        lo, hi = clopper_pearson(k, n)
+        out.update(rate=round(k / n, 4), interval=[round(lo, 4), round(hi, 4)])
+    return out
+
+
+def served_feeds(db) -> dict:
+    """What Discover served, from its logs (models.FeedRequest and models.Impression).
+
+    * Empty feeds: feed requests that returned nothing, by policy and mode. Discover asks for a feed on every visit
+      and after every decision, so these are requests, not sessions.
+    * Useful discoveries per inspection: of the garment families you actually saw, the share you then approved
+      (love, like or purchased, decided after first seeing it), once per family, by the feed that first showed it.
+    * Repetition: a family shown again in a later feed after you had already seen it."""
+    from app.models import FeedRequest, Impression, Product
+    from app.services.approval_data import rated_outcomes
+
+    feeds = {f.id: f for f in db.query(FeedRequest)}
+    requests: dict[str, list[int]] = {}
+    for f in feeds.values():
+        r = requests.setdefault(f.policy if not f.mode else f"{f.policy}:{f.mode}", [0, 0])
+        r[0] += 1
+        r[1] += not f.items
+    group_of = dict(db.query(Product.id, Product.group_id))
+    labels = {o.family: o for o in rated_outcomes(db)}
+    first: dict[str, tuple] = {}  # family -> (first seen, the feed policy that showed it)
+    seen_in: dict[str, set] = {}
+    displays = repeats = 0
+    query = db.query(Impression).filter(Impression.product_id.isnot(None))
+    for imp in query.order_by(Impression.shown_at, Impression.id):
+        gid = group_of.get(imp.product_id)
+        family = f"g{gid}" if gid is not None else f"p{imp.product_id}"
+        feeds_seen = seen_in.setdefault(family, set())
+        if imp.feed_id in feeds_seen:
+            continue  # shown twice by one feed (as a card and in the grid): one display
+        displays += 1
+        repeats += bool(feeds_seen)
+        feeds_seen.add(imp.feed_id)
+        if family not in first:
+            fr = feeds.get(imp.feed_id)
+            first[family] = (imp.shown_at, "learning" if imp.explore else (fr.policy if fr else "unlogged"))
+    found: dict[str, list[int]] = {}
+    for family, (at, policy) in first.items():
+        o = labels.get(family)
+        f = found.setdefault(policy, [0, 0])
+        f[0] += bool(o is not None and o.y == 1 and o.created_at >= at)
+        f[1] += 1
+    total = [sum(v[0] for v in found.values()), sum(v[1] for v in found.values())]
+    return {
+        "empty_feeds": {k: _rate(e, n) for k, (n, e) in sorted(requests.items())},
+        "discoveries_per_inspection": {"all": _rate(*total), **{k: _rate(*v) for k, v in sorted(found.items())}},
+        "repetition": _rate(repeats, displays),
+    }
 
 
 # ----------------------------------------------------------------- report
@@ -345,17 +472,38 @@ def report(result: dict) -> str:
         if "refused" in modes:
             lines += [f"Modes: refused ({modes['refused']}).", ""]
         else:
-            lines += ["| Mode | Coverage | Gate precision [95% CI] | Taste ranking, same coverage | Estimate only | "
-                      "Raw σ(m) |", "|---|---|---|---|---|---|"]  # fmt: skip
+            lines += ["| Mode | Coverage | Gate precision [95% CI] | Taste ranking, same coverage | Estimate only "
+                      "(its coverage) | Raw σ(m) (its coverage) |", "|---|---|---|---|---|---|"]  # fmt: skip
             for mode in ("balanced", "high", "extreme"):
                 g = modes[mode]
+                est, raw = g["ablation_estimate_only"], g["ablation_raw_probability"]
                 lines.append(f"| {mode} ({_pct(g['target'])} at {_pct(g['confidence'])}) | {_pct(g['coverage'])} | "
                              f"{_prec(g['gate'])} | {_prec(g['taste_ranking_same_coverage'])} | "
-                             f"{_prec(g['ablation_estimate_only'])} | {_prec(g['ablation_raw_probability'])} |")  # fmt: skip
+                             f"{_prec(est)} ({_pct(est['coverage'])}) | {_prec(raw)} ({_pct(raw['coverage'])}) |")  # fmt: skip
             lines += ["", f"Showing every rated piece instead (the base rate): {_prec(modes['all_rated'])}.", ""]
+        u = r.get("unfamiliar_sellers") or {}
+        if u.get("predictions"):
+            lines += [f"Sellers you had never rated before: {u['predictions']} predictions ({u['approvals']} "
+                      "approvals).", "", "| Estimate | n | Brier | Log loss | ECE | AUC |", "|---|---|---|---|---|---|",
+                      _cal_line("raw σ(m)", u["raw"]), _cal_line("calibrated", u["calibrated"]), ""]  # fmt: skip
+    served = result.get("served")
+    if served:
+        lines += ["## Served feeds (Discover's logs)", "", "| | Count | Rate [95% CI] |", "|---|---|---|"]
+        for k, r in served["empty_feeds"].items():
+            lines.append(f"| Empty feed requests, {k} | {r['count']} of {r['of']} | {_share(r)} |")
+        for k, r in served["discoveries_per_inspection"].items():
+            lines.append(f"| Approved after first seeing it, {k} | {r['count']} of {r['of']} | {_share(r)} |")
+        r = served["repetition"]
+        lines += [f"| Shown again after you had seen it | {r['count']} of {r['of']} | {_share(r)} |", ""]
     lines += ["Targets are aspirations: a mode meets its target only when the lower end of its interval clears it. "
               "Rates below the minimum sample are shown as counts only."]  # fmt: skip
     return "\n".join(lines)
+
+
+def _share(r: dict) -> str:
+    if r["rate"] is None:
+        return "too few"
+    return f"{_pct(r['rate'])} [{_pct(r['interval'][0])}, {_pct(r['interval'][1])}]"
 
 
 def run_all(db, *, block: int = BLOCK, seed: int = 0) -> dict:
@@ -367,8 +515,9 @@ def run_all(db, *, block: int = BLOCK, seed: int = 0) -> dict:
     logged = summarise(preds, cfg) if preds else {"refused": f"needs more than {FIRST_ORIGIN} rated pieces"}
     # Aggregates only: no per-decision records are saved. The hash identifies the label set for comparisons.
     labels = hashlib.sha256("|".join(sorted(f"{p.family}:{p.y}" for p in preds)).encode()).hexdigest()[:16]
+    served = served_feeds(db)  # before the representative protocol, which deletes decisions from the copy
     return {"engine_version": ENGINE_VERSION, "settings": cfg, "block": block, "label_set_hash": labels,
-            "logged": logged, "representative": representative(db, seed)}  # fmt: skip
+            "logged": logged, "served": served, "representative": representative(db, seed)}  # fmt: skip
 
 
 def main(argv: list[str] | None = None) -> int:

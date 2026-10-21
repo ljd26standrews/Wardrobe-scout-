@@ -17,7 +17,9 @@ Method
    σ_u² = (â² + var a)·s² + var(a)·m² + 2·cov(a, b)·m + var(b) combines how little the model knows about this piece
    (s, the posterior s.d. of its logit) with the calibration's own uncertainty.
 5. **Diagnostics**, also out-of-fold (the Platt step is refitted without each fold before scoring it): Brier score,
-   log loss, expected calibration error and reliability bins, for the raw σ(m) and for p̂, with counts.
+   log loss, expected calibration error and reliability bins, for the raw σ(m) and for p̂, with counts. The figures
+   reported for the map in use are nested: the identity-or-Platt choice is remade without each fold before scoring
+   it, so the choice cannot flatter itself. AUC counts ties as one half.
 
 Below ``min_labels`` rated families, or without ``min_each_class`` of both outcomes, there is no calibration and no
 approval estimate is produced anywhere.
@@ -39,6 +41,7 @@ from functools import cached_property
 from statistics import NormalDist
 
 import numpy as np
+from scipy.stats import rankdata
 from sqlalchemy import func
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -174,19 +177,57 @@ def _ece(p: np.ndarray, y: np.ndarray, bins: int) -> tuple[float, list[dict]]:
 
 
 def _auc(score: np.ndarray, y: np.ndarray) -> float | None:
+    """P(an approved piece scores above a rejected one), ties counting one half (Mann-Whitney U with average ranks).
+    None without both outcomes."""
+    score, y = np.asarray(score, float), np.asarray(y)
     pos, neg = score[y == 1], score[y == 0]
     if not len(pos) or not len(neg):
         return None
-    ranks = np.argsort(np.argsort(np.concatenate([pos, neg]), kind="stable"), kind="stable") + 1.0
+    ranks = rankdata(np.concatenate([pos, neg]), method="average")
     return float((ranks[: len(pos)].sum() - len(pos) * (len(pos) + 1) / 2) / (len(pos) * len(neg)))
 
 
-def diagnostics(m: np.ndarray, y: np.ndarray, fold: np.ndarray) -> dict:
-    """Out-of-fold quality of the raw σ(m) and of the calibrated estimate (Platt refitted without each fold)."""
+def _platt_out_of_fold(m: np.ndarray, y: np.ndarray, fold: np.ndarray) -> np.ndarray:
     cal = np.zeros(len(y))
     for i in np.unique(fold):
         a, b, _ = fit_platt(m[fold != i], y[fold != i])
         cal[fold == i] = _sigmoid(a * m[fold == i] + b)
+    return cal
+
+
+def _brier(p: np.ndarray, y: np.ndarray) -> float:
+    return float(np.mean((p - y) ** 2))
+
+
+def _prefer_platt(m: np.ndarray, y: np.ndarray, fold: np.ndarray) -> bool:
+    """Platt only if it beats the identity map out of fold, by MIN_BRIER_GAIN."""
+    if len(np.unique(fold)) < 2:
+        return False
+    return _brier(_platt_out_of_fold(m, y, fold), y) < _brier(_sigmoid(m), y) - MIN_BRIER_GAIN
+
+
+def _nested(m: np.ndarray, y: np.ndarray, fold: np.ndarray) -> tuple[np.ndarray, list[str]]:
+    """Out-of-fold estimates of the whole procedure, its choice between identity and Platt included: for each fold
+    the choice is made on the other folds alone, then applied to it. Reporting the better of the two out-of-fold
+    scores instead would flatter the chosen map (it was chosen on those same scores)."""
+    out, choices = np.zeros(len(y)), []
+    for i in np.unique(fold):
+        inner = fold != i
+        platt = _prefer_platt(m[inner], y[inner], fold[inner])
+        if platt:
+            a, b, _ = fit_platt(m[inner], y[inner])
+            out[fold == i] = _sigmoid(a * m[fold == i] + b)
+        else:
+            out[fold == i] = _sigmoid(m[fold == i])
+        choices.append("platt" if platt else "identity")
+    return out, choices
+
+
+def diagnostics(m: np.ndarray, y: np.ndarray, fold: np.ndarray) -> dict:
+    """Out-of-fold quality of the raw σ(m), of the Platt map (refitted without each fold), and of the whole
+    procedure including its choice between the two (nested): the last is what the chosen map is reported with."""
+    cal = _platt_out_of_fold(m, y, fold)
+    nested, choices = _nested(m, y, fold)
     raw = _sigmoid(m)
     bins = max(2, min(10, len(y) // 10))
     eps = 1e-9
@@ -196,13 +237,17 @@ def diagnostics(m: np.ndarray, y: np.ndarray, fold: np.ndarray) -> dict:
 
     ece_raw, bins_raw = _ece(raw, y, bins)
     ece_cal, bins_cal = _ece(cal, y, bins)
+    ece_nested, bins_nested = _ece(nested, y, bins)
     return {
         "n": int(len(y)), "positives": int(y.sum()), "base_rate": round(float(y.mean()), 4),
         "auc_out_of_fold": None if (a := _auc(m, y)) is None else round(a, 4),
-        "brier_raw": round(float(np.mean((raw - y) ** 2)), 4), "brier_calibrated": round(float(np.mean((cal - y) ** 2)), 4),
+        "brier_raw": round(_brier(raw, y), 4), "brier_calibrated": round(_brier(cal, y), 4),
+        "brier_nested": round(_brier(nested, y), 4),
         "logloss_raw": round(logloss(raw), 4), "logloss_calibrated": round(logloss(cal), 4),
-        "ece_raw": round(ece_raw, 4), "ece_calibrated": round(ece_cal, 4), "reliability": bins_cal,
-        "reliability_raw": bins_raw,
+        "logloss_nested": round(logloss(nested), 4),
+        "ece_raw": round(ece_raw, 4), "ece_calibrated": round(ece_cal, 4), "ece_nested": round(ece_nested, 4),
+        "reliability": bins_cal, "reliability_raw": bins_raw, "reliability_nested": bins_nested,
+        "nested_choices": choices,
     }  # fmt: skip
 
 
@@ -219,13 +264,14 @@ def fit_map(
     m, _, y, fold = out_of_fold(db, space, outcomes, exclude=exclude, before=before)
     a, b, cov = fit_platt(m, y)
     diag = diagnostics(m, y, fold)
-    use_platt = diag["brier_calibrated"] < diag["brier_raw"] - MIN_BRIER_GAIN
+    use_platt = _prefer_platt(m, y, fold)
     if not use_platt:  # the model's own probabilities did as well: keep them (the uncertainty in cov stays)
         a, b = 1.0, 0.0
     diag["map"] = "platt" if use_platt else "identity"
-    diag["brier_chosen"] = diag["brier_calibrated"] if use_platt else diag["brier_raw"]
-    diag["ece_chosen"] = diag["ece_calibrated"] if use_platt else diag["ece_raw"]
-    diag["reliability_chosen"] = diag["reliability"] if use_platt else diag["reliability_raw"]
+    # Reported with the nested estimate: the choice of map is part of what is being measured.
+    diag["brier_chosen"] = diag["brier_nested"]
+    diag["ece_chosen"] = diag["ece_nested"]
+    diag["reliability_chosen"] = diag["reliability_nested"]
     return a, b, cov, diag, y, fold
 
 
