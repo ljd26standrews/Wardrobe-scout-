@@ -10,10 +10,11 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
+DB_FILENAME = "wardrobe_scout.db"
 
 
 class Settings(BaseSettings):
@@ -23,9 +24,10 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # Storage
-    database_url: str = Field(default=f"sqlite:///{BACKEND_DIR / 'data' / 'wardrobe_scout.db'}")
+    # Storage. Without WS_DATABASE_URL the database lives in the data folder (WS_DATA_DIR).
+    database_url: str = ""
     data_dir: Path = Field(default=BACKEND_DIR / "data")
+    database_location_note: str | None = None  # set when an older layout is being kept
 
     # HTTP / ingestion politeness
     user_agent: str = "Mozilla/5.0 (compatible; WardrobeScout/1.0; personal catalogue reader; +local)"
@@ -70,6 +72,25 @@ class Settings(BaseSettings):
     cors_origins: list[str] = ["*"]
     log_level: str = "INFO"
     log_json: bool = False
+
+    @model_validator(mode="after")
+    def _default_database(self) -> Settings:
+        if self.database_url:
+            return self
+        in_data_dir = self.data_dir / DB_FILENAME
+        legacy = BACKEND_DIR / "data" / DB_FILENAME
+        if not in_data_dir.exists() and legacy.exists() and legacy.resolve() != in_data_dir.resolve():
+            # Earlier versions kept the database in backend/data even when WS_DATA_DIR pointed elsewhere.
+            # Keep using it rather than starting an empty one; say how to move it.
+            self.database_url = f"sqlite:///{legacy}"
+            self.database_location_note = (
+                f"Using the existing database at {legacy} although WS_DATA_DIR is {self.data_dir}. "
+                f"To keep everything together, stop the app and move it to {in_data_dir} "
+                f"(or set WS_DATABASE_URL explicitly)."
+            )
+        else:
+            self.database_url = f"sqlite:///{in_data_dir}"
+        return self
 
     @property
     def images_dir(self) -> Path:

@@ -80,8 +80,8 @@ Everything lives in `.env` at the repo root (copied from `.env.example`) and in 
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `WS_DATABASE_URL` | SQLite in `backend/data/` | Use `postgresql+psycopg://…` for PostgreSQL (then `pip install psycopg[binary]`) |
-| `WS_DATA_DIR` | `backend/data` | Database, downloaded images, uploads, backups |
+| `WS_DATABASE_URL` | SQLite file `wardrobe_scout.db` in the data folder | Use `postgresql+psycopg://…` for PostgreSQL (then `pip install psycopg[binary]`) |
+| `WS_DATA_DIR` | `backend/data` | Database (unless `WS_DATABASE_URL` is set), downloaded images, uploads, backups. Earlier versions kept the database in `backend/data` even when this was set: if that database exists and the folder has none, it is still used and a warning explains how to move it |
 | `WS_REQUEST_DELAY_SECONDS` | `2.0` | Minimum delay between requests to the same host (each host is limited separately; hosts run in parallel) |
 | `WS_IMAGE_REQUEST_DELAY_SECONDS` | same as above | Minimum delay between requests to an image host (CDN). Unset = unchanged politeness |
 | `WS_MAX_PAGES_PER_SCAN` | `250` | Catalogue listing pages per scan (about 40 products each). If this is reached, the scan says the listing was not read to the end |

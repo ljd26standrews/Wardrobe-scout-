@@ -23,6 +23,8 @@ def bootstrap(run_seed: bool = True) -> None:
     import numpy  # noqa: F401 - load BLAS so the thread limit applies to it
 
     limit_blas_threads()
+    if s.database_location_note:
+        log.warning("database_location", note=s.database_location_note)
     get_api_token()  # create the token file up front so the app proxy can read it
     init_engine(s.database_url)
     migrate()

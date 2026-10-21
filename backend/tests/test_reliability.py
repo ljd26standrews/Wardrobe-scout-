@@ -487,3 +487,40 @@ def test_failed_ai_call_releases_its_reservation(env, db, monkeypatch):
     with pytest.raises(ai.AIUnavailable):
         ai._call("translate", "sys", [{"type": "text", "text": "hello"}], max_tokens=300)
     assert len(calls) == 1 and _spent() == 0
+
+
+# ------------------------------------------------------------------ 1g: database follows WS_DATA_DIR
+def _settings_for(monkeypatch, tmp_path, data_dir, url=None):
+    import app.config as config
+
+    monkeypatch.setattr(config, "BACKEND_DIR", tmp_path / "backend")  # isolate from any real install
+    monkeypatch.setenv("WS_DATA_DIR", str(data_dir))
+    if url:
+        monkeypatch.setenv("WS_DATABASE_URL", url)
+    else:
+        monkeypatch.delenv("WS_DATABASE_URL", raising=False)
+    return config.Settings(_env_file=None)
+
+
+def test_default_database_lives_in_the_data_folder(monkeypatch, tmp_path):
+    s = _settings_for(monkeypatch, tmp_path, tmp_path / "mydata")
+    assert s.database_url == f"sqlite:///{tmp_path / 'mydata' / 'wardrobe_scout.db'}"
+    assert s.database_location_note is None
+
+
+def test_existing_database_at_the_old_location_is_kept_not_orphaned(monkeypatch, tmp_path):
+    legacy = tmp_path / "backend" / "data" / "wardrobe_scout.db"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_bytes(b"")
+    s = _settings_for(monkeypatch, tmp_path, tmp_path / "mydata")
+    assert s.database_url == f"sqlite:///{legacy}" and "move it" in s.database_location_note
+    # once it has been moved (or a database exists in the data folder), that one is used
+    (tmp_path / "mydata").mkdir()
+    (tmp_path / "mydata" / "wardrobe_scout.db").write_bytes(b"")
+    s = _settings_for(monkeypatch, tmp_path, tmp_path / "mydata")
+    assert s.database_url.endswith("mydata/wardrobe_scout.db")
+
+
+def test_explicit_database_url_wins(monkeypatch, tmp_path):
+    s = _settings_for(monkeypatch, tmp_path, tmp_path / "mydata", url="sqlite:////elsewhere/x.db")
+    assert s.database_url == "sqlite:////elsewhere/x.db"
