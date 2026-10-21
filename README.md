@@ -183,6 +183,7 @@ Each product gets separate ratings for **design compatibility, demonstrated cons
 | AI photo observation | – | Shown, but never moves a score; never accepted for fibre content or fabric weight |
 
 - **Each source counts once.** A review reposted or imported twice is one source (same link, or same text without a link).
+- **Seller reliability is reported separately.** It covers service, sizing and track record. Good service never makes a garment look verified, and the ranking already scores sellers on their own.
 - **Unverified until real evidence arrives.** A dimension needs independent evidence worth at least one moderately specific buyer report before it gets a score.
 
 A dimension with no independent source is shown as **Unverified** (or *Seller claim only*), never as good or bad. Price never raises a quality score. Value compares price with the category median in your catalogue, adjusts for evidence, and drops when the same photographs are listed more cheaply elsewhere. Add evidence from any product page or seller card. Community search (Sellers → ⋯ → Search community reviews) finds Reddit posts as **leads**; you decide which become evidence and whether they are positive or negative, and promotional language is flagged automatically.

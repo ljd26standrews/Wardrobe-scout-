@@ -209,3 +209,24 @@ def test_jobs_that_return_an_error_are_not_reported_as_succeeded(env):
     assert jobs.outcome("succeeded", {"ok": False, "blocked": True, "error": "blocked"}) == "failed"
     assert jobs.outcome("succeeded", {"checked": 0, "ok": 0, "failed": 0}) == "succeeded"
     assert jobs.outcome("cancelled", {"error": "x"}) == "cancelled"
+
+
+def test_seller_service_never_makes_a_garment_look_verified(env, db):
+    from app.services.quality import assess
+
+    s = _seller(db, "svc")
+    p = _product(db, s, "sv1")
+    for i in range(3):  # strong, independent praise for the seller's service only
+        db.add(Evidence(seller_id=s.id, kind="buyer_report", aspect="service", claim=f"fast shipping {i}",
+                        polarity=1, strength=1.0, source_url=f"https://r.example/svc{i}"))  # fmt: skip
+    db.commit()
+    q = assess(db, p)
+    assert q["dimensions"]["seller_reliability"]["score"] is not None
+    assert q["quality_score"] is None and q["status"] == "Unverified"
+
+    db.add(Evidence(product_id=p.id, kind="buyer_report", aspect="stitching", claim="loose seams", polarity=-1,
+                    strength=1.0, source_url="https://r.example/qc"))  # fmt: skip
+    db.commit()
+    db.refresh(p)
+    q = assess(db, p)
+    assert q["quality_score"] == q["dimensions"]["construction"]["score"] < 50  # service praise doesn't dilute it

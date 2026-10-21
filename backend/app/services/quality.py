@@ -6,6 +6,8 @@ Principles
 * Seller claims and AI visual assessments are shown but never move a score;
   AI is never used for fibre content or durability.
 * Each source counts once: a review reposted or imported twice is one source.
+* Garment quality (construction, material) and seller reliability (service, sizing, track record) are
+  separate: good service never makes a garment look verified.
 * If the weighted evidence for a dimension is below a threshold the dimension
   is reported as **Unverified** (score ``None``), not as good or bad.
 """
@@ -167,9 +169,11 @@ def assess(
             else:
                 value["label"] = "Good" if value["score"] >= 60 else "Fair" if value["score"] >= 40 else "Weak"
 
-    dims_conf = [construction["confidence"], material["confidence"], seller_dim["confidence"]]
-    overall_conf = round(sum(dims_conf) / 3, 2)
-    known = [d["score"] for d in (construction, material, seller_dim) if d["score"] is not None]
+    # Garment quality is what is known about this garment: construction and material. The seller's service
+    # record is reported beside it (and ranked separately), never averaged into it.
+    dims_conf = [construction["confidence"], material["confidence"]]
+    overall_conf = round(sum(dims_conf) / len(dims_conf), 2)
+    known = [d["score"] for d in (construction, material) if d["score"] is not None]
     if not known:
         status = "Unverified"
     elif overall_conf < 0.5:

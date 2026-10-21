@@ -15,9 +15,9 @@ const DIM_LABEL: Record<string, string> = {
 
 const DIM_HELP: Record<string, string> = {
   design_compatibility: "How well this matches your taste. Confidence grows as you give feedback.",
-  construction: "Only independent QC photos, buyer reports, verified tests or your own notes count. Seller claims and AI photo checks barely move this.",
+  construction: "Only independent QC photos, buyer reports, verified tests or your own notes count. Seller claims and AI photo checks never move this.",
   material: "Seller-stated composition is shown as a claim. It only becomes evidence when independently confirmed.",
-  seller_reliability: "Based on buyer reports and evidence you've accepted about this seller — never on popularity alone.",
+  seller_reliability: "The seller's service and track record, from buyer reports and evidence you've accepted — never on popularity alone. Shown separately: it does not count towards this garment's quality.",
   value: "Price versus your catalogue's median for the category, adjusted for quality evidence and cheaper identical listings.",
 };
 
