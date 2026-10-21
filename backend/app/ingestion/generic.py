@@ -153,8 +153,10 @@ class GenericPageAdapter(SellerAdapter):
         product_urls = [u for u in locs if re.search(r"/(product|products|item|p)/", u)]
         if progress:
             progress(f"sitemap: {len(product_urls)} product-like URLs")
-        for u in product_urls[: max_pages * 25]:
+        limit = max_pages * 25
+        for u in product_urls[:limit]:
             yield AlbumRef(external_id=url_id(u), url=u)
+        self.exhausted = len(product_urls) <= limit
 
     def fetch_listing(self, ref_or_url: AlbumRef | str) -> RawListing:
         url = ref_or_url.url if isinstance(ref_or_url, AlbumRef) else ref_or_url
@@ -200,12 +202,14 @@ class ShopifyAdapter(SellerAdapter):
     def iter_album_refs(self, base_url: str, max_pages: int, progress: ProgressFn | None = None) -> Iterator[AlbumRef]:
         # Shopify returns full product objects; we stash them for fetch_listing.
         self._cache: dict[str, RawListing] = {}
+        self.exhausted = False
         for page in range(1, max_pages + 1):
             r = self.client.get(urljoin(base_url, f"/products.json?limit=250&page={page}"))
             products = r.json().get("products", [])
             if progress:
                 progress(f"products.json page {page}: {len(products)} products")
             if not products:
+                self.exhausted = True
                 break
             for p in products:
                 listing = shopify_product_to_listing(p, base_url)

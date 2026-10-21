@@ -211,6 +211,7 @@ class YupooAdapter(SellerAdapter):
         )
         pages = 0
         seen: set[str] = set()
+        self.exhausted = False
         while url and pages < max_pages:
             page = self.list_page(url)
             pages += 1
@@ -226,8 +227,10 @@ class YupooAdapter(SellerAdapter):
                 new_on_page += 1
                 yield ref
             if new_on_page == 0:
+                url = None  # a page with nothing new means we've wrapped around: end of catalogue
                 break
             url = page.next_url
+        self.exhausted = url is None
 
     def fetch_listing(self, ref_or_url: AlbumRef | str) -> RawListing:
         url = ref_or_url.url if isinstance(ref_or_url, AlbumRef) else ref_or_url

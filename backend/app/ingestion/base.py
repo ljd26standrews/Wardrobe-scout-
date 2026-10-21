@@ -56,6 +56,9 @@ class SellerAdapter(ABC):
 
     def __init__(self, client: PoliteClient) -> None:
         self.client = client
+        # Set by iter_album_refs: True only when the catalogue's pagination was genuinely
+        # exhausted (not stopped by a page limit). Removal detection relies on this.
+        self.exhausted = False
 
     @classmethod
     @abstractmethod

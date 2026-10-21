@@ -234,8 +234,12 @@ def scan_seller(
         else:
             completed_traversal = True
 
-        # Products not seen in a complete full traversal are marked unavailable (never deleted)
-        if mode == "full" and completed_traversal and seen_ids:
+        # Products not seen in a complete full traversal are marked unavailable (never deleted).
+        # "Complete" requires the adapter to confirm pagination ended - a page limit is not the end.
+        exhausted = completed_traversal and getattr(adapter, "exhausted", False)
+        if mode == "full" and completed_traversal and not exhausted:
+            say("page limit reached before the end of the catalogue; removals were not checked")
+        if mode == "full" and exhausted and seen_ids:
             for p in db.query(Product).filter(
                 Product.seller_id == seller.id, Product.status == "active", Product.data_origin == "scraped"
             ):
