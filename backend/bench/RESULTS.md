@@ -13,8 +13,10 @@ Every number here comes from a run whose raw output is in [`results/`](results/)
   - The *baseline* is the scanner at commit `2bca6b3` (`audit/phase-1`).
   - *Optimised* is the scanner at `f1e9ecb` (`perf/scanning`).
   - Each file records which `app` package ran (`app_code`).
-  - Later reliability fixes (branch `audit/reliability-followup`) don't change the scanning strategy. Only the
-    duplicate-counting change was re-measured, and only for one catalogue (see "Tranche 2 re-check" below).
+  - Later reliability fixes (branch `audit/reliability-followup`) don't change the scanning strategy. Two of
+    them were re-measured, each on one catalogue; see the two "Tranche 2 re-check" sections below:
+    - duplicate counting;
+    - pages that arrive cut short.
 - **How to read the times:**
   - Wall-clock times at `--scale < 1` mix scaled network waits with unscaled CPU time.
   - The comparable figures are requests, bytes, CPU seconds, and the **minimum real-world time** (requests × the
@@ -122,6 +124,31 @@ The server returned 5% HTTP 503 errors, 5% missing images, 3% truncated album pa
   images remove matching evidence.
 
 Files: `base300_faults.json`, `opt300_faults.json`.
+
+### Tranche 2 re-check: pages that arrive cut short
+
+The fault settings were the same as above. Each version was run three times, interleaved:
+
+- **Before:** `9028daf`, which stored a cut-short page as it arrived.
+- **After:** `43977d2`, which keeps stored values for what a cut page did not reach and reads it again.
+
+| | Before | After |
+|---|---|---|
+| First-scan requests (three runs) | 756, 759, 766 | 788, 868, 749 |
+| Requests in the follow-up analysis pass | 2, 0, 0 | 16, 16, 20 |
+| Products with a photo vector | 300 in every run | 300 in every run |
+| True duplicates found (strong), of 31 | 1, 3, 1 | 1, 6, 1 |
+| Deep duplicate checks | 12, 12, 14 | 17, 30, 11 |
+
+- **The extra requests are the intended cost.** The 16–20 requests in the follow-up pass re-read the roughly 9 album pages that arrived cut short, plus their photos.
+- **Single fault-injection runs can't be compared.** Duplicate recall varies more between runs of the same code than between versions:
+  - here: 1–6 of 31 across six runs;
+  - the single run reported above: 12 of 31;
+  - one uncontrolled pair run during development: 9 and 3.
+
+  Random faults land on different requests each time, and that changes which duplicate checks happen.
+
+Files: `tranche2_faults_prev_{1,2,3}.json`, `tranche2_faults_new_{1,2,3}.json`.
 
 ## CPU: limiting numpy's maths threads
 
