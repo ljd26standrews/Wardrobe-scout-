@@ -62,6 +62,11 @@ REPEAT_MIN_PRODUCTS_GARMENT_LOOKING = 5
 MAX_VERIFY = 200
 MAX_DEEP = 300
 
+EMPTY_HELP = (
+    "No albums were found on the first catalogue page. The catalogue may be empty, restricted or laid out "
+    "differently; nothing was marked as removed."
+)
+
 
 class Cancelled(Exception):
     pass
@@ -100,7 +105,9 @@ class SellerState:
     stale: list[tuple] = field(default_factory=list)
     new_ids: list[int] = field(default_factory=list)
     repeat_idx: dedup.PhashIndex = field(default_factory=dedup.PhashIndex)
-    counts: dict = field(default_factory=lambda: {"discovered": 0, "new": 0, "changed": 0, "unchanged": 0})
+    counts: dict = field(
+        default_factory=lambda: {"discovered": 0, "new": 0, "changed": 0, "unchanged": 0, "notices": 0}
+    )
 
 
 class Scanner:
@@ -223,6 +230,9 @@ class Scanner:
         st.run.products_seen += 1
         st.counts["discovered"] += 1
         self.stats["discovered"] += 1
+        if ref.notice:
+            self._skip_notice(st, ref)
+            return
         cached = getattr(st.adapter, "cached_listing", lambda r: None)(ref)
         if cached is not None:  # the catalogue feed already contained the whole product (Shopify)
             res = pipeline.upsert_listing(self.db, st.seller, cached, use_ai=self.use_ai)
@@ -261,6 +271,20 @@ class Scanner:
             if p.analysed_at is None or p.analysis_state in ("discovered", "partial"):
                 self._continue_images(st, p, P_RESUME)
 
+    def _skip_notice(self, st: SellerState, ref: AlbumRef) -> None:
+        """A shop notice (contact details, ordering guide) is not a product; one recorded earlier is set aside."""
+        st.counts["notices"] += 1
+        p = (
+            self.db.query(Product)
+            .filter(Product.seller_id == st.seller.id, Product.external_id == ref.external_id)
+            .one_or_none()
+        )
+        if p is not None and p.status == "active" and p.data_origin == "scraped":
+            p.status = "notice"
+            self.db.add(ProductObservation(product=p, observed_at=utcnow(), price=p.price, sizes=p.sizes,
+                                           status="notice", source_url=p.source_url,
+                                           change="identified as a shop notice, not a product"))  # fmt: skip
+
     def _discovery_finished(self, st: SellerState, err: Exception | None) -> None:
         st.discovery_done = True
         st.run.pages_fetched = st.adapter.pages_read
@@ -276,6 +300,8 @@ class Scanner:
             st.status, st.message = "failed", f"{type(err).__name__}: {err}"
             log.exception("discovery_failed", seller=st.seller.slug, exc_info=err)
         st.exhausted = err is None and bool(getattr(st.adapter, "exhausted", False))
+        if err is None and getattr(st.adapter, "empty", False):
+            st.status, st.message = "partial", EMPTY_HELP
         if st.status:
             self._drop_seller(st)
             return

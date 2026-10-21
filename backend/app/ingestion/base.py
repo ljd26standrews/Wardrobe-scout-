@@ -41,6 +41,8 @@ class AlbumRef:
     title: str | None = None
     cover_url: str | None = None
     cover_thumb: str | None = None  # smaller variant of the cover, as shown in the catalogue grid
+    photo_count: int | None = None  # as the catalogue grid states it
+    notice: bool = False  # a shop notice (contact details, ordering guide...), not a product
 
 
 @dataclass

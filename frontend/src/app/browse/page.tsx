@@ -48,6 +48,7 @@ export default function BrowsePage() {
         <Select className="h-9 w-auto rounded-full text-xs" value={status} onChange={(e) => setStatus(e.target.value)} aria-label="Status">
           <option value="active">Available</option>
           <option value="unavailable">Unavailable</option>
+          <option value="notice">Shop notices</option>
           <option value="all">All</option>
         </Select>
         <Select className="h-9 w-auto rounded-full text-xs" value={origin} onChange={(e) => setOrigin(e.target.value)} aria-label="Origin">

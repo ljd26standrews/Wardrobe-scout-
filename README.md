@@ -124,13 +124,16 @@ API keys are only read from the environment and are never stored in the database
 | **Yupoo** catalogues | Server-rendered HTML: category discovery, `/albums?page=N` pagination, album pages (title, description, all photos, Weidian/Taobao links, item codes, prices) | Automatic |
 | **Shopify** shops | The official public `/products.json` feed | Automatic |
 | Other shop websites | schema.org JSON-LD / OpenGraph on product pages; sitemap discovery | Automatic per page |
-| **Weidian** items | Embedded data in the item page when present. Optional Playwright rendering for JS-only pages | Per link (best effort) |
+| **Weidian** items | The item data embedded in the page (name, price, sizes, stock, photos). A page showing only a generic shell is refused rather than stored. Optional Playwright rendering for JS-only pages | Per link (best effort) |
 | Weidian shop listings | Served by authenticated JavaScript APIs, so **not traversed** | Add item links instead |
 | Anything else | Paste link · manual form with photo upload · CSV/JSON · **bookmarklet** | Always works |
 
 **Politeness and limits.**
 - **Robots and blocks.** Scans honour robots.txt and retry only transient errors. On HTTP 401/403/429 or a verification/CAPTCHA page they **stop and report "blocked"**. Nothing is ever bypassed.
 - **Request pacing.** Each host gets at most one request at a time, never faster than its delay (2 s by default). If a host answers with errors or slows down, its delay grows automatically and then relaxes gradually. Different hosts — each seller's catalogue and the image CDN — proceed in parallel, so waiting for one never holds up another.
+- **Password-protected catalogues.** These are reported as blocked. No password is tried.
+- **Unreadable catalogues retire nothing.** A first page with no albums is reported, not treated as an empty catalogue. Nothing is marked removed.
+- **Shop notices are not products.** Albums such as "Contact us", "New WhatsApp" or "Read before ordering" are skipped. A notice is only skipped when its title has no price, names no garment and the album has 15 photos or fewer.
 - **Referer header.** Image hosts that check the Referer header get the album page as Referer, exactly as your browser sends it.
 
 **How a scan runs.**
@@ -307,7 +310,12 @@ backend/eval/    recommender evaluation with simulated shoppers
 
 ## Known limitations (please read)
 
-- **Not yet verified against the live seller sites.** This was built in a sandbox whose network policy blocked yupoo.com, weidian.com and reddit.com. The Yupoo parser follows Yupoo's public page structure and uses several fallback selectors. It is tested against faithful synthetic pages and a full local scan, but its first run against the real catalogues happens on your computer. If Yupoo's layout differs, the seller card says **"Page layout not recognised"** instead of silently reporting zero products. The parser is `backend/app/ingestion/yupoo.py`.
+- **Checked against a sample of real pages, not a live crawl.** The parsers are tested against these pages, captured in October 2026 (trimmed, in `backend/tests/fixtures/live/`):
+  - three real Yupoo albums;
+  - four real catalogue first pages, one of them password-protected;
+  - one real Weidian item.
+
+  Sellers change their layouts. If a page isn't recognised, the seller card says **"Page layout not recognised"** instead of silently reporting zero products. The parser is `backend/app/ingestion/yupoo.py`.
 - **The four seed items are unverified.** They come from your notes, with historical prices and no photos. They are labelled *Seed · unverified* and are watched: once a Weidian page is readable on your machine (statically or with Playwright), the record is replaced with the real data.
 - **Weidian** pages are mostly rendered by JavaScript. Static extraction may find nothing. Then enable Playwright, use the bookmarklet, or enter the item manually. Weidian shop-wide listing traversal isn't implemented, because it relies on authenticated APIs.
 - **Seller reputation starts "unassessed" for all five sellers.** I couldn't reach community sources from the build environment, and popularity isn't treated as evidence. Run community searches from your machine and accept the leads you trust.

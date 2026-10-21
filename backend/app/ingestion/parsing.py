@@ -7,6 +7,7 @@ treated downstream as a *seller claim*, never as verified fact.
 
 from __future__ import annotations
 
+import html
 import re
 from dataclasses import dataclass, field
 from urllib.parse import parse_qsl, unquote, urlparse
@@ -375,6 +376,8 @@ def canonical_url(url: str | None) -> str | None:
         if target is None:
             break
         u = target
+    if "&" in u:
+        u = html.unescape(u)  # a link copied out of page source can carry "&amp;"
     p = urlparse(u)
     return u if p.scheme in ("http", "https") and p.hostname else None
 

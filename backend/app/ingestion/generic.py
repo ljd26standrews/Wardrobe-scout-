@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import hashlib
+import html as htmllib
 import json
 import re
 from collections.abc import Iterator
@@ -264,24 +265,92 @@ def _unescape(s: str) -> str:
         return s
 
 
+_GENERIC_TITLES = {"微店", "weidian", "商品详情", "微店商品详情", "商品详情页"}
+_SIZE_ATTRS = {"size", "尺码", "尺寸", "码数"}
+
+
+def _weidian_embedded(soup: BeautifulSoup) -> tuple[dict, dict] | None:
+    """The item data a Weidian page embeds as JSON in a ``data-obj`` attribute: (item_info, sku_properties)."""
+    for el in soup.select("[data-obj]"):
+        try:
+            model = json.loads(el["data-obj"])["result"]["default_model"]
+        except (ValueError, KeyError, TypeError):
+            continue
+        if isinstance(model, dict) and isinstance(model.get("item_info"), dict):
+            return model["item_info"], model.get("sku_properties") or {}
+    return None
+
+
+def _num(v) -> float | None:
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _listing_from_embedded(item: dict, skus: dict, url: str, item_id: str) -> RawListing | None:
+    title = normalise_space(str(item.get("item_name") or ""))
+    if not title or title.lower() in _GENERIC_TITLES:
+        return None
+    price = None
+    if isinstance(item.get("itemLowPrice"), int) and item["itemLowPrice"] > 0:
+        price = item["itemLowPrice"] / 100  # in fen
+    if price is None:
+        sku_prices = [_num(v.get("price")) for v in (skus.get("sku") or {}).values() if isinstance(v, dict)]
+        sku_prices = [x for x in sku_prices if x]
+        price = min(sku_prices) if sku_prices else _num(item.get("price")) or _num(item.get("origin_price"))
+    sizes: list[str] = []
+    for attr in skus.get("attr_list") or []:
+        if str(attr.get("attr_title", "")).strip().lower() in _SIZE_ATTRS:
+            sizes = [str(v.get("attr_value")) for v in attr.get("attr_values") or [] if v.get("attr_value")]
+    available = None
+    if item.get("itemSellable") is False or item.get("stock") == 0:
+        available = False
+    elif item.get("itemSellable") is True and (item.get("stock") or 0) > 0:
+        available = True
+    images: list[str] = []
+    for u in [*(item.get("imgs") or []), item.get("item_head")]:
+        if isinstance(u, str) and u.startswith("http"):
+            u = u.split("?")[0]
+            if u not in images:
+                images.append(u)
+    return RawListing(
+        external_id=str(item.get("item_id") or item_id),
+        source_url=url,
+        title=title,
+        image_urls=images[:20],
+        image_referer="https://weidian.com/",
+        price=price,
+        sizes=sizes,
+        available=available,
+        links={"weidian": url},
+        fetched_at=_now(),
+    )
+
+
 def parse_weidian_html(html: str, url: str) -> RawListing:
     item_id = weidian_item_id(url) or url_id(url)
+    soup = BeautifulSoup(html, "lxml")
+    embedded = _weidian_embedded(soup)
+    if embedded is not None and (listing := _listing_from_embedded(*embedded, url, item_id)) is not None:
+        return listing
+    text = htmllib.unescape(html)  # JSON is often embedded entity-escaped (&#34;)
     title = None
     price = None
     for pat in _JSON_FIELDS["title"]:
-        if m := re.search(pat, html):
+        if m := re.search(pat, text):
             title = normalise_space(_unescape(m.group(1)))
             if title:
                 break
     for pat in _JSON_FIELDS["price"]:
-        if m := re.search(pat, html):
+        if m := re.search(pat, text):
             price = float(m.group(1))
             # Some Weidian payloads express price in fen (cents)
             if price > 100000:
                 price = price / 100
             break
     images = []
-    for m in _IMG.finditer(html):
+    for m in _IMG.finditer(text):
         u = m.group(0).replace("\\/", "/")
         u = u.split("?")[0]
         if u not in images and not u.endswith(".gif"):
@@ -293,7 +362,7 @@ def parse_weidian_html(html: str, url: str) -> RawListing:
             price = price or generic.price
         except FetchError:
             pass
-    if not title or title.lower() in ("微店", "weidian"):
+    if not title or title.lower() in _GENERIC_TITLES:
         raise FetchError(
             "Weidian page did not expose product data in static HTML. Enable Playwright rendering "
             "or import this item with the bookmarklet / manual form."
