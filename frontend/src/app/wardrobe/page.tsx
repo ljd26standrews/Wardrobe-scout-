@@ -3,7 +3,7 @@ import { useRef, useState } from "react";
 import useSWR from "swr";
 import { toast } from "sonner";
 import { ImagePlus, Layers, Plus, Shirt, ThumbsDown, Trash2 } from "lucide-react";
-import { api, type WardrobeResponse } from "@/lib/api";
+import { api, qs, type WardrobeResponse } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, EmptyState, ErrorState, Skeleton } from "@/components/ui/misc";
@@ -285,7 +285,7 @@ export default function WardrobePage() {
                           <span className="tabular-nums text-muted-foreground">
                             {g.have} of {g.want}
                           </span>
-                          <a className="text-xs underline-offset-4 hover:underline" href={`/browse`}>
+                          <a className="text-xs underline-offset-4 hover:underline" href={`/browse${qs({ category: g.category })}`} data-testid="gap-find">
                             find
                           </a>
                         </span>

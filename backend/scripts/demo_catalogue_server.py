@@ -100,6 +100,11 @@ def draw(colour, shape, variant=0) -> bytes:
             fill=colour,
             outline=(190, 190, 190),
         )
+    if variant:  # other views are close-ups of a different part, so each is a genuinely different photograph
+        boxes = [(0, 0, 0.6, 0.6), (0.4, 0.4, 1, 1), (0, 0.4, 0.6, 1), (0.4, 0, 1, 0.6)]
+        x0, y0, x1, y1 = boxes[(variant - 1) % len(boxes)]
+        img = img.crop((int(w * x0), int(h * y0), int(w * x1), int(h * y1))).resize((w, h))
+        d = ImageDraw.Draw(img)
     d.text((18, h - 30), f"SYNTHETIC DEMO IMAGE {variant}", fill=(150, 150, 150))
     buf = io.BytesIO()
     img.save(buf, "JPEG", quality=88)

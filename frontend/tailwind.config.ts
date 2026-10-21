@@ -24,6 +24,7 @@ export default {
         love: "hsl(var(--love) / <alpha-value>)",
         divpos: "hsl(var(--div-pos) / <alpha-value>)",
         divneg: "hsl(var(--div-neg) / <alpha-value>)",
+        chartaccent: "hsl(var(--chart-accent) / <alpha-value>)",
       },
       fontFamily: {
         sans: ['"Inter Variable"', "ui-sans-serif", "system-ui", "sans-serif"],

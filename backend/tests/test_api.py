@@ -6,7 +6,7 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
-from .conftest import make_image
+from .conftest import AUTH, make_image
 
 
 @pytest.fixture()
@@ -21,7 +21,7 @@ def client(env, monkeypatch):
     get_settings.cache_clear()
     from app.main import create_app
 
-    with TestClient(create_app()) as c:
+    with TestClient(create_app(), headers=AUTH) as c:
         yield c
 
 
@@ -134,16 +134,35 @@ def test_evidence_changes_quality_label(client):
 
 
 def test_compare_endpoint(client):
-    img = make_image()
-    a = _manual(client, "MM zip jacket", price="528", seller_name="A", files=[("images", ("a.jpg", img, "image/jpeg"))])
-    b = _manual(client, "MM zip jacket", price="420", seller_name="B", files=[("images", ("b.jpg", img, "image/jpeg"))])
+    imgs = [
+        ("images", (f"{i}.jpg", make_image(seed=i, shape=sh), "image/jpeg")) for i, sh in ((1, "hoodie"), (2, "tee"))
+    ]
+    a = _manual(client, "MM zip jacket", price="528", seller_name="A", files=imgs)
+    b = _manual(client, "MM zip jacket", price="420", seller_name="B", files=imgs)
     cmp = client.get(f"/api/products/{a}/compare").json()
     alt = cmp["alternatives"][0]
     assert alt["product"]["id"] == b and alt["relation"] == "shared_photos"
-    assert "unconfirmed" in alt["relation_label"]
+    assert "not proof of the same batch" in alt["relation_label"]
     assert cmp["verdict"]["recommendation"] == "cheaper_equivalent_available"
+    # Like-for-like cheaper listing => this one is worse value even without quality evidence
+    assert (
+        client.get(f"/api/products/{a}").json()["quality"]["dimensions"]["value"]["label"]
+        == "Same item cheaper elsewhere"
+    )
     r = client.post(f"/api/products/{a}/match", json={"other_id": b, "same": True}).json()
     assert r["relation"] == "confirmed_identical"
+
+
+def test_single_shared_photo_is_only_a_weak_hint(client):
+    img = make_image()
+    a = _manual(client, "Zip jacket", price="528", seller_name="A", files=[("images", ("a.jpg", img, "image/jpeg"))])
+    b = _manual(client, "Zip jacket", price="420", seller_name="B", files=[("images", ("b.jpg", img, "image/jpeg"))])
+    cmp = client.get(f"/api/products/{a}/compare").json()
+    assert cmp["alternatives"][0]["product"]["id"] == b
+    assert cmp["alternatives"][0]["relation"] == "similar_photo"
+    assert cmp["verdict"]["recommendation"] != "cheaper_equivalent_available"
+    value = client.get(f"/api/products/{a}").json()["quality"]["dimensions"]["value"]
+    assert value["score"] is None  # no like-for-like claim, no quality evidence => unknown
 
 
 def test_settings_validation_and_backup_roundtrip(client):

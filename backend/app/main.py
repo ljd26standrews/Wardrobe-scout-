@@ -7,8 +7,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .api import feedback, products, sellers, system, wardrobe
-from .config import get_settings
+from .api import evaluation, feedback, products, selective, sellers, system, wardrobe
+from .config import get_api_token, get_settings, limit_blas_threads
 from .db import SessionLocal, init_engine, migrate
 from .logging_setup import configure_logging, get_logger
 from .models import AppSetting
@@ -20,6 +20,12 @@ log = get_logger(__name__)
 
 def bootstrap(run_seed: bool = True) -> None:
     s = get_settings()
+    import numpy  # noqa: F401 - load BLAS so the thread limit applies to it
+
+    limit_blas_threads()
+    if s.database_location_note:
+        log.warning("database_location", note=s.database_location_note)
+    get_api_token()  # create the token file up front so the app proxy can read it
     init_engine(s.database_url)
     migrate()
     if run_seed:
@@ -62,29 +68,56 @@ async def lifespan(app: FastAPI):
     bootstrap()
     _recompute_if_backend_changed()
     if s.enable_scheduler:
+        jobs.enqueue_upgrade_jobs()
         jobs.start_scheduler()
     yield
     jobs.stop_scheduler()
 
 
+class APITokenMiddleware:
+    """Require the per-install token on every /api request (except /api/health and CORS preflights).
+
+    Without this, any website open in your browser could read or change your data through the
+    localhost API. The Next.js proxy adds the token server-side; the bookmarklet carries it explicitly.
+    """
+
+    OPEN_PATHS = {"/api/health"}
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or scope["method"] == "OPTIONS":
+            return await self.app(scope, receive, send)
+        path = scope["path"]
+        if path.startswith("/api/") and path not in self.OPEN_PATHS:
+            import hmac
+
+            sent = dict(scope["headers"]).get(b"x-ws-token", b"").decode("latin-1")
+            if not hmac.compare_digest(sent, get_api_token()):
+                from starlette.responses import JSONResponse
+
+                resp = JSONResponse({"detail": "missing or invalid API token"}, status_code=401)
+                return await resp(scope, receive, send)
+        return await self.app(scope, receive, send)
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title="Wardrobe Scout API", version="1.0.0", lifespan=lifespan)
+    # Added first so CORS wraps it: even 401 responses carry CORS headers for the bookmarklet.
+    app.add_middleware(APITokenMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=get_settings().cors_origins,
         allow_methods=["*"],
         allow_headers=["*"],
+        # Chrome sends a Private Network Access preflight when a public page (the bookmarklet on a
+        # seller site) calls localhost; without this the preflight is rejected with 400.
+        allow_private_network=True,
     )
-    for r in (products.router, feedback.router, sellers.router, wardrobe.router, system.router):
+    routers = (products, feedback, sellers, wardrobe, system, evaluation, selective)
+    for r in (m.router for m in routers):
         app.include_router(r)
-
-    @app.middleware("http")
-    async def private_network_access(request, call_next):
-        # Lets the bookmarklet (running on a public https page in *your* browser) reach this local API.
-        response = await call_next(request)
-        if request.headers.get("access-control-request-private-network"):
-            response.headers["Access-Control-Allow-Private-Network"] = "true"
-        return response
 
     return app
 

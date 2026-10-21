@@ -9,6 +9,16 @@ from __future__ import annotations
 # Chinese -> English garment glossary used by the offline translator.
 GLOSSARY: list[tuple[str, str]] = [
     # materials
+    ("仿羊绒", "imitation cashmere"),
+    ("羊绒手感", "cashmere-like hand feel"),
+    ("仿羊毛", "imitation wool"),
+    ("棉服", "padded coat"),
+    ("棉衣", "padded jacket"),
+    ("棉袄", "padded jacket"),
+    ("羽绒服", "down jacket"),
+    ("连帽夹克", "hooded jacket"),
+    ("连帽外套", "hooded jacket"),
+    ("冲锋衣", "shell jacket"),
     ("羊毛羊绒", "wool-cashmere"),
     ("羊绒羊毛", "cashmere-wool"),
     ("山羊绒", "cashmere"),
@@ -291,6 +301,22 @@ NEUTRAL_COLOURS = {"black", "charcoal", "grey", "white", "cream", "beige", "taup
 
 # Category -> aliases. Order matters: specific garments before generic words.
 CATEGORIES: list[tuple[str, list[str]]] = [
+    # Hooded jackets/coats are outerwear, not hoodies - match them before the generic "hooded".
+    (
+        "jacket",
+        [
+            "hooded jacket",
+            "hooded coat",
+            "连帽夹克",
+            "连帽外套",
+            "冲锋衣",
+            "parka",
+            "padded coat",
+            "棉服",
+            "棉衣",
+            "棉袄",
+        ],
+    ),
     ("hoodie", ["hoodie", "hooded", "连帽卫衣", "帽衫", "连帽"]),
     ("cardigan", ["cardigan", "开衫"]),
     ("down jacket", ["down jacket", "puffer", "羽绒服", "羽绒外套"]),

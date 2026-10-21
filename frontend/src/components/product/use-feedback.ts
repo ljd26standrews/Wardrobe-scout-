@@ -14,7 +14,8 @@ const MESSAGES: Record<ActionName, string> = {
   purchased: "Added to My Wardrobe",
 };
 
-export function useFeedback(onDone?: () => void) {
+/** Records a decision. ``onUndo`` runs after the toast's Undo removed it (e.g. to put the card back). */
+export function useFeedback(onDone?: () => void, onUndo?: (productId: number) => void) {
   return useCallback(
     async (productId: number, action: ActionName, reasons: string[] = [], note?: string, context: Record<string, unknown> = {}) => {
       try {
@@ -28,6 +29,7 @@ export function useFeedback(onDone?: () => void) {
               onClick: async () => {
                 await api.del(`/api/feedback/${res.feedback_id}`);
                 toast("Undone");
+                onUndo?.(productId);
                 onDone?.();
               },
             },
@@ -39,6 +41,6 @@ export function useFeedback(onDone?: () => void) {
         throw e;
       }
     },
-    [onDone],
+    [onDone, onUndo],
   );
 }

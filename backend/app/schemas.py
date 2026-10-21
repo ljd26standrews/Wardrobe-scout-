@@ -28,6 +28,25 @@ Aspect = Literal[
 ]
 
 
+class JudgementIn(BaseModel):
+    product_id: int
+    taste: int = Field(ge=0, le=3)  # 0 not for me · 1 unsure · 2 like · 3 love
+    owned_similar: bool = False
+    too_expensive: bool = False
+    quality_unclear: bool = False
+    note: str | None = Field(default=None, max_length=1000)
+
+
+class ViewedItem(BaseModel):
+    product_id: int
+    position: int | None = None  # informational; the server records the position it served
+
+
+class ViewedIn(BaseModel):
+    surface: Literal["card", "grid"] = "card"
+    items: list[ViewedItem] = Field(default_factory=list, max_length=100)
+
+
 class FeedbackIn(BaseModel):
     product_id: int
     action: Action
@@ -61,10 +80,26 @@ class EvidenceIn(BaseModel):
     source_title: str | None = Field(default=None, max_length=300)
     is_affiliate: bool = False
 
+    @field_validator("source_url")
+    @classmethod
+    def _web_link(cls, v: str | None) -> str | None:
+        v = (v or "").strip()
+        if not v:
+            return None
+        if not v.lower().startswith(("http://", "https://")):
+            raise ValueError("source link must be a web address (http or https)")
+        return v
+
 
 class SellerIn(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     base_url: HttpUrl | None = None
+
+    @field_validator("base_url")
+    @classmethod
+    def _public(cls, v: HttpUrl | None) -> HttpUrl | None:
+        return _public_url(v) if v else v
+
     platform: Literal["yupoo", "weidian", "shopify", "website", "manual"] = "yupoo"
     priority: int = Field(default=3, ge=1, le=5)
     notes: str | None = None
@@ -81,15 +116,35 @@ class SellerPatch(BaseModel):
     scan_interval_hours: int | None = Field(default=None, ge=1, le=24 * 30)
     reputation_status: Literal["unassessed", "insufficient evidence", "trusted", "mixed", "concerns"] | None = None
 
+    @field_validator("base_url")
+    @classmethod
+    def _public(cls, v: HttpUrl | None) -> HttpUrl | None:
+        return _public_url(v) if v else v
+
 
 class ScanIn(BaseModel):
     mode: Literal["incremental", "full"] = "incremental"
+
+
+def _public_url(v: HttpUrl) -> HttpUrl:
+    from .ingestion.http import UnsafeURLError, assert_public_url
+
+    try:
+        assert_public_url(str(v))
+    except UnsafeURLError as e:
+        raise ValueError(str(e)) from e
+    return v
 
 
 class UrlImportIn(BaseModel):
     url: HttpUrl
     seller_id: int | None = None
     watch: bool = True
+
+    @field_validator("url")
+    @classmethod
+    def _public(cls, v: HttpUrl) -> HttpUrl:
+        return _public_url(v)
 
 
 class BookmarkletIn(BaseModel):

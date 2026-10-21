@@ -5,8 +5,11 @@ Guarantees
 * Disabled unless Settings → AI → enabled is on AND ``ANTHROPIC_API_KEY`` is set.
 * Every response is cached in ``ai_calls`` keyed by (purpose, model, input);
   identical requests never cost twice.
-* A monthly spend cap (USD, estimated from token usage) is enforced before
-  each call; a minimum interval between calls rate-limits usage.
+* A monthly spend cap (USD) is a hard limit: before each call the worst-case cost (a conservative
+  input-token estimate plus ``max_tokens`` of output) is *reserved*; the call is refused if that reservation
+  would exceed what is left. Reservations are recorded atomically, so concurrent calls cannot jointly
+  overshoot, and are reconciled to the actual cost from the response (released if the call fails).
+  A minimum interval between calls rate-limits usage.
 * AI visual assessments are stored as ``ai_visual`` evidence with explicit
   caveats; they are never used as proof of fibre content or durability.
 """
@@ -28,7 +31,46 @@ from .settings_store import get_setting
 
 log = get_logger(__name__)
 _lock = threading.Lock()
+_budget_lock = threading.Lock()  # one process (the app) owns the budget; see README "Optional AI"
 _last_call = 0.0
+RESERVATION_PREFIX = "reservation:"
+IMAGE_TOKEN_ALLOWANCE = 5000  # generous upper bound per image block
+
+
+def worst_case_cost(cfg: dict, system: str, content: list[dict], max_tokens: int) -> float:
+    """Upper bound for one call: every character counted as a token, a large allowance per image."""
+    chars = len(system) + sum(len(c.get("text", "")) for c in content if c.get("type") == "text")
+    images = sum(1 for c in content if c.get("type") == "image")
+    input_tokens = chars + images * IMAGE_TOKEN_ALLOWANCE + 200
+    return (
+        input_tokens * float(cfg.get("price_input_per_mtok", 4.0))
+        + max_tokens * float(cfg.get("price_output_per_mtok", 20.0))
+    ) / 1_000_000
+
+
+def _reserve(purpose: str, model: str, amount: float, cap: float) -> int:
+    """Atomically reserve ``amount`` of this month's budget; returns the reservation id."""
+    import uuid
+
+    with _budget_lock:
+        if month_spend() + amount > cap + 1e-12:
+            raise AIUnavailable(
+                f"Monthly AI spending cap would be exceeded (this call may cost up to ${amount:.4f}; "
+                f"${max(0.0, cap - month_spend()):.4f} left)"
+            )
+        with session_scope() as db:
+            row = AICall(cache_key=f"{RESERVATION_PREFIX}{uuid.uuid4().hex}", purpose=purpose, model=model,
+                         response="", input_tokens=0, output_tokens=0, cost_usd=amount)  # fmt: skip
+            db.add(row)
+            db.flush()
+            return row.id
+
+
+def _release(reservation_id: int) -> None:
+    with _budget_lock, session_scope() as db:
+        row = db.get(AICall, reservation_id)
+        if row is not None and row.cache_key.startswith(RESERVATION_PREFIX):
+            db.delete(row)
 
 
 class AIUnavailable(Exception):
@@ -85,9 +127,16 @@ def _call(purpose: str, system: str, content: list[dict], max_tokens: int = 2000
         hit = db.query(AICall).filter_by(cache_key=cache_key).first()
         if hit:
             return hit.response
-    if month_spend() >= float(cfg.get("monthly_cap_usd") or 0):
-        raise AIUnavailable("Monthly AI spending cap reached")
+    reserved = worst_case_cost(cfg, system, content, max_tokens)
+    reservation = _reserve(purpose, model, reserved, float(cfg.get("monthly_cap_usd") or 0))
+    try:
+        return _call_reserved(cfg, purpose, model, system, content, max_tokens, effort, cache_key, reservation)
+    except BaseException:
+        _release(reservation)
+        raise
 
+
+def _call_reserved(cfg, purpose, model, system, content, max_tokens, effort, cache_key, reservation) -> str:
     import anthropic
 
     global _last_call
@@ -123,18 +172,12 @@ def _call(purpose: str, system: str, content: list[dict], max_tokens: int = 2000
         usage.input_tokens * float(cfg.get("price_input_per_mtok", 4.0))
         + usage.output_tokens * float(cfg.get("price_output_per_mtok", 20.0))
     ) / 1_000_000
-    with session_scope() as db:
-        db.add(
-            AICall(
-                cache_key=cache_key,
-                purpose=purpose,
-                model=model,
-                response=text,
-                input_tokens=usage.input_tokens,
-                output_tokens=usage.output_tokens,
-                cost_usd=cost,
-            )
-        )
+    with _budget_lock, session_scope() as db:
+        row = db.get(AICall, reservation)  # reconcile the reservation to the actual cost
+        row.cache_key, row.response = cache_key, text
+        row.input_tokens, row.output_tokens, row.cost_usd = usage.input_tokens, usage.output_tokens, cost
+    if cost > 0 and cost > worst_case_cost(cfg, system, content, max_tokens):
+        log.warning("ai_cost_above_reservation", purpose=purpose, cost_usd=cost)
     log.info("ai_call", purpose=purpose, model=model, cost_usd=round(cost, 5))
     return text
 

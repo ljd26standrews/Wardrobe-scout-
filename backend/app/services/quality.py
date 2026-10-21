@@ -3,8 +3,11 @@
 Principles
 ----------
 * Price never raises a quality score.
-* Seller claims carry very little weight; AI visual assessments even less, and
-  are never used for fibre content or durability.
+* Seller claims and AI visual assessments are shown but never move a score;
+  AI is never used for fibre content or durability.
+* Each source counts once: a review reposted or imported twice is one source.
+* Garment quality (construction, material) and seller reliability (service, sizing, track record) are
+  separate: good service never makes a garment look verified.
 * If the weighted evidence for a dimension is below a threshold the dimension
   is reported as **Unverified** (score ``None``), not as good or bad.
 """
@@ -13,6 +16,7 @@ from __future__ import annotations
 
 import math
 from statistics import median
+from urllib.parse import urlsplit
 
 from sqlalchemy.orm import Session
 
@@ -50,16 +54,43 @@ def _weight(e: Evidence) -> float:
     return w
 
 
+INDEPENDENT = ("verified", "buyer_report", "user_note")
+MIN_INDEPENDENT_WEIGHT = 0.3  # e.g. one moderately specific buyer report; below this a dimension stays unverified
+
+
+def _source_key(e: Evidence) -> tuple:
+    """Which source an item came from: the same review or post reposted or re-imported counts once."""
+    if e.source_url:
+        p = urlsplit(e.source_url.strip())
+        return ("url", (p.hostname or "").lower().removeprefix("www."), p.path.rstrip("/"), p.query)
+    return ("text", e.kind, e.aspect, " ".join((e.claim or "").lower().split()), e.created_by)
+
+
+def _sources(items: list[Evidence]) -> list[tuple[str, float, int]]:
+    """(kind, weight, polarity) per distinct source: its strongest item's weight, its net direction."""
+    groups: dict[tuple, list[Evidence]] = {}
+    for e in items:
+        groups.setdefault(_source_key(e), []).append(e)
+    out = []
+    for group in groups.values():
+        strongest = max(group, key=_weight)
+        net = sum(_weight(e) * e.polarity for e in group)
+        out.append((strongest.kind, _weight(strongest), (net > 0) - (net < 0)))
+    return out
+
+
 def score_dimension(items: list[Evidence]) -> dict:
-    total = sum(_weight(e) for e in items)
-    signed = sum(_weight(e) * e.polarity for e in items)
-    directional = sum(_weight(e) for e in items if e.polarity != 0)
-    confidence = 1 - math.exp(-total / 1.2)
+    """Score one quality dimension from distinct independent sources. Seller claims and AI impressions are
+    listed (``evidence_counts``) but never move the score, so marketing alone cannot make a garment look good."""
     by_kind: dict[str, int] = {}
     for e in items:
         by_kind[e.kind] = by_kind.get(e.kind, 0) + 1
-    independent = sum(1 for e in items if e.kind in ("verified", "buyer_report", "user_note"))
-    if confidence < UNVERIFIED_BELOW or independent == 0:
+    independent = [(w, pol) for kind, w, pol in _sources(items) if kind in INDEPENDENT]
+    total = sum(w for w, _ in independent)
+    signed = sum(w * pol for w, pol in independent)
+    directional = sum(w for w, pol in independent if pol != 0)
+    confidence = 1 - math.exp(-total / 1.2)
+    if confidence < UNVERIFIED_BELOW or total < MIN_INDEPENDENT_WEIGHT:
         label = "Seller claim only" if by_kind and set(by_kind) <= {"seller_claim", "ai_visual"} else "Unverified"
         return {"score": None, "label": label, "confidence": round(confidence, 2), "evidence_counts": by_kind}
     score = 50 + 50 * signed / (directional + 0.8) if directional else 55.0
@@ -71,7 +102,7 @@ def score_dimension(items: list[Evidence]) -> dict:
 def category_price_stats(db: Session) -> dict[str, float]:
     by_cat: dict[str, list[float]] = {}
     for cat, price in db.query(Product.category, Product.price).filter(
-        Product.price.isnot(None), Product.status == "active", Product.currency.in_(["CNY", ""])
+        Product.price.isnot(None), Product.status == "active", Product.currency.in_(["CNY", "RMB"])
     ):
         by_cat.setdefault(cat or "other", []).append(price)
     return {k: median(v) for k, v in by_cat.items() if len(v) >= 3}
@@ -98,40 +129,51 @@ def assess(
     material = score_dimension([e for e in ev if e.aspect in DIMENSIONS["material"]])
     seller_dim = score_dimension(seller_evidence + [e for e in ev if e.aspect in {"sizing", "service"}])
 
-    # Value: price relative to category median, only meaningful with quality evidence
-    value = {"score": None, "label": "Unknown", "confidence": 0.0, "notes": []}
+    # Value = what you get for the price. Price alone says nothing about value: a cheap unverified item is
+    # not "good value", so without quality evidence the score stays unknown. The one exception is a
+    # like-for-like comparison: the very same item listed cheaper elsewhere makes this listing worse value.
+    value = {
+        "score": None,
+        "label": "Unknown — quality not yet demonstrated",
+        "confidence": 0.0,
+        "notes": [],
+        "price_position": None,
+    }
     if p.price:
         stats = price_stats if price_stats is not None else category_price_stats(db)
         med = stats.get(p.category or "other")
         q_scores = [d["score"] for d in (construction, material) if d["score"] is not None]
         q = sum(q_scores) / len(q_scores) if q_scores else None
         notes = []
+        ratio = None
         if med:
             ratio = p.price / med
+            value["price_position"] = round(ratio, 2)
             notes.append(f"{ratio:.1f}× the median price for {p.category or 'this category'} in your catalogue")
-            base = 60 - 25 * math.log2(max(ratio, 0.1))
-            if q is not None:
-                base += (q - 55) * 0.6
-            value["score"] = round(max(0, min(100, base)))
+        score = None
+        if q is not None:
+            # Quality dominates; price matters, but less (you will pay more when quality justifies it).
+            score = 50 + (q - 55) * 0.8 - (15 * math.log2(max(ratio, 0.1)) if ratio else 0)
         if cheaper_equivalent:
             notes.append(
-                f"Same photos listed at {cheaper_equivalent['price']:g} by {cheaper_equivalent['seller']} "
-                f"({cheaper_equivalent['saving_pct']:.0f}% cheaper)"
+                f"Very likely the same item listed at {cheaper_equivalent['price']:g} by "
+                f"{cheaper_equivalent['seller']} ({cheaper_equivalent['saving_pct']:.0f}% cheaper)"
             )
-            if value["score"] is not None:
-                value["score"] = max(0, value["score"] - min(30, cheaper_equivalent["saving_pct"]))
+            score = (score if score is not None else 50) - min(40, cheaper_equivalent["saving_pct"])
         value["notes"] = notes
-        value["confidence"] = round(0.25 + (0.5 if q is not None else 0) + (0.15 if med else 0), 2)
-        if value["score"] is None:
-            value["label"] = "Unknown"
-        elif q is None:
-            value["label"] = "Uncertain — quality not demonstrated"
-        else:
-            value["label"] = "Good" if value["score"] >= 60 else "Fair" if value["score"] >= 40 else "Weak"
+        if score is not None:
+            value["score"] = round(max(0, min(100, score)))
+            value["confidence"] = round((0.3 if cheaper_equivalent else 0) + (0.5 if q is not None else 0) + 0.1, 2)
+            if q is None:
+                value["label"] = "Same item cheaper elsewhere"
+            else:
+                value["label"] = "Good" if value["score"] >= 60 else "Fair" if value["score"] >= 40 else "Weak"
 
-    dims_conf = [construction["confidence"], material["confidence"], seller_dim["confidence"]]
-    overall_conf = round(sum(dims_conf) / 3, 2)
-    known = [d["score"] for d in (construction, material, seller_dim) if d["score"] is not None]
+    # Garment quality is what is known about this garment: construction and material. The seller's service
+    # record is reported beside it (and ranked separately), never averaged into it.
+    dims_conf = [construction["confidence"], material["confidence"]]
+    overall_conf = round(sum(dims_conf) / len(dims_conf), 2)
+    known = [d["score"] for d in (construction, material) if d["score"] is not None]
     if not known:
         status = "Unverified"
     elif overall_conf < 0.5:

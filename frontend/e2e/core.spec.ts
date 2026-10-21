@@ -50,6 +50,19 @@ test("keyboard shortcuts and skip", async ({ page }) => {
   await expect(page.getByTestId("product-title")).not.toHaveText(t2);
 });
 
+test("discover: a decision re-ranks the queue at once, and Undo puts the card back", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.getByTestId("discover-card")).toBeVisible();
+  const title = await page.getByTestId("product-title").innerText();
+  const reranked = page.waitForRequest((r) => r.method() === "GET" && /\/api\/feed\?/.test(r.url()));
+  await page.getByTestId("action-like").click();
+  await reranked; // not ~22 cards later
+  await expect(page.getByTestId("product-title")).not.toHaveText(title);
+  await page.getByRole("button", { name: "Undo" }).first().click();
+  await expect(page.getByText("Undone")).toBeVisible();
+  await expect(page.getByTestId("product-title")).toHaveText(title);
+});
+
 test("grid view and browse search", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "Grid view" }).click();
@@ -70,7 +83,7 @@ test("product page: add independent evidence changes the quality label", async (
   for (let i = 0; i < 2; i++) {
     await page.getByRole("button", { name: "Add evidence" }).click();
     await page.getByPlaceholder(/QC photos show/).fill("QC photos show neat linking at the cuffs and genuine shell buttons");
-    await page.getByPlaceholder("https://…").fill("https://example.org/qc-thread");
+    await page.getByPlaceholder("https://…").fill(`https://example.org/qc-thread-${i + 1}`); // two separate reports
     await page.getByRole("button", { name: "Save evidence" }).click();
     await expect(page.getByText("Evidence added").first()).toBeVisible();
   }
@@ -80,11 +93,21 @@ test("product page: add independent evidence changes the quality label", async (
 });
 
 test("compare shows same-photo alternative across sellers", async ({ page }) => {
-  await page.goto("/browse");
-  await page.getByTestId("browse-search").fill("two-way zip wool jacket");
-  await page.getByTestId("product-card").first().getByRole("link").first().click();
+  // Pick the listing that has a shared-photo match. Browse order depends on ranking, which earlier tests'
+  // feedback changes, so "the first search result" made this test flaky.
+  const found = await (await page.request.get("/api/products?q=two-way%20zip%20wool%20jacket&page_size=12")).json();
+  let target: number | null = null;
+  for (const p of found.items as { id: number }[]) {
+    const cmp = await (await page.request.get(`/api/products/${p.id}/compare`)).json();
+    if (JSON.stringify(cmp).includes("shared_photos")) {
+      target = p.id;
+      break;
+    }
+  }
+  expect(target, "a jacket listing with a shared-photo match").not.toBeNull();
+  await page.goto(`/product/${target}`);
   await page.locator('main a[href^="/compare?id="]').first().click();
-  await expect(page.getByText("Same photographs — likely same source/batch (unconfirmed)")).toBeVisible();
+  await expect(page.getByText(/Several identical photographs/).first()).toBeVisible();
   await expect(page.getByText(/appears to be the same product/)).toBeVisible();
   await shot(page, "compare");
 });
@@ -96,6 +119,18 @@ test("sellers dashboard reports genuine scan outcomes", async ({ page }) => {
   await expect(rows.filter({ hasText: "MadeByKungFu" })).toContainText(/Failed|Blocked/);
   await expect(page.getByText(/products genuinely collected by scans/)).toBeVisible();
   await shot(page, "sellers");
+});
+
+test("scan panel shows catalogue coverage from the server", async ({ page }) => {
+  await page.goto("/sellers");
+  const panel = page.getByTestId("scan-panel");
+  await expect(panel.getByText("Catalogue coverage")).toBeVisible();
+  // The seller may appear twice (active scan card and coverage list) while the demo scan's last steps run.
+  await expect(panel.getByText(/Demo Seller A/).first()).toBeVisible();
+  await expect(panel.getByText(/analysed/).first()).toBeVisible();
+  // Survives a reload: the state lives on the server, not in this tab
+  await page.reload();
+  await expect(page.getByTestId("scan-panel").getByText("Catalogue coverage")).toBeVisible();
 });
 
 test("wardrobe: add an owned piece with a photo", async ({ page }) => {

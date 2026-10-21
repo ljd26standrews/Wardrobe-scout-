@@ -7,7 +7,8 @@ export function cn(...inputs: ClassValue[]) {
 
 export function formatPrice(value: number | null | undefined, currency = "CNY"): string {
   if (value == null) return "—";
-  const symbol = currency === "GBP" ? "£" : currency === "USD" ? "$" : currency === "EUR" ? "€" : "¥";
+  if (!currency) return `${value.toLocaleString("en-GB", { maximumFractionDigits: 2 })} (currency not stated)`;
+  const symbol = currency === "GBP" ? "£" : currency === "USD" ? "$" : currency === "EUR" ? "€" : currency === "CNY" || currency === "RMB" ? "¥" : `${currency} `;
   return `${symbol}${value.toLocaleString("en-GB", { maximumFractionDigits: value < 100 && currency === "GBP" ? 2 : 0 })}`;
 }
 

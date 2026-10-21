@@ -137,6 +137,13 @@ class Product(Base):
     last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
     content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Progressive scanning: discovered (catalogue listing only) -> partial (product page OR photo analysed)
+    # -> analysed (product page AND photos) -> deep (extra photos fetched, duplicates verified).
+    analysis_state: Mapped[str] = mapped_column(String(20), default="analysed", server_default="analysed", index=True)
+    detail_fetched_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    analysed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    etag: Mapped[str | None] = mapped_column(String(200), nullable=True)  # HTTP validators for conditional refresh
+    last_modified: Mapped[str | None] = mapped_column(String(80), nullable=True)
 
     group_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     image_embedding: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
@@ -158,7 +165,7 @@ class ProductImage(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     product_id: Mapped[int] = mapped_column(ForeignKey("products.id", ondelete="CASCADE"), index=True)
-    url: Mapped[str] = mapped_column(String(1500))
+    url: Mapped[str] = mapped_column(String(1500), index=True)
     referer: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     local_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     position: Mapped[int] = mapped_column(Integer, default=0)
@@ -169,6 +176,14 @@ class ProductImage(Base):
     height: Mapped[int | None] = mapped_column(Integer, nullable=True)
     fetch_status: Mapped[str] = mapped_column(String(20), default="pending")  # pending|ok|failed|uploaded
     fetch_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Smaller variant shown by the listing / album grid (e.g. Yupoo medium.jpg). Analysis uses it; `url` stays
+    # the original full-resolution source.
+    thumb_url: Mapped[str | None] = mapped_column(String(1500), nullable=True)
+    # garment | detail | uncertain | size_chart | text_graphic | repeated (see services.image_select)
+    role: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    role_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    selected: Mapped[bool | None] = mapped_column(Boolean, nullable=True)  # feeds the aesthetic product vector
+    analysis: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     product: Mapped[Product] = relationship(back_populates="images")
 
@@ -236,6 +251,96 @@ class Feedback(Base):
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
     context: Mapped[dict] = mapped_column(JSON, default=dict)  # e.g. {"explore": true, "rank": 3}
     # Snapshot so feedback survives product deletion and can be exported meaningfully.
+    snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+
+
+class FeedRequest(Base):
+    """One Discover feed as served: what the ranking offered, in which order, under which model.
+
+    With ``Impression`` (what was actually displayed) and the feed id/position stored in each decision's
+    context, this is the exposure record an honest evaluation needs: feedback alone is not a complete record
+    of what was shown."""
+
+    __tablename__ = "feed_requests"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)  # uuid4 hex
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    engine: Mapped[str] = mapped_column(String(20))
+    engine_version: Mapped[str] = mapped_column(String(40))
+    decisions: Mapped[int] = mapped_column(Integer, default=0)  # informative decisions the model had seen
+    candidates: Mapped[int] = mapped_column(Integer, default=0)  # undecided listings eligible for the feed
+    exploration_rate: Mapped[float] = mapped_column(Float, default=0.0)
+    filters: Mapped[dict] = mapped_column(JSON, default=dict)
+    # [{"product_id", "position", "score", "explore", "family_size"}] in served order; selective feeds add each
+    # piece's raw logit "m", its s.d. "s", "estimate", "bound", the modes it "passes" and (Learning picks) the
+    # inclusion "propensity"
+    items: Mapped[list] = mapped_column(JSON, default=list)
+    # ranked (the earlier feed with exploration slots) | selective (the gated main feed) | learning (Learning picks)
+    policy: Mapped[str] = mapped_column(String(20), default="ranked", server_default="ranked")
+    mode: Mapped[str | None] = mapped_column(String(20), nullable=True)  # balanced | high | extreme
+    calibration_id: Mapped[int | None] = mapped_column(Integer, nullable=True)  # None: no approval estimates
+    gate: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # thresholds, state, counts, sampling details
+
+
+class Impression(Base):
+    """A product actually displayed to you: a Discover card on screen, or a tile in the Discover grid."""
+
+    __tablename__ = "impressions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    feed_id: Mapped[str | None] = mapped_column(
+        ForeignKey("feed_requests.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    product_id: Mapped[int | None] = mapped_column(
+        ForeignKey("products.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    position: Mapped[int | None] = mapped_column(Integer, nullable=True)  # rank in the served feed
+    surface: Mapped[str] = mapped_column(String(20))  # card | grid
+    explore: Mapped[bool] = mapped_column(Boolean, default=False)
+    shown_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+
+
+class Calibration(Base):
+    """A fitted map from raw compatibility to an approval estimate, with how it was obtained.
+
+    Fitted only on your own explicit decisions (out-of-fold, grouped by garment family); kept as a history so
+    any version can be inspected or reactivated (rollback). Only one is active at a time."""
+
+    __tablename__ = "calibrations"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    engine_version: Mapped[str] = mapped_column(String(40))
+    method: Mapped[str] = mapped_column(String(40))
+    n_labels: Mapped[int] = mapped_column(Integer)
+    n_positive: Mapped[int] = mapped_column(Integer)
+    label_hash: Mapped[str] = mapped_column(String(64))
+    active: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    params: Mapped[dict] = mapped_column(JSON, default=dict)  # {"a", "b", "cov": [[...], [...]], "folds"}
+    diagnostics: Mapped[dict] = mapped_column(JSON, default=dict)  # out-of-fold Brier, ECE, reliability bins
+
+
+class Judgement(Base):
+    """A taste label you gave in an evaluation session, kept to *measure* the recommender (it never trains it).
+
+    Products are sampled uniformly from undecided ones (not chosen by the model), one per product family.
+    Taste is graded on its own - 0 not for me, 1 unsure, 2 like, 3 love - and owning something similar, the
+    price and unclear quality are separate flags, so a purchase objection is never mistaken for a dislike."""
+
+    __tablename__ = "judgements"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    product_id: Mapped[int | None] = mapped_column(
+        ForeignKey("products.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    family_key: Mapped[str] = mapped_column(String(40), index=True)  # "g<group id>" or "p<product id>"
+    taste: Mapped[int] = mapped_column(Integer)
+    owned_similar: Mapped[bool] = mapped_column(Boolean, default=False)
+    too_expensive: Mapped[bool] = mapped_column(Boolean, default=False)
+    quality_unclear: Mapped[bool] = mapped_column(Boolean, default=False)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sampled_by: Mapped[str] = mapped_column(String(20), default="uniform")
     snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
 
@@ -313,6 +418,8 @@ class Job(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    control: Mapped[str | None] = mapped_column(String(20), nullable=True)  # pause | cancel (set by the UI)
+    stats: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # live structured progress
 
 
 class ScanRun(Base):
@@ -323,13 +430,18 @@ class ScanRun(Base):
     job_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     started_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    status: Mapped[str] = mapped_column(String(30), default="running")  # running|succeeded|partial|failed|blocked
+    # running|succeeded|partial|failed|blocked|cancelled, plus invalid (layout not recognised) and empty (no albums)
+    status: Mapped[str] = mapped_column(String(30), default="running")
     pages_fetched: Mapped[int] = mapped_column(Integer, default=0)
     products_seen: Mapped[int] = mapped_column(Integer, default=0)
     products_new: Mapped[int] = mapped_column(Integer, default=0)
     products_updated: Mapped[int] = mapped_column(Integer, default=0)
     errors: Mapped[list] = mapped_column(JSON, default=list)
     message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    mode: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # True only when catalogue pagination was genuinely exhausted (the listing was read to its end).
+    discovery_complete: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    stats: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
 
 class AICall(Base):

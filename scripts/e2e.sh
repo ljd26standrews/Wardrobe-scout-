@@ -13,11 +13,13 @@ trap cleanup EXIT
 
 cd "$ROOT/backend"
 .venv/bin/python scripts/demo_catalogue_server.py 18765 18766 > "$E2E_DIR/demo.log" 2>&1 & PIDS+=($!)
-WS_DATA_DIR="$E2E_DIR" WS_DATABASE_URL="sqlite:///$E2E_DIR/ws.db" WS_REQUEST_DELAY_SECONDS=0.05 WS_ENABLE_SCHEDULER=false \
+export WS_API_TOKEN="e2e-$(date +%s%N)"
+# The synthetic catalogue runs on 127.0.0.1, so private URLs must be allowed for this test run only.
+WS_ALLOW_PRIVATE_URLS=true WS_DATA_DIR="$E2E_DIR" WS_DATABASE_URL="sqlite:///$E2E_DIR/ws.db" WS_REQUEST_DELAY_SECONDS=0.05 WS_ENABLE_SCHEDULER=false \
   .venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 18000 > "$E2E_DIR/api.log" 2>&1 & PIDS+=($!)
 for i in $(seq 1 60); do curl -sf localhost:18000/api/health >/dev/null && break; sleep 0.5; done
 
-api() { curl -sf -X "$1" "localhost:18000$2" -H 'Content-Type: application/json' ${3:+-d "$3"}; }
+api() { curl -sf -X "$1" "localhost:18000$2" -H 'Content-Type: application/json' -H "X-WS-Token: $WS_API_TOKEN" ${3:+-d "$3"}; }
 api POST /api/sellers '{"name":"Demo Seller A","base_url":"http://127.0.0.1:18765","platform":"yupoo"}' >/dev/null
 api POST /api/sellers '{"name":"Demo Seller B","base_url":"http://127.0.0.1:18766","platform":"yupoo"}' >/dev/null
 JOB=$(api POST /api/sellers/scan-all '{"mode":"full"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["job_id"])')

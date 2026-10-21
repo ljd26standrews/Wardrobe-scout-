@@ -7,8 +7,10 @@ treated downstream as a *seller claim*, never as verified fact.
 
 from __future__ import annotations
 
+import html
 import re
 from dataclasses import dataclass, field
+from urllib.parse import parse_qsl, unquote, urlparse
 
 from .vocab import (
     BRAND_ABBREVIATIONS,
@@ -45,21 +47,42 @@ def _alias_in(alias: str, low: str) -> bool:
 _PRICE_PATTERNS = [
     re.compile(r"[¥￥]\s*(\d{2,6}(?:\.\d{1,2})?)"),
     re.compile(r"(\d{2,6}(?:\.\d{1,2})?)\s*(?:元|rmb|cny|RMB|CNY)"),
+    # "(429￥)": ¥ directly after the number and not starting the next price ("8009¥919" is code + price)
+    re.compile(r"(?<![\d.])(\d{2,6}(?:\.\d{1,2})?)[¥￥](?!\s*\d)"),
     re.compile(r"(?:价格|售价|price|Price|PRICE)\s*[:：]?\s*[¥￥]?\s*(\d{2,6}(?:\.\d{1,2})?)"),
     re.compile(r"(?<![A-Za-z0-9])[PpＰ]\s?(\d{2,5})(?![0-9])"),  # Yupoo convention: "P399"
 ]
 
 
+# Labels meaning "boutique / original retail price" (not what this seller charges) and labels that
+# explicitly mark the seller's own selling price.
+_RETAIL_MARKERS = re.compile(r"(专柜|原价|官网|吊牌|市场价|零售|国内|代购|官方|正品价|rrp|msrp|retail|orig)", re.I)
+_SELLING_MARKERS = re.compile(r"(现价|售价|到手|特价|活动价|折后|秒杀|批发|拿货|now|sale)", re.I)
+
+
 def parse_price(text: str | None) -> float | None:
+    """The seller's own price. Retail/boutique reference prices are ignored; if only a retail price is
+    quoted the result is None (unknown) rather than a wrong number."""
     if not text:
         return None
+    candidates: list[tuple[int, float, bool, bool]] = []  # (position, value, is_retail, is_selling)
     for pat in _PRICE_PATTERNS:
-        m = pat.search(text)
-        if m:
+        for m in pat.finditer(text):
             value = float(m.group(1))
-            if 10 <= value <= 200000:
-                return value
-    return None
+            if not 10 <= value <= 200000:
+                continue
+            before = text[max(0, m.start() - 8) : m.start() + 4]
+            candidates.append(
+                (m.start(), value, bool(_RETAIL_MARKERS.search(before)), bool(_SELLING_MARKERS.search(before)))
+            )
+    if not candidates:
+        return None
+    candidates.sort()
+    selling = [c for c in candidates if c[3] and not c[2]]
+    if selling:
+        return selling[0][1]
+    plain = [c for c in candidates if not c[2]]
+    return plain[0][1] if plain else None
 
 
 # ------------------------------------------------------------------- item code
@@ -87,6 +110,19 @@ _PCT_BEFORE = r"(\d{{1,3}}(?:\.\d)?)\s*[%％]\s*({alias})"
 _PCT_AFTER = r"({alias})\s*[:：]?\s*(\d{{1,3}}(?:\.\d)?)\s*[%％]"
 
 
+def _strip_imitation_phrases(low: str, alias_re: str) -> str:
+    """Remove phrases that *describe* a fibre without claiming it: 仿羊绒, 羊绒手感, cashmere-feel, faux wool…"""
+    patterns = [
+        rf"(仿|类|似|人造|假)\s*({alias_re})",
+        rf"({alias_re})\s*(手感|感|质感|般|风|效果)",
+        rf"(faux|imitation|mock|like|-like)\s+({alias_re})",
+        rf"({alias_re})[\s-]*(feel|touch|like|look|effect|blend look)\b",
+    ]
+    for pat in patterns:
+        low = re.sub(pat, " ", low)
+    return low
+
+
 def parse_materials(text: str | None) -> list[dict]:
     """Return [{"fibre": canonical, "pct": float|None}] in order of stated percentage."""
     if not text:
@@ -96,6 +132,7 @@ def parse_materials(text: str | None) -> list[dict]:
     alias_to_fibre = [(a, f) for f, aliases in FIBRES.items() for a in aliases]
     alias_to_fibre.sort(key=lambda x: -len(x[0]))  # longest first
     alias_re = "|".join(re.escape(a) for a, _ in alias_to_fibre)
+    low = _strip_imitation_phrases(low, alias_re)
     lookup = {a: f for a, f in alias_to_fibre}
 
     for m in re.finditer(_PCT_BEFORE.format(alias=alias_re), low):
@@ -315,24 +352,75 @@ def infer_seasons(category: str | None, materials: list[dict], text: str | None 
 _URL = re.compile(r"https?://[^\s\"'<>，。）)]+")
 
 
+_MAX_UNWRAP = 3
+_MAX_URL = 2048
+
+
+def canonical_url(url: str | None) -> str | None:
+    """Resolve redirect wrappers (e.g. a catalogue's ``/external?url=<percent-encoded target>``) to the real
+    destination. Bounded: at most three nested wrappers and 2,048 characters; only http(s) targets."""
+    if not url:
+        return None
+    u = url.strip()[:_MAX_URL]
+    for _ in range(_MAX_UNWRAP):
+        target = None
+        for _k, v in parse_qsl(urlparse(u).query, keep_blank_values=False):
+            cand = v
+            for _ in range(_MAX_UNWRAP):  # tolerate double-encoding
+                if cand.lower().startswith(("http://", "https://")):
+                    break
+                cand = unquote(cand)
+            if cand.lower().startswith(("http://", "https://")):
+                target = cand[:_MAX_URL]
+                break
+        if target is None:
+            break
+        u = target
+    if "&" in u:
+        u = html.unescape(u)  # a link copied out of page source can carry "&amp;"
+    p = urlparse(u)
+    return u if p.scheme in ("http", "https") and p.hostname else None
+
+
+def _host_is(url: str, *domains: str) -> bool:
+    host = (urlparse(url).hostname or "").lower()
+    return any(host == d or host.endswith("." + d) for d in domains)
+
+
+def classify_link(url: str) -> str | None:
+    """Which purchase/catalogue site a (canonical) link points to - by its host, not by substring."""
+    if _host_is(url, "weidian.com"):
+        return "weidian"
+    if _host_is(url, "taobao.com", "tmall.com"):
+        return "taobao"
+    if _host_is(url, "yupoo.com"):
+        return "yupoo"
+    return None
+
+
 def extract_purchase_links(text: str | None) -> dict[str, str]:
     links: dict[str, str] = {}
     for url in _URL.findall(text or ""):
-        u = url.rstrip(".,;")
-        if "weidian.com" in u and "weidian" not in links:
-            links["weidian"] = u
-        elif ("taobao.com" in u or "tmall.com" in u) and "taobao" not in links:
-            links["taobao"] = u
-        elif "yupoo.com" in u and "yupoo" not in links:
-            links["yupoo"] = u
+        u = canonical_url(url.rstrip(".,;"))
+        kind = classify_link(u) if u else None
+        if kind and kind not in links:
+            links[kind] = u
     return links
 
 
 def weidian_item_id(url: str | None) -> str | None:
     if not url:
         return None
-    m = re.search(r"itemI[Dd]=(\d+)", url) or re.search(r"/item/(\d+)", url)
-    return m.group(1) if m else None
+    u = canonical_url(url) or url
+    for _ in range(_MAX_UNWRAP):  # an encoded query (itemID%3D123) still identifies the item
+        m = re.search(r"itemI[Dd]=(\d+)", u) or re.search(r"/item/(\d+)", u)
+        if m:
+            return m.group(1)
+        decoded = unquote(u)
+        if decoded == u:
+            break
+        u = decoded
+    return None
 
 
 @dataclass

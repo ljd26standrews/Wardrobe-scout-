@@ -1,7 +1,9 @@
 "use client";
+import Link from "next/link";
 import { AlertCircle, CheckCircle2, Sparkles } from "lucide-react";
 import type { Product } from "@/lib/api";
 import { AlternativesPreview } from "./alternatives";
+import { ConfidencePanel } from "./confidence";
 import { LinkButtons, OriginBadge, PriceBlock, SpecList } from "./meta";
 import { QualityPanel } from "./quality";
 
@@ -15,7 +17,8 @@ export function Section({ title, children }: { title: string; children: React.Re
 }
 
 /** Information column shared by Discover and the product page. */
-export function ProductInfo({ product, showAlternatives = true }: { product: Product; showAlternatives?: boolean }) {
+/** ``inFeed``: Discover's status line already explains a missing calibration, so only an actual estimate is shown. */
+export function ProductInfo({ product, showAlternatives = true, inFeed = false }: { product: Product; showAlternatives?: boolean; inFeed?: boolean }) {
   const rec = product.recommendation;
   return (
     <div>
@@ -30,9 +33,23 @@ export function ProductInfo({ product, showAlternatives = true }: { product: Pro
         {product.seller ? product.seller.name : "Unknown seller"}
         {product.seller && product.seller.reputation !== "trusted" && <span> · seller {product.seller.reputation}</span>}
       </p>
+      {!!product.family?.offers.length && (
+        <p className="mt-1 text-sm text-muted-foreground" data-testid="family-offers">
+          Also listed by {product.family.offers.length} other {product.family.offers.length === 1 ? "seller" : "sellers"} ·{" "}
+          <Link href={`/compare?id=${product.id}`} className="underline underline-offset-2">
+            compare offers
+          </Link>
+        </p>
+      )}
       <div className="mt-4">
         <PriceBlock product={product} large />
       </div>
+
+      {product.confidence && product.confidence.state !== "off" && (!inFeed || product.confidence.estimate != null) && (
+        <Section title="Approval estimate">
+          <ConfidencePanel c={product.confidence} />
+        </Section>
+      )}
 
       {rec && (
         <Section title={rec.explore ? "Why you're seeing this" : "Why it matches you"}>
@@ -74,7 +91,30 @@ export function ProductInfo({ product, showAlternatives = true }: { product: Pro
 
       <Section title="Details">
         <SpecList product={product} />
+        {product.analysis_state && product.analysis_state !== "analysed" && product.analysis_state !== "deep" && (
+          <p className="mt-3 text-xs text-muted-foreground" data-testid="analysis-state">
+            {product.analysis_state === "discovered"
+              ? "Found in the catalogue listing; the product page and photos are still being analysed."
+              : "Partly analysed; the rest is queued."}
+          </p>
+        )}
       </Section>
+
+      {!!product.sizing_images?.length && (
+        <Section title="Size charts">
+          <p className="mb-3 text-xs text-muted-foreground">Found in the seller&apos;s gallery. Kept for sizing; never used to judge style.</p>
+          <div className="flex gap-2 overflow-x-auto" data-testid="sizing-images">
+            {product.sizing_images.map((img) =>
+              img.src ? (
+                <a key={img.id} href={img.src} target="_blank" rel="noreferrer" className="shrink-0">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img src={img.src} alt="Size chart" className="h-40 w-auto rounded-lg border bg-white object-contain" loading="lazy" />
+                </a>
+              ) : null,
+            )}
+          </div>
+        </Section>
+      )}
 
       <Section title="Buy / view">
         <LinkButtons product={product} />

@@ -180,7 +180,7 @@ function ComparisonView({ id }: { id: string }) {
             </tbody>
           </table>
           <p className="mt-4 text-xs leading-relaxed text-muted-foreground">
-            “Confirmed identical” requires your confirmation or a shared purchase link. “Same photographs” means the listings use near-identical photos — a strong hint of a shared source, but sellers frequently re-use factory images. “Visually similar” may be a different product.
+            “Confirmed identical” requires your confirmation or a shared purchase link. “Several identical photographs” means at least two photos match — a strong hint of the same source photos, but sellers frequently re-use factory images, so it is not proof of the same batch. “One similar photograph” and “visually similar” are only hints and never affect value scores.
           </p>
         </div>
       )}

@@ -19,6 +19,8 @@ class RawListing:
     title: str
     description: str | None = None
     image_urls: list[str] = field(default_factory=list)
+    # Smaller display variant of each image (same order; None where the page offers none)
+    image_thumbs: list[str | None] = field(default_factory=list)
     image_referer: str | None = None
     price: float | None = None
     currency: str = "CNY"
@@ -26,6 +28,8 @@ class RawListing:
     links: dict[str, str] = field(default_factory=dict)
     category_hint: str | None = None
     available: bool | None = None
+    # The page was cut short (e.g. a truncated transfer): fields it lacks are unknown, not removed.
+    partial: bool = False
     fetched_at: datetime | None = None
     extra: dict = field(default_factory=dict)
 
@@ -38,6 +42,9 @@ class AlbumRef:
     url: str
     title: str | None = None
     cover_url: str | None = None
+    cover_thumb: str | None = None  # smaller variant of the cover, as shown in the catalogue grid
+    photo_count: int | None = None  # as the catalogue grid states it
+    notice: bool = False  # a shop notice (contact details, ordering guide...), not a product
 
 
 @dataclass
@@ -56,6 +63,11 @@ class SellerAdapter(ABC):
 
     def __init__(self, client: PoliteClient) -> None:
         self.client = client
+        # Set by iter_album_refs: True only when the catalogue's pagination was genuinely
+        # exhausted (not stopped by a page limit). Removal detection relies on this.
+        self.exhausted = False
+        self.pages_read = 0  # listing pages read by the last iter_album_refs
+        self.total_pages: int | None = None  # as reported by the catalogue, when it says
 
     @classmethod
     @abstractmethod

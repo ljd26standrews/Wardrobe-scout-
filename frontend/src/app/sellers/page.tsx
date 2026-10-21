@@ -12,6 +12,7 @@ import { Field, Input, Select, Textarea } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { AddEvidenceDialog } from "@/components/product/evidence";
 import { useJobWatcher } from "@/components/job-watcher";
+import { ScanPanel } from "@/components/scan-panel";
 import * as DM from "@radix-ui/react-dropdown-menu";
 import { cn, timeAgo, titleCase } from "@/lib/utils";
 
@@ -20,8 +21,12 @@ const STATUS_ICON: Record<string, React.ReactNode> = {
   partial: <AlertTriangle className="size-4 text-caution" />,
   blocked: <XCircle className="size-4 text-destructive" />,
   failed: <XCircle className="size-4 text-destructive" />,
+  cancelled: <XCircle className="size-4 text-muted-foreground" />,
+  invalid: <XCircle className="size-4 text-destructive" />,
+  empty: <AlertTriangle className="size-4 text-caution" />,
   running: <Spinner />,
 };
+const STATUS_LABEL: Record<string, string> = { invalid: "Layout not recognised", empty: "No albums found" };
 
 function SellerDialog({ seller, onSaved, trigger }: { seller?: Seller; onSaved: () => void; trigger: React.ReactNode }) {
   const [open, setOpen] = useState(false);
@@ -189,7 +194,9 @@ function SellerRow({ s, refresh }: { s: Seller; refresh: () => void }) {
       <div className="mt-4 flex flex-wrap items-start gap-2 border-t pt-3 text-xs text-muted-foreground">
         <span className="mt-0.5">{STATUS_ICON[s.last_scan_status ?? ""] ?? <CircleDashed className="size-4" />}</span>
         <div className="min-w-0 flex-1">
-          <span className="text-foreground">{s.last_scan_status ? titleCase(s.last_scan_status) : "Never scanned"}</span>
+          <span className="text-foreground">
+            {s.last_scan_status ? STATUS_LABEL[s.last_scan_status] ?? titleCase(s.last_scan_status) : "Never scanned"}
+          </span>
           {s.last_scan_at && <span> · {timeAgo(s.last_scan_at)}</span>}
           {s.last_run && <span> · {s.last_run.pages_fetched} requests · {s.last_run.products_seen} albums seen</span>}
           {s.last_scan_message && <p className="mt-1 break-words leading-relaxed">{s.last_scan_message}</p>}
@@ -207,8 +214,10 @@ function ImportPanel({ sellers, onDone }: { sellers: Seller[]; onDone: () => voi
   const watch = useJobWatcher();
   const [url, setUrl] = useState("");
   const [busy, setBusy] = useState(false);
-  const backend = process.env.NEXT_PUBLIC_BACKEND_PUBLIC_URL || (typeof window !== "undefined" ? `${window.location.protocol}//${window.location.hostname}:8000` : "http://localhost:8000");
-  const bookmarklet = `javascript:(()=>{fetch('${backend}/api/import/bookmarklet',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:location.href,html:document.documentElement.outerHTML})}).then(r=>r.json()).then(j=>alert(j.ok?'Wardrobe Scout: saved '+(j.created?'new':'updated')+' product':'Wardrobe Scout: '+(j.error||j.detail))).catch(e=>alert('Wardrobe Scout is not reachable: '+e))})()`;
+  const backend = process.env.NEXT_PUBLIC_BACKEND_PUBLIC_URL || "http://localhost:8000";
+  const { data: bm } = useSWR<{ token: string }>("/api/bookmarklet-config");
+  const token = bm?.token ?? "";
+  const bookmarklet = `javascript:(()=>{fetch('${backend}/api/import/bookmarklet',{method:'POST',headers:{'Content-Type':'application/json','X-WS-Token':'${token}'},body:JSON.stringify({url:location.href,html:document.documentElement.outerHTML})}).then(r=>r.json()).then(j=>alert(j.ok?'Wardrobe Scout: saved '+(j.created?'new':'updated')+' product':'Wardrobe Scout: '+(j.error||j.detail))).catch(e=>alert('Wardrobe Scout is not reachable: '+e))})()`;
   const bookmarkletRef = (el: HTMLAnchorElement | null) => {
     if (el) el.setAttribute("href", bookmarklet);
   };
@@ -360,7 +369,7 @@ function ImportPanel({ sellers, onDone }: { sellers: Seller[]; onDone: () => voi
               <Plus className="size-4" /> Save to Wardrobe Scout
             </a>
             <p className="text-muted-foreground">
-              It sends the page you are viewing (as your browser sees it) to your local backend at <code className="rounded bg-muted px-1">{backend}</code>. It never logs in, solves CAPTCHAs or reads other tabs. Safari on iPhone: add any bookmark, then edit its address and paste the code below.
+              It sends the page you are viewing (as your browser sees it) to your local backend at <code className="rounded bg-muted px-1">{backend}</code>. It never logs in, solves CAPTCHAs or reads other tabs. It contains your private API key — don&apos;t share it; it only works on this computer. Safari on iPhone: add any bookmark, then edit its address and paste the code below.
             </p>
             <Textarea readOnly value={bookmarklet} rows={3} className="font-mono text-xs" onFocus={(e) => e.currentTarget.select()} />
           </div>
@@ -449,6 +458,10 @@ export default function SellersPage() {
           </Button>
           <SellerDialog onSaved={refresh} trigger={<Button><Plus /> Add seller</Button>} />
         </div>
+      </div>
+
+      <div className="mt-8">
+        <ScanPanel onChange={refresh} />
       </div>
 
       <div className="mt-8 space-y-3">

@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import hashlib
+import html as htmllib
 import json
 import re
 from collections.abc import Iterator
@@ -24,7 +25,7 @@ from bs4 import BeautifulSoup
 from ..config import get_settings
 from ..logging_setup import get_logger
 from .base import AlbumRef, ProgressFn, RawListing, SellerAdapter
-from .http import FetchError
+from .http import FetchError, InvalidPageError
 from .parsing import normalise_space, parse_price, weidian_item_id
 
 log = get_logger(__name__)
@@ -61,7 +62,7 @@ def parse_generic_product(html: str, url: str) -> RawListing:
     description = None
     images: list[str] = []
     price = None
-    currency = "CNY"
+    currency = ""  # unknown unless the page states it
     available = None
     external_id = None
 
@@ -120,7 +121,7 @@ def parse_generic_product(html: str, url: str) -> RawListing:
         price = parse_price(title) or parse_price(description)
 
     if not title:
-        raise FetchError(f"no product data recognised at {url}")
+        raise InvalidPageError(f"no product data recognised at {url}")
     return RawListing(
         external_id=external_id or url_id(url),
         source_url=url,
@@ -129,7 +130,7 @@ def parse_generic_product(html: str, url: str) -> RawListing:
         image_urls=images,
         image_referer=url,
         price=price,
-        currency=currency.upper() if currency else "CNY",
+        currency=currency.upper() if currency else "",
         available=available,
         links={"seller": url},
         fetched_at=_now(),
@@ -153,13 +154,20 @@ class GenericPageAdapter(SellerAdapter):
         product_urls = [u for u in locs if re.search(r"/(product|products|item|p)/", u)]
         if progress:
             progress(f"sitemap: {len(product_urls)} product-like URLs")
-        for u in product_urls[: max_pages * 25]:
+        limit = max_pages * 25
+        for u in product_urls[:limit]:
             yield AlbumRef(external_id=url_id(u), url=u)
+        self.exhausted = len(product_urls) <= limit
 
     def fetch_listing(self, ref_or_url: AlbumRef | str) -> RawListing:
         url = ref_or_url.url if isinstance(ref_or_url, AlbumRef) else ref_or_url
         r = self.client.get(url)
         return parse_generic_product(r.text, str(r.url))
+
+
+def shopify_thumb(src: str, width: int = 640) -> str:
+    """Shopify's image CDN serves resized variants via the documented ``width`` query parameter."""
+    return f"{src}{'&' if '?' in src else '?'}width={width}"
 
 
 def shopify_product_to_listing(p: dict, base_url: str) -> RawListing:
@@ -178,9 +186,10 @@ def shopify_product_to_listing(p: dict, base_url: str) -> RawListing:
         title=normalise_space(p.get("title")),
         description=normalise_space(body) or None,
         image_urls=[i["src"] for i in p.get("images") or [] if i.get("src")],
+        image_thumbs=[shopify_thumb(i["src"]) for i in p.get("images") or [] if i.get("src")],
         image_referer=url,
         price=min(prices) if prices else None,
-        currency="",  # Shopify feed has no currency; caller sets from seller config
+        currency="",  # the products.json feed does not state a currency: unknown, never assumed
         sizes=sizes,
         available=any(v.get("available") for v in variants) if variants else None,
         links={"seller": url},
@@ -200,17 +209,29 @@ class ShopifyAdapter(SellerAdapter):
     def iter_album_refs(self, base_url: str, max_pages: int, progress: ProgressFn | None = None) -> Iterator[AlbumRef]:
         # Shopify returns full product objects; we stash them for fetch_listing.
         self._cache: dict[str, RawListing] = {}
+        self.exhausted = False
         for page in range(1, max_pages + 1):
             r = self.client.get(urljoin(base_url, f"/products.json?limit=250&page={page}"))
             products = r.json().get("products", [])
             if progress:
                 progress(f"products.json page {page}: {len(products)} products")
             if not products:
+                self.exhausted = True
                 break
             for p in products:
                 listing = shopify_product_to_listing(p, base_url)
                 self._cache[listing.external_id] = listing
-                yield AlbumRef(external_id=listing.external_id, url=listing.source_url, title=listing.title)
+                yield AlbumRef(
+                    external_id=listing.external_id,
+                    url=listing.source_url,
+                    title=listing.title,
+                    cover_url=listing.image_urls[0] if listing.image_urls else None,
+                    cover_thumb=listing.image_thumbs[0] if listing.image_thumbs else None,
+                )
+
+    def cached_listing(self, ref: AlbumRef) -> RawListing | None:
+        """The catalogue feed already contained the full product: no product-page request needed."""
+        return getattr(self, "_cache", {}).get(ref.external_id)
 
     def fetch_listing(self, ref_or_url: AlbumRef | str) -> RawListing:
         if isinstance(ref_or_url, AlbumRef) and ref_or_url.external_id in getattr(self, "_cache", {}):
@@ -244,24 +265,92 @@ def _unescape(s: str) -> str:
         return s
 
 
+_GENERIC_TITLES = {"微店", "weidian", "商品详情", "微店商品详情", "商品详情页"}
+_SIZE_ATTRS = {"size", "尺码", "尺寸", "码数"}
+
+
+def _weidian_embedded(soup: BeautifulSoup) -> tuple[dict, dict] | None:
+    """The item data a Weidian page embeds as JSON in a ``data-obj`` attribute: (item_info, sku_properties)."""
+    for el in soup.select("[data-obj]"):
+        try:
+            model = json.loads(el["data-obj"])["result"]["default_model"]
+        except (ValueError, KeyError, TypeError):
+            continue
+        if isinstance(model, dict) and isinstance(model.get("item_info"), dict):
+            return model["item_info"], model.get("sku_properties") or {}
+    return None
+
+
+def _num(v) -> float | None:
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _listing_from_embedded(item: dict, skus: dict, url: str, item_id: str) -> RawListing | None:
+    title = normalise_space(str(item.get("item_name") or ""))
+    if not title or title.lower() in _GENERIC_TITLES:
+        return None
+    price = None
+    if isinstance(item.get("itemLowPrice"), int) and item["itemLowPrice"] > 0:
+        price = item["itemLowPrice"] / 100  # in fen
+    if price is None:
+        sku_prices = [_num(v.get("price")) for v in (skus.get("sku") or {}).values() if isinstance(v, dict)]
+        sku_prices = [x for x in sku_prices if x]
+        price = min(sku_prices) if sku_prices else _num(item.get("price")) or _num(item.get("origin_price"))
+    sizes: list[str] = []
+    for attr in skus.get("attr_list") or []:
+        if str(attr.get("attr_title", "")).strip().lower() in _SIZE_ATTRS:
+            sizes = [str(v.get("attr_value")) for v in attr.get("attr_values") or [] if v.get("attr_value")]
+    available = None
+    if item.get("itemSellable") is False or item.get("stock") == 0:
+        available = False
+    elif item.get("itemSellable") is True and (item.get("stock") or 0) > 0:
+        available = True
+    images: list[str] = []
+    for u in [*(item.get("imgs") or []), item.get("item_head")]:
+        if isinstance(u, str) and u.startswith("http"):
+            u = u.split("?")[0]
+            if u not in images:
+                images.append(u)
+    return RawListing(
+        external_id=str(item.get("item_id") or item_id),
+        source_url=url,
+        title=title,
+        image_urls=images[:20],
+        image_referer="https://weidian.com/",
+        price=price,
+        sizes=sizes,
+        available=available,
+        links={"weidian": url},
+        fetched_at=_now(),
+    )
+
+
 def parse_weidian_html(html: str, url: str) -> RawListing:
     item_id = weidian_item_id(url) or url_id(url)
+    soup = BeautifulSoup(html, "lxml")
+    embedded = _weidian_embedded(soup)
+    if embedded is not None and (listing := _listing_from_embedded(*embedded, url, item_id)) is not None:
+        return listing
+    text = htmllib.unescape(html)  # JSON is often embedded entity-escaped (&#34;)
     title = None
     price = None
     for pat in _JSON_FIELDS["title"]:
-        if m := re.search(pat, html):
+        if m := re.search(pat, text):
             title = normalise_space(_unescape(m.group(1)))
             if title:
                 break
     for pat in _JSON_FIELDS["price"]:
-        if m := re.search(pat, html):
+        if m := re.search(pat, text):
             price = float(m.group(1))
             # Some Weidian payloads express price in fen (cents)
             if price > 100000:
                 price = price / 100
             break
     images = []
-    for m in _IMG.finditer(html):
+    for m in _IMG.finditer(text):
         u = m.group(0).replace("\\/", "/")
         u = u.split("?")[0]
         if u not in images and not u.endswith(".gif"):
@@ -273,8 +362,8 @@ def parse_weidian_html(html: str, url: str) -> RawListing:
             price = price or generic.price
         except FetchError:
             pass
-    if not title or title.lower() in ("微店", "weidian"):
-        raise FetchError(
+    if not title or title.lower() in _GENERIC_TITLES:
+        raise InvalidPageError(
             "Weidian page did not expose product data in static HTML. Enable Playwright rendering "
             "or import this item with the bookmarklet / manual form."
         )

@@ -10,24 +10,38 @@ import imagehash
 from PIL import Image, ImageOps, UnidentifiedImageError
 
 from ..config import get_settings
-from ..ingestion.http import FetchError, PoliteClient
+from ..ingestion.http import BlockedError, FetchError, PoliteClient
 from ..logging_setup import get_logger
 
 log = get_logger(__name__)
 
 MAX_SIDE = 1400
+# Checked from the file header before any pixels are decoded, so a small file that expands into a huge
+# bitmap (a "decompression bomb") is refused cheaply. 40 megapixels is well above any garment photo.
+MAX_PIXELS = 40_000_000
 
 
 class ImageError(Exception):
     pass
 
 
-def load_image(data: bytes) -> Image.Image:
+def _open(data: bytes) -> Image.Image:
     try:
         img = Image.open(io.BytesIO(data))
+    except (UnidentifiedImageError, OSError, Image.DecompressionBombError) as e:
+        raise ImageError(f"not a valid image: {e}") from e
+    w, h = img.size
+    if w * h > MAX_PIXELS:
+        raise ImageError(f"image too large ({w}×{h} pixels; the limit is {MAX_PIXELS // 1_000_000} megapixels)")
+    return img
+
+
+def load_image(data: bytes) -> Image.Image:
+    img = _open(data)
+    try:
         img = ImageOps.exif_transpose(img)
         return img.convert("RGB")
-    except (UnidentifiedImageError, OSError) as e:
+    except (UnidentifiedImageError, OSError, Image.DecompressionBombError) as e:
         raise ImageError(f"not a valid image: {e}") from e
 
 
@@ -40,8 +54,20 @@ def hamming(a: str, b: str) -> int:
 
 
 def store_image_bytes(data: bytes, subdir: str = "images") -> tuple[str, Image.Image]:
-    """Normalise to JPEG, store under data dir, return (relative path, PIL image)."""
-    img = load_image(data)
+    """Store under the data dir (content-addressed), return (relative path, PIL image).
+
+    JPEGs that are already small enough are written byte-for-byte (no decode/re-encode cost, no extra
+    quality loss); anything else is normalised to a JPEG of at most MAX_SIDE pixels.
+    """
+    img = _open(data)
+    try:
+        fmt = img.format
+        if fmt == "JPEG":
+            img.draft("RGB", (MAX_SIDE, MAX_SIDE))  # decode at reduced scale when the file is much larger
+        img = ImageOps.exif_transpose(img).convert("RGB")
+    except (UnidentifiedImageError, OSError, Image.DecompressionBombError) as e:
+        raise ImageError(f"not a valid image: {e}") from e
+    as_is = fmt == "JPEG" and max(img.size) <= MAX_SIDE
     if max(img.size) > MAX_SIDE:
         img.thumbnail((MAX_SIDE, MAX_SIDE))
     digest = hashlib.sha1(data).hexdigest()
@@ -51,7 +77,10 @@ def store_image_bytes(data: bytes, subdir: str = "images") -> tuple[str, Image.I
     path = base / rel
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists():
-        img.save(path, "JPEG", quality=88, optimize=True)
+        if as_is:
+            path.write_bytes(data)
+        else:
+            img.save(path, "JPEG", quality=88)
     return f"{subdir}/{rel}", img
 
 
@@ -59,14 +88,20 @@ def resolve_path(rel: str) -> Path:
     return get_settings().data_dir / rel
 
 
-def download_image(client: PoliteClient, url: str, referer: str | None) -> tuple[str, Image.Image]:
+def fetch_image_bytes(client: PoliteClient, url: str, referer: str | None) -> bytes:
     # Image CDNs are fetched as page resources (robots.txt governs crawling of pages).
     try:
         r = client.get(url, referer=referer, binary=True, check_robots=False, retries=1)
+    except BlockedError:
+        raise  # an access restriction is not "image missing": callers must stop, not try another URL
     except FetchError as e:
         raise ImageError(str(e)) from e
     ctype = r.headers.get("content-type", "")
     if "image" not in ctype and r.content[:4] not in (b"\xff\xd8\xff\xe0", b"\xff\xd8\xff\xe1", b"\x89PNG"):
         if not ctype.startswith("application/octet"):
             raise ImageError(f"unexpected content-type {ctype!r} for {url}")
-    return store_image_bytes(r.content)
+    return r.content
+
+
+def download_image(client: PoliteClient, url: str, referer: str | None) -> tuple[str, Image.Image]:
+    return store_image_bytes(fetch_image_bytes(client, url, referer))

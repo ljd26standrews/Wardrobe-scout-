@@ -10,6 +10,16 @@ import { Field, Input, Select, Textarea } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { timeAgo, titleCase } from "@/lib/utils";
 
+/** Host of an http(s) link, or null: anything else (a malformed or non-web link) is never made clickable. */
+function webHost(url: string): string | null {
+  try {
+    const u = new URL(url);
+    return u.protocol === "http:" || u.protocol === "https:" ? u.hostname : null;
+  } catch {
+    return null;
+  }
+}
+
 const KIND_TONE: Record<string, "positive" | "secondary" | "caution" | "muted" | "outline"> = {
   verified: "positive",
   buyer_report: "secondary",
@@ -43,10 +53,12 @@ export function EvidenceList({ items, onDelete }: { items: Evidence[]; onDelete?
           </div>
           <p className="mt-2 leading-relaxed">{e.claim}</p>
           <p className="mt-1.5 flex flex-wrap items-center gap-x-2 text-xs text-muted-foreground">
-            {e.source_url ? (
+            {e.source_url && webHost(e.source_url) ? (
               <a className="inline-flex items-center gap-1 underline-offset-2 hover:underline" href={e.source_url} target="_blank" rel="noreferrer">
-                {e.source_title || new URL(e.source_url).hostname} <ExternalLink className="size-3" />
+                {e.source_title || webHost(e.source_url)} <ExternalLink className="size-3" />
               </a>
+            ) : e.source_url ? (
+              <span title={e.source_url}>{e.source_title ?? "source link not recognised"}</span>
             ) : (
               <span>{e.source_title ?? "no source link"}</span>
             )}

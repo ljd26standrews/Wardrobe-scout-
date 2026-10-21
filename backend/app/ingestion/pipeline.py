@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass, field
+from datetime import datetime
 
 import numpy as np
 from sqlalchemy.orm import Session
@@ -13,9 +14,10 @@ from sqlalchemy.orm import Session
 from ..logging_setup import get_logger
 from ..models import Evidence, Product, ProductImage, ProductObservation, Seller, utcnow
 from ..services import embeddings as emb
-from ..services.images import ImageError, download_image, phash_of
-from .base import RawListing
-from .http import PoliteClient
+from ..services import image_select as sel
+from ..services.images import ImageError, fetch_image_bytes, phash_of, resolve_path, store_image_bytes
+from .base import AlbumRef, RawListing
+from .http import BlockedError, PoliteClient
 from .parsing import materials_to_text, parse_listing_text
 from .translate import translate
 
@@ -50,11 +52,13 @@ class UpsertResult:
 
 
 def content_hash(raw: RawListing) -> str:
+    """Fingerprint of everything a listing states. A different fingerprint means the page is re-applied."""
     payload = json.dumps(
-        [raw.title, raw.description, raw.price, sorted(raw.image_urls), raw.sizes, raw.available],
+        [raw.title, raw.description, raw.price, sorted(raw.image_urls), raw.sizes, raw.available, raw.currency,
+         sorted(raw.links.items())],
         ensure_ascii=False,
         default=str,
-    )
+    )  # fmt: skip
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
@@ -84,10 +88,23 @@ def _apply_attributes(p: Product, raw: RawListing, use_ai: bool) -> None:
     p.logo_level = attrs.logo_level
     p.seasons = attrs.seasons
     p.price = raw.price if raw.price is not None else attrs.price
-    p.currency = raw.currency or "CNY"
+    p.currency = (raw.currency or "").upper()  # "" = not stated: never assumed
     links = dict(attrs.links)
     links.update(raw.links)
     p.links = links
+
+
+# Fields a cut-short page may simply not have reached. On such a page an empty value means "not seen",
+# so the stored value is kept rather than recorded as removed.
+_KEEP_WHEN_PARTIAL = (
+    "title_original", "title_en", "description_original", "description_en", "price", "sizes", "colours",
+    "materials", "material_text", "gsm", "fit_tags", "seasons", "brand", "category", "seller_item_code",
+    "logo_level",
+)  # fmt: skip
+
+
+def _unknown(v) -> bool:
+    return v is None or v == "" or v == [] or v == {} or v == "unknown"
 
 
 def _category_from_hint(hint: str | None) -> str | None:
@@ -164,6 +181,9 @@ def upsert_listing(
     now = raw.fetched_at or utcnow()
     changes: list[str] = []
     created = p is None
+    # The first product-page read of a product found on a catalogue listing completes its creation:
+    # nothing "changed" yet (its listing observation was recorded at discovery).
+    first_read = not created and p.detail_fetched_at is None and p.analysis_state == "discovered"
 
     if created:
         p = Product(
@@ -176,47 +196,87 @@ def upsert_listing(
         )
         db.add(p)
     else:
-        if p.status != "active":
-            changes.append(f"status {p.status} → active")
+        observed = "unavailable" if raw.available is False else "active"
+        if p.status != observed:
+            changes.append(f"status {p.status} → {observed}")
         old_price, old_sizes = p.price, list(p.sizes or [])
+        old_currency, old_links = p.currency, dict(p.links or {})
         if p.content_hash == h and p.completeness != "seed_unverified":
+            # Unchanged page: only freshness moves. Stock state follows what the page says (a sold-out
+            # listing seen again is still sold out).
             p.last_seen_at = now
-            p.status = "active"
+            p.status = observed
+            p.detail_fetched_at = now
+            if changes:
+                db.add(ProductObservation(product=p, observed_at=now, price=p.price, sizes=p.sizes, status=p.status,
+                                          source_url=raw.source_url, change="; ".join(changes)))  # fmt: skip
+            update_state(p)
             db.flush()
             return UpsertResult(p, False, changes)
 
+    # A page cut short keeps what is stored for whatever it did not reach (see _KEEP_WHEN_PARTIAL).
+    merge = raw.partial and not created
+    kept = {f: getattr(p, f) for f in _KEEP_WHEN_PARTIAL} if merge else {}
+    old_links_kept = dict(p.links or {}) if merge else {}
     _apply_attributes(p, raw, use_ai)
+    for f, old in kept.items():
+        if _unknown(getattr(p, f)) and not _unknown(old):
+            setattr(p, f, old)
+    if merge:
+        p.links = {**old_links_kept, **(p.links or {})}
     p.source_url = raw.source_url
     p.last_seen_at = now
     p.status = "active" if raw.available is not False else "unavailable"
-    p.content_hash = h
+    if not raw.partial:
+        p.content_hash = h  # a partial read is not a fingerprint of the page: the next full read refreshes it
     if origin != "scraped" or created:
         p.data_origin = origin if created or p.data_origin == "seed" else p.data_origin
     if p.data_origin == "seed" and origin == "scraped":
         p.data_origin = "scraped"  # seed record has now been verified against the live page
-    p.completeness = completeness or ("complete" if (raw.title and raw.image_urls and p.price) else "partial")
+    if not merge:
+        complete = raw.title and raw.image_urls and p.price and not raw.partial
+        p.completeness = completeness or ("complete" if complete else "partial")
 
-    if not created:
+    if not created and not first_read:
         if old_price is not None and p.price is not None and abs(old_price - p.price) > 0.009:
             changes.append(f"price {old_price:g} → {p.price:g}")
+        elif old_price is not None and p.price is None:
+            changes.append("price no longer stated")
         if sorted(old_sizes) != sorted(p.sizes or []):
             changes.append(f"sizes {old_sizes} → {p.sizes}")
+        if (old_currency or "") != (p.currency or ""):
+            changes.append(f"currency {old_currency or 'unknown'} → {p.currency or 'unknown'}")
+        changed_links = sorted(
+            k for k in set(old_links) | set(p.links or {}) if old_links.get(k) != (p.links or {}).get(k)
+        )
+        if changed_links:
+            changes.append(f"links changed: {', '.join(changed_links)}")
         if raw.available is False:
             changes.append("marked unavailable")
 
-    # Images: keep existing rows for unchanged URLs, append new ones in order
+    # Images: keep existing rows (and their analysis) for unchanged URLs, append new ones in order
     existing = {img.url: img for img in p.images}
     new_list = []
     for pos, url in enumerate(raw.image_urls):
         img = existing.get(url) or ProductImage(url=url, referer=raw.image_referer)
         img.position = pos
+        thumb = raw.image_thumbs[pos] if pos < len(raw.image_thumbs) else None
+        if thumb:
+            img.thumb_url = thumb
         new_list.append(img)
-    if raw.image_urls or created:
+    if merge:  # photos the cut-short page did not reach are still the listing's photos
+        listed = set(raw.image_urls)
+        rest = [i for i in sorted(p.images, key=lambda i: i.position or 0) if i.url not in listed]
+        for pos, img in enumerate(rest, start=len(new_list)):
+            img.position = pos
+        p.images = new_list + rest
+    elif raw.image_urls or created:
         p.images = new_list if raw.image_urls else [i for i in p.images if i.fetch_status == "uploaded"]
 
-    # Replace system-generated seller claims (user/AI evidence is preserved)
-    p.evidence = [e for e in p.evidence if not (e.kind == "seller_claim" and e.created_by == "system")]
-    p.evidence.extend(_seller_claim_evidence(p, raw))
+    if not merge:
+        # Replace system-generated seller claims (user/AI evidence is preserved)
+        p.evidence = [e for e in p.evidence if not (e.kind == "seller_claim" and e.created_by == "system")]
+        p.evidence.extend(_seller_claim_evidence(p, raw))
 
     if created or changes:
         db.add(
@@ -230,53 +290,261 @@ def upsert_listing(
                 change="; ".join(changes) or "first seen",
             )
         )
+    if not raw.partial:
+        p.detail_fetched_at = now  # a partial read leaves it unread (or as last fully read), so it is re-read
+    update_state(p)
     db.flush()
     return UpsertResult(p, created, changes)
 
 
-def process_images(db: Session, p: Product, client: PoliteClient | None, max_images: int = 12) -> int:
-    """Download (if needed), hash and embed product images. Returns number embedded."""
+# ----------------------------------------------------------------------------- progressive scanning
+def same_title(listing_title: str | None, stored: str | None) -> bool:
+    """Catalogue grids may shorten titles; a listing title that is a prefix of the stored one is unchanged."""
+    a = re.sub(r"\s+", " ", (listing_title or "").strip())
+    b = re.sub(r"\s+", " ", (stored or "").strip())
+    return not a or a == b or (len(a) >= 12 and b.startswith(a.rstrip("…. ")))
+
+
+def upsert_discovered(db: Session, seller: Seller, ref: AlbumRef, now: datetime) -> tuple[Product, bool, bool]:
+    """Record a product seen on a catalogue listing page. Returns (product, created, listing_changed).
+
+    New products become browsable immediately with what the listing shows (title, price, category, cover
+    photo) in the ``discovered`` state; their product page and photos are analysed afterwards.
+    """
+    p = db.query(Product).filter(Product.seller_id == seller.id, Product.external_id == ref.external_id).one_or_none()
+    if p is None:
+        p = Product(
+            seller_id=seller.id,
+            external_id=ref.external_id,
+            source_url=ref.url,
+            data_origin="scraped",
+            first_seen_at=now,
+            last_seen_at=now,
+            is_new=True,
+            completeness="partial",
+            analysis_state="discovered",
+        )
+        _apply_attributes(p, RawListing(external_id=ref.external_id, source_url=ref.url, title=ref.title or ""), False)
+        if ref.cover_url:
+            p.images = [ProductImage(url=ref.cover_url, thumb_url=ref.cover_thumb, referer=ref.url, position=0)]
+        p.text_embedding = emb.to_bytes(emb.embed_text(emb.product_text(p)))
+        db.add(p)
+        db.add(ProductObservation(product=p, observed_at=now, price=p.price, sizes=[], status="active",
+                                  source_url=ref.url, change="first seen (catalogue listing)"))  # fmt: skip
+        return p, True, False
+    changed = not same_title(ref.title, p.title_original)
+    if p.status != "active" and p.data_origin == "scraped":
+        p.status = "active"
+        changed = True
+    p.last_seen_at = now
+    return p, False, changed
+
+
+@dataclass
+class ImageAnalysis:
+    local_path: str
+    width: int
+    height: int
+    phash: str
+    vector: np.ndarray
+    backend: str
+    features: dict
+    role: str
+    confidence: float
+    nbytes: int
+
+
+def analyse_image_data(data: bytes) -> ImageAnalysis:
+    """Store, hash, embed and classify one downloaded image. Thread-safe; no database access."""
+    from PIL import Image
+
+    rel, pil = store_image_bytes(data)
+    small = pil.copy()
+    small.thumbnail((sel.ANALYSIS_SIDE, sel.ANALYSIS_SIDE), Image.BILINEAR)
+    f = sel.analyse(small)
+    role, conf = sel.classify(f)
     backend = emb.get_image_backend()
+    return ImageAnalysis(
+        rel,
+        pil.width,
+        pil.height,
+        phash_of(small),
+        backend.embed(small),
+        backend.name,
+        f.as_dict(),
+        role,
+        conf,
+        len(data),
+    )
+
+
+def analyse_image_file(rel: str) -> ImageAnalysis:
+    data = resolve_path(rel).read_bytes()
+    a = analyse_image_data(data)
+    a.local_path = rel
+    return a
+
+
+def fetch_and_analyse(
+    client: PoliteClient, img_url: str, referer: str | None, fallback: str | None = None
+) -> ImageAnalysis:
+    """Fetch (preferring the small display variant) and analyse. Falls back to the original URL if the
+    variant is unavailable."""
+    try:
+        data = fetch_image_bytes(client, img_url, referer)
+    except ImageError:
+        if not fallback or fallback == img_url:
+            raise
+        data = fetch_image_bytes(client, fallback, referer)
+    return analyse_image_data(data)
+
+
+def apply_analysis(img: ProductImage, a: ImageAnalysis) -> None:
+    img.local_path = a.local_path
+    img.fetch_status = img.fetch_status if img.fetch_status == "uploaded" else "ok"
+    img.fetch_error = None
+    img.width, img.height = a.width, a.height
+    img.phash = a.phash
+    img.embedding = emb.to_bytes(a.vector)
+    img.embedding_backend = a.backend
+    img.analysis = a.features
+    if img.role != sel.REPEATED:
+        img.role, img.role_confidence = a.role, a.confidence
+
+
+def copy_analysis(dst: ProductImage, src: ProductImage) -> None:
+    """Reuse another listing's analysis of the very same image URL (no download)."""
+    dst.local_path, dst.fetch_status, dst.fetch_error = src.local_path, "ok", None
+    dst.width, dst.height, dst.phash = src.width, src.height, src.phash
+    dst.embedding, dst.embedding_backend = src.embedding, src.embedding_backend
+    dst.analysis, dst.role, dst.role_confidence = src.analysis, src.role, src.role_confidence
+
+
+def _usable(img: ProductImage, backend: str) -> bool:
+    return img.embedding is not None and img.embedding_backend == backend
+
+
+def _aesthetic(img: ProductImage) -> bool:
+    return img.role is None or img.role in sel.AESTHETIC_ROLES  # unclassified legacy images count as before
+
+
+def next_image(p: Product, k: int, max_examine: int, backend: str) -> ProductImage | None:
+    """Progressive policy: the next gallery image to analyse, or None when ``k`` useful non-redundant views
+    exist, ``max_examine`` images were downloaded, or the gallery is exhausted. Size charts, text graphics
+    and repeated banners still count towards the download budget but never as useful views."""
+    useful: list[np.ndarray] = []
+    downloaded = 0
+    for img in sorted(p.images, key=lambda i: i.position):
+        done = (
+            _usable(img, backend) or img.fetch_status == "failed" or (img.role == sel.REPEATED and not img.local_path)
+        )
+        if done:
+            if img.fetch_status in ("ok", "failed"):
+                downloaded += 1
+            if _usable(img, backend) and _aesthetic(img):
+                v = emb.from_bytes(img.embedding)
+                if all(float(v @ u) < 0.97 for u in useful):
+                    useful.append(v)
+                    if len(useful) >= k:
+                        return None
+            continue
+        if img.local_path:
+            return img  # stored or uploaded file: analyse without network
+        if downloaded >= max_examine:
+            return None
+        return img
+    return None
+
+
+def _quality(img: ProductImage) -> float:
+    d = img.analysis or {}
+    f = sel.Features(**{k: d.get(k, 0) for k in sel.Features.__dataclass_fields__}) if d else None
+    return sel.quality(f, img.position) if f else 0.5 - 0.02 * img.position
+
+
+def finalize_product(db: Session, p: Product, k: int, now: datetime | None = None) -> bool:
+    """Choose the aesthetic views among analysed images and rebuild the product vector. Returns has_vector."""
+    backend = emb.get_image_backend().name
+    imgs = sorted(p.images, key=lambda i: i.position)
+    cands = [
+        sel.Candidate(i, img.role or sel.GARMENT, _quality(img), emb.from_bytes(img.embedding))
+        for i, img in enumerate(imgs)
+        if _usable(img, backend)
+    ]
+    chosen = sel.select(cands, max_k=k)
+    for i, img in enumerate(imgs):
+        if _usable(img, backend):
+            img.selected = i in chosen
+    if chosen:
+        p.image_embedding = emb.to_bytes(sel.product_vector([emb.from_bytes(imgs[i].embedding) for i in chosen]))
+        p.embedding_backend = backend
+    elif any(_usable(i, backend) for i in imgs) or not any(i.embedding for i in imgs):
+        p.image_embedding = None
+    p.text_embedding = emb.to_bytes(emb.embed_text(emb.product_text(p)))
+    p.analysed_at = now or utcnow()
+    update_state(p)
+    return p.image_embedding is not None
+
+
+def update_state(p: Product) -> None:
+    detailed = p.detail_fetched_at is not None or p.data_origin != "scraped"
+    analysed = p.analysed_at is not None
+    if detailed and analysed:
+        p.analysis_state = "deep" if p.analysis_state == "deep" else "analysed"
+    elif detailed or analysed:
+        p.analysis_state = "partial"
+    else:
+        p.analysis_state = "discovered"
+
+
+def process_images(
+    db: Session, p: Product, client: PoliteClient | None, max_images: int = 12, *, deep: bool = True
+) -> int:
+    """Analyse a product's photos (used by imports, the image job and recompute).
+
+    ``deep`` (a product you asked for directly): up to ``deep_images`` useful views, so cross-seller photo
+    matching has several photos to compare. Otherwise the scan policy: ``analysis_images`` useful views from
+    at most ``max_examine_images`` downloads. Stored photos are re-analysed without network. The aesthetic
+    vector always uses the selected best views. Returns the number of images analysed.
+    """
+    from ..config import get_settings
+
+    s = get_settings()
+    backend = emb.get_image_backend().name
+    if deep:
+        k = budget = min(max_images, s.deep_images)
+    else:
+        k, budget = s.analysis_images, min(max_images, s.max_examine_images)
     done = 0
-    vectors = []
-    for img in p.images[:max_images]:
+    # Stored photos analysed by an older pipeline or another backend: re-analyse locally (no network).
+    for img in p.images:
+        if img.local_path and not _usable(img, backend) or (img.local_path and img.role is None):
+            try:
+                apply_analysis(img, analyse_image_file(img.local_path))
+                done += 1
+            except (ImageError, OSError) as e:
+                img.fetch_status, img.fetch_error = "failed", str(e)[:500]
+    while True:
+        img = next_image(p, k, budget, backend)
+        if img is None:
+            break
         try:
-            if img.local_path is None and img.fetch_status != "uploaded":
-                if client is None:
-                    continue
-                rel, pil = download_image(client, img.url, img.referer)
-                img.local_path = rel
-                img.fetch_status = "ok"
-                img.fetch_error = None
+            if img.local_path:
+                a = analyse_image_file(img.local_path)
+            elif client is None:
+                break
             else:
-                if img.local_path is None:
-                    continue
-                if img.embedding is not None and img.embedding_backend == backend.name and img.phash:
-                    vectors.append(emb.from_bytes(img.embedding))
-                    continue
-                from PIL import Image
-
-                from ..services.images import resolve_path
-
-                pil = Image.open(resolve_path(img.local_path)).convert("RGB")
-            img.width, img.height = pil.size
-            img.phash = phash_of(pil)
-            v = backend.embed(pil)
-            img.embedding = emb.to_bytes(v)
-            img.embedding_backend = backend.name
-            vectors.append(v)
+                a = fetch_and_analyse(client, img.thumb_url or img.url, img.referer, fallback=img.url)
+            apply_analysis(img, a)
             done += 1
+        except BlockedError as e:
+            img.fetch_status, img.fetch_error = "failed", f"blocked: {e}"[:500]
+            log.info("image_host_blocked", product=p.id, url=img.url, error=str(e)[:200])
+            break  # the image host restricted access: stop, never work around it
         except (ImageError, OSError) as e:
             img.fetch_status = "failed"
             img.fetch_error = str(e)[:500]
             log.info("image_failed", product=p.id, url=img.url, error=str(e)[:200])
-    if vectors:
-        # Product vector: first image (usually the hero shot) weighted double + mean of the rest
-        stack = np.vstack(vectors)
-        weights = np.ones(len(vectors))
-        weights[0] = 2.0
-        p.image_embedding = emb.to_bytes(emb.normalise((stack * weights[:, None]).sum(0)))
-        p.embedding_backend = backend.name
-    p.text_embedding = emb.to_bytes(emb.embed_text(emb.product_text(p)))
+    finalize_product(db, p, s.analysis_images)
     db.flush()
     return done

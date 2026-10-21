@@ -5,9 +5,11 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
+from ..config import get_settings
 from ..db import get_db
 from ..models import Feedback, Product, SavedItem, WardrobeItem
 from ..schemas import FeedbackIn, SavedPatch
+from ..services import calibration, jobs
 from ..services.presenter import Context, product_card
 from ..services.recommender import REASONS, snapshot
 
@@ -72,6 +74,15 @@ def give_feedback(body: FeedbackIn, db: Session = Depends(get_db)):
             db.flush()
             wardrobe_id = item.id
     db.commit()
+    if (
+        body.action in (*LIST_FOR_ACTION, "purchased")
+        and p.data_origin == "scraped"
+        and p.analysis_state != "deep"
+        and get_settings().deep_on_feedback
+    ):
+        # You are interested: compare it properly (full gallery, cross-seller photo matching).
+        jobs.enqueue("deep_product", {"product_id": p.id})
+    calibration.maybe_schedule(db)  # refit approval estimates once enough new decisions have arrived
     return {
         "ok": True,
         "feedback_id": fb.id,
@@ -106,8 +117,16 @@ def undo_feedback(feedback_id: int, db: Session = Depends(get_db)):
     if fb is None:
         raise HTTPException(404, "feedback not found")
     pid = fb.product_id
+    undone_action = fb.action
     db.delete(fb)
     db.flush()
+    if pid and undone_action == "purchased":
+        still_purchased = db.query(Feedback).filter(Feedback.product_id == pid, Feedback.action == "purchased").first()
+        if still_purchased is None:
+            # Remove only the entry "purchased" created automatically, never one you added yourself.
+            for item in db.query(WardrobeItem).filter(WardrobeItem.product_id == pid):
+                if (item.notes or "").startswith("Purchased from"):
+                    db.delete(item)
     if pid:
         prev = (
             db.query(Feedback)
@@ -124,6 +143,7 @@ def undo_feedback(feedback_id: int, db: Session = Depends(get_db)):
         elif saved is not None and saved.list_name != "wishlist":
             db.delete(saved)
     db.commit()
+    calibration.maybe_schedule(db)  # an undone decision is no longer evidence
     return {"ok": True}
 
 

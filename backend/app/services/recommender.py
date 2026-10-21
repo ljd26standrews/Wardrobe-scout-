@@ -28,11 +28,12 @@ from __future__ import annotations
 import math
 import random
 from collections import Counter, defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 import numpy as np
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from ..ingestion.vocab import CATEGORY_GROUP, NEUTRAL_COLOURS, PREMIUM_FIBRES, QUIET_LUXURY_BRANDS
 from ..models import Feedback, InspirationImage, Product, Seller, WardrobeItem, utcnow
@@ -46,10 +47,13 @@ REASONS = {
     "colour": "Dislike the colour",
     "logo": "Dislike the logo",
     "fabric": "Fabric doesn't appeal to me",
-    "construction": "Poor apparent construction",
+    "construction": "Poor apparent quality",
     "too_expensive": "Too expensive for the quality",
     "already_own": "Already own something similar",
     "specific_item": "Don't like this specific item",
+    "not_my_style": "Not my style",
+    "wrong_category": "Wrong category (listing error)",
+    "too_repetitive": "Too repetitive",
 }
 
 ATTR_TYPE_WEIGHT = {"colour": 1.0, "category": 1.0, "fibre": 1.0, "brand": 0.8, "seller": 0.5, "fit": 1.0, "logo": 1.0}
@@ -68,11 +72,13 @@ class Routing:
 
 def route_feedback(action: str, reasons: list[str] | None) -> Routing:
     """Map a decision (+ optional reasons) to which preference signals it updates."""
-    reasons = [r for r in (reasons or []) if r in REASONS]
+    reasons = [r for r in (reasons or []) if r in REASONS and r != "not_my_style"]
     if action in ("love", "like", "purchased", "maybe"):
         return Routing(attrs={k: 1.0 for k in ATTR_TYPE_WEIGHT}, visual=1.0, text=1.0)
     if action != "dislike":
         return Routing()  # skip / unsave teach nothing
+    if reasons and set(reasons) <= {"wrong_category", "too_repetitive"}:
+        return Routing()  # a listing error or a repetitive feed says nothing about taste
     if not reasons:
         return Routing(attrs={k: 0.5 for k in ATTR_TYPE_WEIGHT}, visual=0.7, text=0.5, suppress=True)
     r = Routing()
@@ -89,8 +95,7 @@ def route_feedback(action: str, reasons: list[str] | None) -> Routing:
         elif reason == "colour":
             bump("colour", 1.0)
         elif reason == "logo":
-            bump("logo", 1.0)
-            bump("brand", 0.2)
+            bump("logo", 1.0)  # not the brand: a loud logo is not a verdict on the label
             r.visual = max(r.visual, 0.2)
         elif reason == "fabric":
             bump("fibre", 1.0)
@@ -166,6 +171,8 @@ class Profile:
     redundant: Counter = field(default_factory=Counter)
     construction_concerns: int = 0
     decided_ids: set[int] = field(default_factory=set)
+    # Product families (Product.group_id) you have decided on: their other listings are the same garment.
+    decided_groups: set[int] = field(default_factory=set)
     skipped_at: dict[int, datetime] = field(default_factory=dict)
     exposure: Counter = field(default_factory=Counter)
     n_informative: int = 0
@@ -226,7 +233,10 @@ def build_profile(db: Session, backend_name: str | None = None) -> Profile:
                 prof.n_positive += 1
             elif w < 0:
                 prof.n_negative += 1
+        is_seed = bool((fb.context or {}).get("seed"))
         for key in product_attrs(source):
+            if is_seed and key.startswith("seller:"):
+                continue  # seed examples describe style, not endorsement of the seller
             mult = routing.attrs.get(key.split(":", 1)[0], 0.0)
             if mult:
                 prof.attr_sum[key] += w * mult
@@ -266,6 +276,17 @@ def build_profile(db: Session, backend_name: str | None = None) -> Profile:
             if wgt > 0:
                 prof.pos_visual.append(Proto(emb.from_bytes(item.embedding), wgt, item.name, None, "wardrobe"))
 
+    # A decision about a garment covers its other listings, except a dislike only for the price: a cheaper
+    # offer of the same piece is exactly what you would want to see.
+    covering = [
+        pid
+        for pid, fb in latest.items()
+        if not (fb.action == "dislike" and fb.reasons and set(fb.reasons) <= {"too_expensive"})
+    ]
+    if covering:
+        prof.decided_groups = {
+            g for (g,) in db.query(Product.group_id).filter(Product.id.in_(covering), Product.group_id.isnot(None))
+        }
     k = cfg.get("cold_start_k", 15)
     prof.strength = prof.n_informative / (prof.n_informative + k) if prof.n_informative else 0.0
     return prof
@@ -375,12 +396,34 @@ class Ranked:
     components: dict[str, float]
     contributions: dict[str, float]
     design_score: float
-    reasons: list[str]
-    cautions: list[str]
+    _reasons: list[str]
+    _cautions: list[str]
     nearest_positive: dict | None
     explore: bool = False
     suppressed: bool = False
     strength: float = 0.0
+    sample_score: float | None = None  # score under a posterior sample (Thompson exploration)
+    taste_sd: float | None = None  # uncertainty of the learned taste estimate (logit s.d.)
+    # Builds (reasons, cautions) on first use: a feed ranks thousands of pieces but shows a few dozen.
+    explainer: Callable[[], tuple[list[str], list[str]]] | None = field(default=None, repr=False)
+
+    def _explain(self) -> None:
+        if self.explainer is not None:
+            self._reasons, self._cautions = self.explainer()
+            self.explainer = None
+
+    @property
+    def reasons(self) -> list[str]:
+        self._explain()
+        return self._reasons
+
+    @property
+    def cautions(self) -> list[str]:
+        self._explain()
+        return self._cautions
+
+
+UNCERTAINTY_TOP = 1000
 
 
 def rank_products(
@@ -431,6 +474,20 @@ def rank_products(
         for j, i in enumerate(txt_idx):
             semantic[i] = comp[j]
 
+    bayes = rcfg.get("engine", "bayes") == "bayes"
+    if bayes:
+        from . import preference_model as pm
+
+        space = pm.build_feature_space(db, taste, backend)
+        post = pm.fit(db, space)
+        known = [p.id for p in products if p.id in space.row]
+        # Mean logits for all; per-item uncertainty is computed by the selective gate for its shortlist only.
+        zmean = post.mean_logit(known)
+        rng = np.random.default_rng(int(utcnow().strftime("%Y%m%d")) * 1000 + post.n_obs)
+        zsamp = post.sample_z(known, rng) if known else np.zeros(0)
+        model_by_id = {pid: (float(zmean[j]), None, float(zsamp[j])) for j, pid in enumerate(known)}
+        s = post.n_obs / (post.n_obs + rcfg.get("cold_start_k", 15)) if post.n_obs else 0.0
+
     gates = {
         "rules": 1 - 0.6 * s,
         "learned_attributes": s,
@@ -441,6 +498,9 @@ def rank_products(
         "wardrobe": 1.0,
         "seller": 1.0,
     }
+    if bayes:
+        gates = {"taste": 1.0, "quality": gates["quality"], "value": 1.0, "wardrobe": 1.0, "seller": 1.0}
+        weights = {**weights, "taste": weights.get("taste", 3.0)}
     denom = sum(abs(weights.get(c, 0)) * g for c, g in gates.items()) or 1.0
 
     out: list[Ranked] = []
@@ -477,6 +537,29 @@ def rank_products(
         prio = 0.5 + (3 - (sl.priority if sl else 3)) * 0.06
         seller_c = 0.5 * rep + 0.5 * prio
 
+        if bayes:
+            out.append(
+                _bayes_ranked(
+                    p,
+                    post,
+                    model_by_id.get(p.id),
+                    rules_why,
+                    quality_c,
+                    value_c,
+                    wardrobe_c,
+                    seller_c,
+                    weights,
+                    gates,
+                    denom,
+                    reasons,
+                    cautions,
+                    prof,
+                    vis_best[i],
+                    p.id in prof.suppressed_ids or bool(near_dup[i]),
+                    s,
+                )
+            )
+            continue
         comps = {
             "rules": rules,
             "learned_attributes": learned,
@@ -551,7 +634,118 @@ def rank_products(
             )
         )
     out.sort(key=lambda r: -r.score)
+    if bayes:  # uncertainty for the part of the ranking anyone will look at (cheap; the gate computes its own)
+        top = [r for r in out[:UNCERTAINTY_TOP] if r.product.id in space.row]
+        if top:
+            for r, sd in zip(top, post.logit_sd(post.rows([r.product.id for r in top])), strict=True):
+                r.taste_sd = float(sd)
     return out
+
+
+GROUP_WORD = {"colour": "colour", "category": "", "fibre": "", "fit": "fit", "logo": "branding", "brand": ""}
+
+
+def _feature_phrase(group: str, label: str) -> str:
+    if group == "combo":  # "black|hoodie"
+        return label.replace("|", " ")
+    if group == "logo":
+        return {"none": "no visible branding", "subtle": "subtle branding", "visible": "visible logos"}.get(
+            label, label
+        )
+    word = GROUP_WORD.get(group, "")
+    return f"{label} {word}".strip()
+
+
+def _certainty(effect: float, sd: float) -> str:
+    ratio = abs(effect) / (sd + 1e-9)
+    return "confident" if ratio > 3 else "fairly sure" if ratio > 1.5 else "tentative"
+
+
+def _bayes_ranked(
+    p,
+    post,
+    model,
+    rules_why,
+    quality_c,
+    value_c,
+    wardrobe_c,
+    seller_c,
+    weights,
+    gates,
+    denom,
+    reasons,
+    cautions,
+    prof,
+    vis_best_i,
+    suppressed,
+    strength,
+) -> Ranked:
+    """Score one product with the Bayesian taste model (see preference_model). Its explanation is built only if
+    it is read (the feed shows a few dozen of the pieces it ranks)."""
+    zm, zsd, zs = model if model else (0.0, None, 0.0)
+    taste_c = float(1 / (1 + math.exp(-zm)))
+    comps = {"taste": taste_c, "quality": quality_c, "value": value_c, "wardrobe": wardrobe_c, "seller": seller_c}
+    contrib = {c: weights.get(c, 0) * gates[c] * (v - 0.5) for c, v in comps.items()}
+    score = 0.5 + sum(contrib.values()) / denom
+    sampled_taste = float(1 / (1 + math.exp(-zs)))
+    sample_score = score + weights.get("taste", 0) * (sampled_taste - taste_c) / denom
+    if suppressed:
+        score -= 0.5
+        sample_score -= 0.5
+    nearest = None
+    if vis_best_i >= 0 and prof.pos_visual:
+        pr = prof.pos_visual[int(vis_best_i)]
+        nearest = {"label": pr.label, "product_id": pr.product_id, "kind": pr.kind}
+
+    def explain() -> tuple[list[str], list[str]]:
+        model_reasons: list[str] = []
+        warn = list(cautions)
+        if post.n_obs == 0:
+            model_reasons.append("Cold start: ranked on your written preferences until you make some decisions")
+        if model:
+            pos, neg = post.explain(p.id)
+            for f in pos:
+                if f["group"] == "prior":
+                    model_reasons.extend(r[0].upper() + r[1:] for r in rules_why[:2])
+                elif f["group"] == "img":
+                    continue  # covered by the nearest-example sentence below
+                else:
+                    model_reasons.append(
+                        f"You tend to like {_feature_phrase(f['group'], f['label'])} ({_certainty(f['effect'], f['sd'])})"
+                    )
+            for f in neg:
+                if f["group"] == "prior":
+                    warn.append("Doesn't match your written preferences")
+                elif f["group"] != "img":
+                    warn.append(
+                        f"You tend to avoid {_feature_phrase(f['group'], f['label'])} ({_certainty(f['effect'], f['sd'])})"
+                    )
+            if any(f["group"] == "img" for f in pos) and vis_best_i >= 0 and prof.pos_visual:
+                pr = prof.pos_visual[int(vis_best_i)]
+                model_reasons.insert(0, f"Looks like pieces you liked, e.g. “{pr.label}”")
+        if not model_reasons and rules_why:
+            model_reasons.extend(r[0].upper() + r[1:] for r in rules_why[:2])
+        if p.logo_level == "visible":
+            warn.append("Listing mentions visible logo/print")
+        if suppressed:
+            warn.append("Near-identical to something you rejected")
+        return list(dict.fromkeys(model_reasons + reasons))[:5], list(dict.fromkeys(warn))[:4]
+
+    return Ranked(
+        p,
+        float(score),
+        comps,
+        contrib,
+        taste_c,
+        [],
+        [],
+        nearest,
+        suppressed=suppressed,
+        strength=strength,
+        sample_score=float(sample_score),
+        taste_sd=zsd,
+        explainer=explain,
+    )
 
 
 def explore_novelty(p: Product, prof: Profile) -> float:
@@ -578,7 +772,15 @@ def build_feed(
     chosen = {r.product.id for r in exploit}
     rest = [r for r in pool if r.product.id not in chosen and r.components["quality"] >= 0.3]
     explore: list[Ranked] = []
-    if n_explore and rest:
+    if n_explore and rest and all(r.sample_score is not None for r in rest):
+        # Bayesian engine: explore where the model is uncertain but plausibly right (Thompson sampling)
+        for r in sorted(rest, key=lambda r: -r.sample_score)[:n_explore]:
+            r.explore = True
+            r.reasons.insert(
+                0, "Exploration pick: the model is still unsure about pieces like this, so your reaction helps it learn"
+            )
+            explore.append(r)
+    elif n_explore and rest:
         weights = [explore_novelty(r.product, prof) ** 2 + 0.05 for r in rest]
         while rest and len(explore) < n_explore:
             j = rng.choices(range(len(rest)), weights=weights)[0]
@@ -606,17 +808,43 @@ def build_feed(
 
 
 def feed_candidates(db: Session, prof: Profile, *, include_skipped_after_days: int = 10) -> list[Product]:
+    """Undecided active listings. Listings of a garment you decided on, or recently skipped, are left out:
+    they are the same piece from another seller (the product and compare pages show those offers)."""
     cutoff = utcnow() - timedelta(days=include_skipped_after_days)
-    q = db.query(Product).filter(Product.status == "active")
+    skipped = {pid for pid, at in prof.skipped_at.items() if at > cutoff}
+    blocked = set(prof.decided_groups)
+    if skipped:
+        blocked |= {
+            g for (g,) in db.query(Product.group_id).filter(Product.id.in_(skipped), Product.group_id.isnot(None))
+        }
+    # Evidence is read for every candidate's quality; photos are loaded only for the cards actually shown.
+    q = db.query(Product).options(selectinload(Product.evidence)).filter(Product.status == "active")
     out = []
     for p in q:
-        if p.id in prof.decided_ids:
+        if p.id in prof.decided_ids or p.id in skipped:
             continue
-        sk = prof.skipped_at.get(p.id)
-        if sk and sk > cutoff:
+        if p.group_id is not None and p.group_id in blocked:
             continue
         out.append(p)
     return out
+
+
+def collapse_families(ranked: list[Ranked]) -> tuple[list[Ranked], dict[int, list[Product]]]:
+    """One entry per garment: the best-ranked listing of each product family stands for it, and the family's
+    other listings are returned as its offers (so the same piece never fills several feed slots)."""
+    kept: list[Ranked] = []
+    lead: dict[int, int] = {}
+    offers: dict[int, list[Product]] = {}
+    for r in ranked:
+        g = r.product.group_id
+        if g is not None and g in lead:
+            offers[lead[g]].append(r.product)
+            continue
+        if g is not None:
+            lead[g] = r.product.id
+        offers[r.product.id] = []
+        kept.append(r)
+    return kept, offers
 
 
 def describe_profile(db: Session, prof: Profile | None = None) -> dict:
