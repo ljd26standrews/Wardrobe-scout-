@@ -255,6 +255,45 @@ class Feedback(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
 
 
+class FeedRequest(Base):
+    """One Discover feed as served: what the ranking offered, in which order, under which model.
+
+    With ``Impression`` (what was actually displayed) and the feed id/position stored in each decision's
+    context, this is the exposure record an honest evaluation needs: feedback alone is not a complete record
+    of what was shown."""
+
+    __tablename__ = "feed_requests"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)  # uuid4 hex
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    engine: Mapped[str] = mapped_column(String(20))
+    engine_version: Mapped[str] = mapped_column(String(40))
+    decisions: Mapped[int] = mapped_column(Integer, default=0)  # informative decisions the model had seen
+    candidates: Mapped[int] = mapped_column(Integer, default=0)  # undecided listings eligible for the feed
+    exploration_rate: Mapped[float] = mapped_column(Float, default=0.0)
+    filters: Mapped[dict] = mapped_column(JSON, default=dict)
+    # [{"product_id", "position", "score", "explore", "family_size"}] in served order
+    items: Mapped[list] = mapped_column(JSON, default=list)
+
+
+class Impression(Base):
+    """A product actually displayed to you: a Discover card on screen, or a tile in the Discover grid."""
+
+    __tablename__ = "impressions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    feed_id: Mapped[str | None] = mapped_column(
+        ForeignKey("feed_requests.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    product_id: Mapped[int | None] = mapped_column(
+        ForeignKey("products.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    position: Mapped[int | None] = mapped_column(Integer, nullable=True)  # rank in the served feed
+    surface: Mapped[str] = mapped_column(String(20))  # card | grid
+    explore: Mapped[bool] = mapped_column(Boolean, default=False)
+    shown_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+
+
 class SavedItem(Base):
     """Shortlist / maybe list / wishlist state (latest decision per product)."""
 

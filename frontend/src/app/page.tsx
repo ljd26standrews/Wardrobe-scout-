@@ -1,11 +1,11 @@
 "use client";
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import useSWR from "swr";
 import { motion } from "framer-motion";
 import { Bookmark, Clock3, GitCompareArrows, Heart, LayoutGrid, Rows3, ShoppingBag, SkipForward, Store, X } from "lucide-react";
 import type { Product } from "@/lib/api";
-import { qs } from "@/lib/api";
+import { api, qs } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { EmptyState, ErrorState, Skeleton, Tip } from "@/components/ui/misc";
 import { Input } from "@/components/ui/input";
@@ -17,7 +17,8 @@ import { RejectDialog } from "@/components/product/reject-dialog";
 import { useFeedback, type ActionName } from "@/components/product/use-feedback";
 import { cn } from "@/lib/utils";
 
-type FeedResponse = { items: Product[]; total_candidates: number; learning_strength: number; decisions: number };
+type FeedResponse = { feed_id: string | null; items: Product[]; total_candidates: number; learning_strength: number; decisions: number };
+type Seen = { product: Product; feedId: string | null; position: number };
 
 function useStoredState<T>(key: string, initial: T): [T, (v: T) => void] {
   const [v, setV] = useState<T>(initial);
@@ -42,28 +43,74 @@ export default function DiscoverPage() {
   const [filters, setFilters] = useStoredState<Filters>("ws-filters", {});
   const [mode, setMode] = useStoredState<"card" | "grid">("ws-discover-mode", "card");
   const [hidden, setHidden] = useState<Set<number>>(new Set());
+  // The card on screen stays put while the ranking behind it is refreshed after each decision.
+  const [pinned, setPinned] = useState<number | null>(null);
+  const seen = useRef(new Map<number, Seen>());
+  const logged = useRef(new Set<string>());
   const [rejecting, setRejecting] = useState<Product | null>(null);
   const [lastAction, setLastAction] = useState<string>("skip");
   const url = `/api/feed${qs({ limit: 24, ...filters })}`;
   const { data, error, isLoading, mutate } = useSWR<FeedResponse>(url);
-  const queue = useMemo(() => (data?.items ?? []).filter((p) => !hidden.has(p.id)), [data, hidden]);
+  const queue = useMemo(() => {
+    data?.items.forEach((p, i) => seen.current.set(p.id, { product: p, feedId: data.feed_id, position: i }));
+    const items = (data?.items ?? []).filter((p) => !hidden.has(p.id));
+    const pin = pinned != null && !hidden.has(pinned) ? seen.current.get(pinned)?.product : undefined;
+    return pin ? [pin, ...items.filter((p) => p.id !== pin.id)] : items;
+  }, [data, hidden, pinned]);
   const current = queue[0];
 
-  useEffect(() => setHidden(new Set()), [url]);
-  // Refill when the local queue runs low
   useEffect(() => {
-    if (data && queue.length <= 2 && data.items.length > 2) {
-      mutate().then(() => setHidden(new Set()));
-    }
-  }, [queue.length, data, mutate]);
+    setHidden(new Set());
+    setPinned(null);
+  }, [url]);
+  useEffect(() => {
+    if (current && current.id !== pinned) setPinned(current.id);
+  }, [current, pinned]);
 
-  const feedback = useFeedback();
+  // Impression log: what was actually displayed, from which feed and position (for honest evaluation later).
+  const logViews = useCallback((feedId: string | null, surface: string, items: { product_id: number; position: number }[]) => {
+    const fresh = items.filter((it) => !logged.current.has(`${feedId}:${surface}:${it.product_id}`));
+    if (!feedId || !fresh.length) return;
+    fresh.forEach((it) => logged.current.add(`${feedId}:${surface}:${it.product_id}`));
+    api.post(`/api/feed/${feedId}/viewed`, { surface, items: fresh }).catch(() => {});
+  }, []);
+  useEffect(() => {
+    if (mode !== "card" || !current) return;
+    const s = seen.current.get(current.id);
+    if (s) logViews(s.feedId, "card", [{ product_id: current.id, position: s.position }]);
+  }, [mode, current, logViews]);
+  useEffect(() => {
+    if (mode !== "grid" || !data?.feed_id) return;
+    const shown = data.items.map((p, position) => ({ product_id: p.id, position })).filter((it) => !hidden.has(it.product_id));
+    logViews(data.feed_id, "grid", shown);
+  }, [mode, data, hidden, logViews]);
+
+  const restore = useCallback(
+    (productId: number) => {
+      setHidden((h) => {
+        const n = new Set(h);
+        n.delete(productId);
+        return n;
+      });
+      setPinned(productId);
+      mutate();
+    },
+    [mutate],
+  );
+  const feedback = useFeedback(undefined, restore);
   const act = useCallback(
     async (p: Product, action: ActionName, reasons: string[] = [], note?: string) => {
       setLastAction(action);
       setHidden((h) => new Set(h).add(p.id));
+      const s = seen.current.get(p.id);
       try {
-        await feedback(p.id, action, reasons, note, { explore: !!p.recommendation?.explore, surface: mode });
+        await feedback(p.id, action, reasons, note, {
+          explore: !!p.recommendation?.explore,
+          surface: mode,
+          feed_id: s?.feedId ?? null,
+          position: s?.position ?? null,
+        });
+        mutate(); // re-rank the rest of the queue with this decision included
       } catch {
         setHidden((h) => {
           const n = new Set(h);
@@ -72,7 +119,7 @@ export default function DiscoverPage() {
         });
       }
     },
-    [feedback, mode],
+    [feedback, mode, mutate],
   );
 
   // Keyboard shortcuts (card mode)

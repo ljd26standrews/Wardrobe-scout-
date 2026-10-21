@@ -109,6 +109,8 @@ export type Product = {
   cons: string[];
   saved: { list: string; priority: number; note: string | null; target_size?: string | null; added_at?: string } | null;
   recommendation?: Recommendation;
+  /** Discover feed only: other listings of the same garment (one family is shown once). */
+  family?: { size: number; offers: { product_id: number; seller: string | null; price: number | null; currency: string }[] };
   // detail only
   description?: string | null;
   description_original?: string | null;

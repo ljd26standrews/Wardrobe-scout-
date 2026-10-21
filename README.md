@@ -2,7 +2,7 @@
 
 A personal, local-first app for discovering, researching and deciding on clothing from Yupoo catalogues, Weidian listings and independent sellers. It collects real listings, separates evidence from marketing, learns your taste from quick decisions, finds the same or better pieces at other sellers, and helps you build a cohesive wardrobe.
 
-- **Discover** — one piece at a time (or a grid), with swipeable photos, CNY/GBP and UK landed cost, a quality assessment with confidence, why it suits you, its three strengths and three unknowns, links, and comparable listings. Love / Save / Maybe / Dislike (with reasons) / Skip / Compare / Purchased, all with keyboard shortcuts and undo.
+- **Discover** — one piece at a time (or a grid), with swipeable photos, CNY/GBP and UK landed cost, a quality assessment with confidence, why it suits you, its three strengths and three unknowns, links, and comparable listings. Love / Save / Maybe / Dislike (with reasons) / Skip / Compare / Purchased, all with keyboard shortcuts and undo. After each decision the rest of the queue is re-ranked while the card on screen stays put, and Undo puts the card back. A garment listed by several sellers takes one card ("Also listed by 2 other sellers · compare offers").
 - **Browse** — search and filter everything collected (brand, seller, price, claimed material, evidence status, size, season, category, source).
 - **Compare** — cross-seller matches, clearly separated into *confirmed identical*, *same purchase link*, *same photographs (unconfirmed)* and *visually similar*, with a verdict on whether a higher price is justified.
 - **Saved** — Loved / Shortlist / Maybe / Wishlist with priorities and a landed-cost total against your budget.
@@ -213,6 +213,12 @@ It is then combined with quality evidence, value, wardrobe fit and seller credib
   - **Skip teaches nothing.**
 - **Seed examples.** Your four starting items count as positive style examples, but they do not create seller affinity. The ¥510 Aristide white T-shirt is recorded with *too expensive for the quality*, which sets a T-shirt value ceiling and does **not** teach a dislike of white or heavyweight tees (this is covered by a test).
 - **Exploration.** About 18% of feed slots (adjustable) are chosen by *Thompson sampling*, which favours items the model is uncertain about rather than items that are merely unusual. They are labelled as exploration picks.
+- **One garment, one card.** Listings that are the same piece (a confirmed match, the same purchase link or several shared photos) share one feed slot, led by the best-ranked offer. A decision on one listing covers the others, except a dislike given only for the price, so a cheaper offer can still appear.
+- **Impression log.** Discover records two things, and each decision links to them:
+  - each feed it served: the ranking, positions, exploration picks and model version;
+  - each card actually displayed.
+
+  This is the exposure record a fair evaluation of the recommender needs, because decisions alone don't say what you were shown. It stays on your computer, keeps the latest 10,000 feeds and 200,000 displayed cards, and is included in the full snapshot (not the JSON backup).
 - **Near-duplicates** of items you rejected (shared photos or near-identical images) are suppressed.
 - **Visual signals** come from your approvals and rejections, your uploaded inspiration and anti-inspiration photos, and your wardrobe photos (weighted by how much you love each piece).
 - **Legacy engine.** The previous hand-weighted engine is still available under Settings → Ranking → Recommendation engine.

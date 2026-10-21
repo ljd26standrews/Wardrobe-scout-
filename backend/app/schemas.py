@@ -28,6 +28,16 @@ Aspect = Literal[
 ]
 
 
+class ViewedItem(BaseModel):
+    product_id: int
+    position: int | None = None  # informational; the server records the position it served
+
+
+class ViewedIn(BaseModel):
+    surface: Literal["card", "grid"] = "card"
+    items: list[ViewedItem] = Field(default_factory=list, max_length=100)
+
+
 class FeedbackIn(BaseModel):
     product_id: int
     action: Action

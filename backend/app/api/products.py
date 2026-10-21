@@ -3,19 +3,21 @@
 from __future__ import annotations
 
 import datetime as dt
+import uuid
 from collections import Counter
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import func
 from sqlalchemy.orm import Session, selectinload
 
 from ..db import get_db
 from ..ingestion.parsing import materials_to_text, parse_materials
-from ..models import Evidence, Product
-from ..schemas import EvidenceIn, MatchDecision, ProductPatch
+from ..models import Evidence, FeedRequest, Impression, Product
+from ..schemas import EvidenceIn, MatchDecision, ProductPatch, ViewedIn
 from ..services import dedup, jobs
 from ..services import embeddings as emb
 from ..services.presenter import Context, comparison, product_card
-from ..services.recommender import build_feed, build_profile, feed_candidates, rank_products
+from ..services.recommender import build_feed, build_profile, collapse_families, feed_candidates, rank_products
 from ..services.settings_store import get_setting
 from ..services.wardrobe import complement_scores
 
@@ -121,14 +123,102 @@ def feed(
     ranked = rank_products(
         db, candidates, prof, quality_lookup=quality_lookup, wardrobe_lookup=complement_scores(db, candidates)
     )
+    ranked, offers = collapse_families(ranked)  # one slot per garment, its other listings as offers
     seed = int(dt.date.today().strftime("%Y%m%d"))
-    chosen = build_feed(ranked, prof, limit, rcfg.get("exploration_rate", 0.18), seed=seed)
+    exploration = rcfg.get("exploration_rate", 0.18)
+    chosen = build_feed(ranked, prof, limit, exploration, seed=seed)
+    items = []
+    for r in chosen:
+        card = product_card(ctx, r.product, r)
+        others = offers.get(r.product.id, [])
+        card["family"] = {
+            "size": 1 + len(others),
+            "offers": [
+                {"product_id": o.id, "seller": o.seller.name if o.seller else None, "price": o.price,
+                 "currency": o.currency}
+                for o in others
+            ],
+        }  # fmt: skip
+        items.append(card)
+    filters = {
+        "q": q, "brand": brand, "seller_id": seller_id, "category": category, "material": material,
+        "min_price": min_price, "max_price": max_price, "season": season, "size": size, "quality": quality,
+    }  # fmt: skip
+    feed_id = _log_feed(db, rcfg, prof, chosen, offers, len(candidates), exploration, filters)
     return {
-        "items": [product_card(ctx, r.product, r) for r in chosen],
+        "feed_id": feed_id,
+        "items": items,
         "total_candidates": len(candidates),
         "learning_strength": round(prof.strength, 3),
         "decisions": prof.n_informative,
     }
+
+
+MAX_FEED_LOG = 10_000  # feeds kept in the impression log (oldest pruned)
+MAX_IMPRESSIONS = 200_000
+
+
+def _log_feed(db, rcfg, prof, chosen, offers, n_candidates, exploration, filters) -> str:
+    """Record what this feed offered and under which model (see models.FeedRequest)."""
+    from ..services import preference_model as pm
+
+    engine = rcfg.get("engine", "bayes")
+    fr = FeedRequest(
+        id=uuid.uuid4().hex,
+        engine=engine,
+        engine_version=pm.ENGINE_VERSION if engine == "bayes" else "legacy",
+        decisions=prof.n_informative,
+        candidates=n_candidates,
+        exploration_rate=exploration,
+        filters={k: v for k, v in filters.items() if v not in (None, [], "")},
+        items=[
+            {"product_id": r.product.id, "position": i, "score": round(float(r.score), 4), "explore": bool(r.explore),
+             "family_size": 1 + len(offers.get(r.product.id, []))}
+            for i, r in enumerate(chosen)
+        ],
+    )  # fmt: skip
+    db.add(fr)
+    db.flush()
+    _prune(db, FeedRequest, FeedRequest.created_at, MAX_FEED_LOG)
+    db.commit()
+    return fr.id
+
+
+def _prune(db, model, order_col, keep: int) -> None:
+    n = db.query(func.count()).select_from(model).scalar() or 0
+    if n > keep + keep // 20:  # prune in batches, not on every request
+        cutoff = db.query(order_col).order_by(order_col.desc()).offset(keep).limit(1).scalar()
+        if cutoff is not None:
+            db.query(model).filter(order_col <= cutoff).delete(synchronize_session=False)
+
+
+@router.post("/feed/{feed_id}/viewed")
+def feed_viewed(feed_id: str, body: ViewedIn, db: Session = Depends(get_db)):
+    """Record which served products were actually displayed. Only products that feed served are accepted, at
+    the position the server served them (each once per feed and surface)."""
+    fr = db.get(FeedRequest, feed_id)
+    if fr is None:
+        raise HTTPException(404, "feed not found")
+    served = {it["product_id"]: it for it in fr.items or []}
+    already = {
+        pid
+        for (pid,) in db.query(Impression.product_id).filter(
+            Impression.feed_id == feed_id, Impression.surface == body.surface
+        )
+    }
+    logged = 0
+    for it in body.items:
+        s = served.get(it.product_id)
+        if s is None or it.product_id in already:
+            continue
+        db.add(Impression(feed_id=feed_id, product_id=it.product_id, position=s["position"], surface=body.surface,
+                          explore=bool(s.get("explore"))))  # fmt: skip
+        already.add(it.product_id)
+        logged += 1
+    db.flush()
+    _prune(db, Impression, Impression.id, MAX_IMPRESSIONS)
+    db.commit()
+    return {"logged": logged}
 
 
 @router.get("/products")

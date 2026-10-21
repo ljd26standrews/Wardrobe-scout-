@@ -50,6 +50,19 @@ test("keyboard shortcuts and skip", async ({ page }) => {
   await expect(page.getByTestId("product-title")).not.toHaveText(t2);
 });
 
+test("discover: a decision re-ranks the queue at once, and Undo puts the card back", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.getByTestId("discover-card")).toBeVisible();
+  const title = await page.getByTestId("product-title").innerText();
+  const reranked = page.waitForRequest((r) => r.method() === "GET" && /\/api\/feed\?/.test(r.url()));
+  await page.getByTestId("action-like").click();
+  await reranked; // not ~22 cards later
+  await expect(page.getByTestId("product-title")).not.toHaveText(title);
+  await page.getByRole("button", { name: "Undo" }).first().click();
+  await expect(page.getByText("Undone")).toBeVisible();
+  await expect(page.getByTestId("product-title")).toHaveText(title);
+});
+
 test("grid view and browse search", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "Grid view" }).click();

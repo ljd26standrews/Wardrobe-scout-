@@ -166,6 +166,8 @@ class Profile:
     redundant: Counter = field(default_factory=Counter)
     construction_concerns: int = 0
     decided_ids: set[int] = field(default_factory=set)
+    # Product families (Product.group_id) you have decided on: their other listings are the same garment.
+    decided_groups: set[int] = field(default_factory=set)
     skipped_at: dict[int, datetime] = field(default_factory=dict)
     exposure: Counter = field(default_factory=Counter)
     n_informative: int = 0
@@ -269,6 +271,17 @@ def build_profile(db: Session, backend_name: str | None = None) -> Profile:
             if wgt > 0:
                 prof.pos_visual.append(Proto(emb.from_bytes(item.embedding), wgt, item.name, None, "wardrobe"))
 
+    # A decision about a garment covers its other listings, except a dislike only for the price: a cheaper
+    # offer of the same piece is exactly what you would want to see.
+    covering = [
+        pid
+        for pid, fb in latest.items()
+        if not (fb.action == "dislike" and fb.reasons and set(fb.reasons) <= {"too_expensive"})
+    ]
+    if covering:
+        prof.decided_groups = {
+            g for (g,) in db.query(Product.group_id).filter(Product.id.in_(covering), Product.group_id.isnot(None))
+        }
     k = cfg.get("cold_start_k", 15)
     prof.strength = prof.n_informative / (prof.n_informative + k) if prof.n_informative else 0.0
     return prof
@@ -726,7 +739,7 @@ def build_feed(
         for r in sorted(rest, key=lambda r: -r.sample_score)[:n_explore]:
             r.explore = True
             r.reasons.insert(
-                0, "Exploration pick: the model isn't sure about this one yet — your reaction will teach it the most"
+                0, "Exploration pick: the model is still unsure about pieces like this, so your reaction helps it learn"
             )
             explore.append(r)
     elif n_explore and rest:
@@ -757,17 +770,42 @@ def build_feed(
 
 
 def feed_candidates(db: Session, prof: Profile, *, include_skipped_after_days: int = 10) -> list[Product]:
+    """Undecided active listings. Listings of a garment you decided on, or recently skipped, are left out:
+    they are the same piece from another seller (the product and compare pages show those offers)."""
     cutoff = utcnow() - timedelta(days=include_skipped_after_days)
+    skipped = {pid for pid, at in prof.skipped_at.items() if at > cutoff}
+    blocked = set(prof.decided_groups)
+    if skipped:
+        blocked |= {
+            g for (g,) in db.query(Product.group_id).filter(Product.id.in_(skipped), Product.group_id.isnot(None))
+        }
     q = db.query(Product).filter(Product.status == "active")
     out = []
     for p in q:
-        if p.id in prof.decided_ids:
+        if p.id in prof.decided_ids or p.id in skipped:
             continue
-        sk = prof.skipped_at.get(p.id)
-        if sk and sk > cutoff:
+        if p.group_id is not None and p.group_id in blocked:
             continue
         out.append(p)
     return out
+
+
+def collapse_families(ranked: list[Ranked]) -> tuple[list[Ranked], dict[int, list[Product]]]:
+    """One entry per garment: the best-ranked listing of each product family stands for it, and the family's
+    other listings are returned as its offers (so the same piece never fills several feed slots)."""
+    kept: list[Ranked] = []
+    lead: dict[int, int] = {}
+    offers: dict[int, list[Product]] = {}
+    for r in ranked:
+        g = r.product.group_id
+        if g is not None and g in lead:
+            offers[lead[g]].append(r.product)
+            continue
+        if g is not None:
+            lead[g] = r.product.id
+        offers[r.product.id] = []
+        kept.append(r)
+    return kept, offers
 
 
 def describe_profile(db: Session, prof: Profile | None = None) -> dict:

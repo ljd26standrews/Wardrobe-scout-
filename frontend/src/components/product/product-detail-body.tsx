@@ -1,4 +1,5 @@
 "use client";
+import Link from "next/link";
 import { AlertCircle, CheckCircle2, Sparkles } from "lucide-react";
 import type { Product } from "@/lib/api";
 import { AlternativesPreview } from "./alternatives";
@@ -30,6 +31,14 @@ export function ProductInfo({ product, showAlternatives = true }: { product: Pro
         {product.seller ? product.seller.name : "Unknown seller"}
         {product.seller && product.seller.reputation !== "trusted" && <span> · seller {product.seller.reputation}</span>}
       </p>
+      {!!product.family?.offers.length && (
+        <p className="mt-1 text-sm text-muted-foreground" data-testid="family-offers">
+          Also listed by {product.family.offers.length} other {product.family.offers.length === 1 ? "seller" : "sellers"} ·{" "}
+          <Link href={`/compare?id=${product.id}`} className="underline underline-offset-2">
+            compare offers
+          </Link>
+        </p>
+      )}
       <div className="mt-4">
         <PriceBlock product={product} large />
       </div>
