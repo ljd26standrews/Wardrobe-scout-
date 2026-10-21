@@ -130,7 +130,7 @@ API keys are only read from the environment and are never stored in the database
 
 **Politeness and limits.**
 - **Robots and blocks.** Scans honour robots.txt and retry only transient errors. On HTTP 401/403/429 or a verification/CAPTCHA page they **stop and report "blocked"**. Nothing is ever bypassed.
-- **Request pacing.** Each host gets at most one request at a time, never faster than its delay (2 s by default). If a host answers with errors or slows down, its delay grows automatically and then relaxes gradually. Different hosts — each seller's catalogue and the image CDN — proceed in parallel, so waiting for one never holds up another.
+- **Request pacing.** Each host gets at most one request at a time, never faster than its delay (2 s by default). This holds across everything the app does at once: a scan, an import job and photos you open while browsing share one budget per host, and a host that answers with errors slows them all down. If a host answers with errors or slows down, its delay grows automatically and then relaxes gradually. Different hosts — each seller's catalogue and the image CDN — proceed in parallel, so waiting for one never holds up another.
 - **Password-protected catalogues.** These are reported as blocked. No password is tried.
 - **Unreadable catalogues retire nothing.** A first page with no albums is reported, not treated as an empty catalogue. Nothing is marked removed.
 - **Pages cut short lose nothing.** A product page that arrives incomplete (no closing tag) updates only what it shows. Price, description, links and photos it didn't reach keep their stored values, and the page is read again on the next scan.

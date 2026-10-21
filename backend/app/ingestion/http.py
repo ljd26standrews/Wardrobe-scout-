@@ -100,18 +100,45 @@ _SCRIPT = re.compile(r"<(script|style)\b.*?</\1>", re.S | re.I)
 
 
 class _Host:
-    """Per-host politeness state."""
+    """Politeness state for one host: when its next request may start, its current (adaptive) delay, and
+    a gate allowing one request in flight. Shared by every client that uses the same HostRegistry."""
 
-    __slots__ = ("next_at", "delay", "gate", "requests", "bytes", "errors", "slow")
+    __slots__ = ("next_at", "delay", "gate")
 
     def __init__(self, delay: float) -> None:
         self.next_at = 0.0
         self.delay = delay
         self.gate = threading.Semaphore(1)  # one request in flight per host
-        self.requests = 0
-        self.bytes = 0
-        self.errors = 0
-        self.slow = 0
+
+
+class _Counts:
+    """What one client fetched from one host (scan statistics)."""
+
+    __slots__ = ("requests", "bytes", "errors", "slow")
+
+    def __init__(self) -> None:
+        self.requests = self.bytes = self.errors = self.slow = 0
+
+
+class HostRegistry:
+    """Per-host politeness shared across clients. The process-wide SHARED_HOSTS covers all real network
+    traffic - a scan, an import job and photos fetched while you browse - so together they never exceed
+    one request at a time per host or its delay. (Clients with a custom transport, i.e. tests and
+    benchmarks, get a private registry unless one is passed.)"""
+
+    def __init__(self) -> None:
+        self._hosts: dict[str, _Host] = {}
+        self.lock = threading.Lock()
+
+    def get(self, host: str, delay: float) -> _Host:
+        with self.lock:
+            h = self._hosts.get(host)
+            if h is None:
+                h = self._hosts[host] = _Host(delay)
+            return h
+
+
+SHARED_HOSTS = HostRegistry()
 
 
 class PoliteClient:
@@ -125,6 +152,7 @@ class PoliteClient:
         respect_robots: bool | None = None,
         transport: httpx.BaseTransport | None = None,
         user_agent: str | None = None,
+        hosts: HostRegistry | None = None,
     ) -> None:
         s = get_settings()
         self.delay = s.request_delay_seconds if delay is None else delay
@@ -146,7 +174,8 @@ class PoliteClient:
                 "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
             },
         )
-        self._hosts: dict[str, _Host] = {}
+        self._registry = hosts or (SHARED_HOSTS if transport is None else HostRegistry())
+        self._counts: dict[str, _Counts] = {}
         self._robots: dict[str, RobotFileParser | None] = {}
         self._robots_locks: dict[str, threading.Lock] = {}
         self._lock = threading.Lock()
@@ -154,18 +183,23 @@ class PoliteClient:
         self.bytes_received = 0
 
     def host_state(self, host: str, binary: bool = False) -> _Host:
+        return self._registry.get(host, self.image_delay if binary else self.delay)
+
+    def _counts_for(self, host: str) -> _Counts:
         with self._lock:
-            h = self._hosts.get(host)
-            if h is None:
-                h = self._hosts[host] = _Host(self.image_delay if binary else self.delay)
-            return h
+            c = self._counts.get(host)
+            if c is None:
+                c = self._counts[host] = _Counts()
+            return c
 
     def stats(self) -> dict[str, dict]:
         with self._lock:
-            return {
-                k: {"requests": h.requests, "bytes": h.bytes, "delay": round(h.delay, 2), "errors": h.errors}
-                for k, h in self._hosts.items()
-            }
+            counts = dict(self._counts)
+        return {
+            k: {"requests": c.requests, "bytes": c.bytes, "delay": round(self.host_state(k).delay, 2),
+                "errors": c.errors}
+            for k, c in counts.items()
+        }  # fmt: skip
 
     # ------------------------------------------------------------------ robots
     def _robots_for(self, url: str) -> RobotFileParser | None:
@@ -185,9 +219,9 @@ class PoliteClient:
         h = self.host_state(netloc)
         try:
             with h.gate:
-                self._throttle(netloc)
+                self._throttle(netloc, self.delay)
                 r = self._client.get(origin + "/robots.txt")
-            self._count(h, len(r.content))
+            self._count(netloc, len(r.content))
             if r.status_code == 200 and "text" in r.headers.get("content-type", "text"):
                 rp.parse(r.text.splitlines())
             elif r.status_code in (401, 403):
@@ -208,34 +242,42 @@ class PoliteClient:
         return True if rp is None else rp.can_fetch(self.user_agent, url)
 
     # ---------------------------------------------------------------- throttle
-    def _throttle(self, host: str) -> None:
-        """Wait for this host's next slot. The lock is held only to book the slot, never while sleeping."""
+    def _throttle(self, host: str, base: float) -> None:
+        """Wait for this host's next slot: never sooner than this client's own delay or the host's current
+        (possibly backed-off) delay. The lock is held only to book the slot, never while sleeping."""
         h = self.host_state(host)
-        with self._lock:
+        with self._registry.lock:
             now = time.monotonic()
             start = max(now, h.next_at)
-            h.next_at = start + h.delay
+            h.next_at = start + max(h.delay, base)
         if start > now:
             time.sleep(start - now)
 
-    def _count(self, h: _Host, nbytes: int) -> None:
+    def _count(self, host: str, nbytes: int) -> None:
+        c = self._counts_for(host)
         with self._lock:
-            h.requests += 1
-            h.bytes += nbytes
+            c.requests += 1
+            c.bytes += nbytes
             self.requests_made += 1
             self.bytes_received += nbytes
 
-    def _adapt(self, h: _Host, *, failed: bool, elapsed: float, base: float) -> None:
-        """Back off on errors or slow answers; relax gradually back towards the configured minimum."""
-        with self._lock:
+    def _adapt(self, host: str, *, failed: bool, elapsed: float, base: float) -> None:
+        """Back off on errors or slow answers - from the next request on, whichever client makes it - and relax
+        gradually back towards the configured minimum."""
+        h, c = self.host_state(host), self._counts_for(host)
+        with self._registry.lock:
             if failed:
-                h.errors += 1
+                c.errors += 1
                 h.delay = min(self.MAX_DELAY, max(h.delay, base, 0.5) * 2)
             elif elapsed > max(5.0, 4 * base):
-                h.slow += 1
+                c.slow += 1
                 h.delay = min(self.MAX_DELAY, max(h.delay, elapsed / 2))
             elif h.delay > base:
                 h.delay = max(base, h.delay * 0.9)
+                return
+            else:
+                return
+            h.next_at = max(h.next_at, time.monotonic() + h.delay)
 
     # ------------------------------------------------------------------- fetch
     def get(
@@ -263,17 +305,17 @@ class PoliteClient:
         attempt = 0
         while True:
             with h.gate:
-                self._throttle(host)
+                self._throttle(host, base)
                 t0 = time.monotonic()
                 try:
                     r = self._bounded_get(url, headers)
                 except (httpx.TimeoutException, httpx.TransportError) as e:
-                    self._adapt(h, failed=True, elapsed=time.monotonic() - t0, base=base)
+                    self._adapt(host, failed=True, elapsed=time.monotonic() - t0, base=base)
                     err: Exception | None = e
                 else:
                     err = None
-                    self._count(h, len(r.content))
-                    self._adapt(h, failed=r.status_code >= 500, elapsed=time.monotonic() - t0, base=base)
+                    self._count(host, len(r.content))
+                    self._adapt(host, failed=r.status_code >= 500, elapsed=time.monotonic() - t0, base=base)
             if err is not None:
                 if attempt >= retries:
                     raise FetchError(f"network error for {url}: {err}") from err
