@@ -19,3 +19,4 @@ structlog>=24.1
 anthropic>=1.0
 # Optional: browser rendering for JS-only product pages (WS_ENABLE_PLAYWRIGHT=true)
 playwright>=1.44
+threadpoolctl>=3.1

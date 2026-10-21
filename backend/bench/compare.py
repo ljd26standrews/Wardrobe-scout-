@@ -45,7 +45,8 @@ ROWS = [
     ("Repeat scan: min. time at 2 s/host (s)", "_floor2"),
     ("Repeat scan: products found", "accuracy2.products_found"),
     ("Repeat scan: catalogue products", "accuracy2.catalogue_products"),
-    ("Repeat scan: removed products still active", "_removed_active"),
+    ("Repeat scan: removed products still shown active", "_removed_active"),
+    ("Repeat scan: new products found", "_new2"),
 ]
 
 
@@ -63,8 +64,12 @@ def value(r: dict, path: str):
     if path == "_dups":
         d = get(r, "accuracy.dedup")
         return f"{d['found_strong']}/{d['true_duplicate_pairs']}" if d else None
+    if path == "_new2":
+        runs = get(r, "scan2.scan_runs")
+        return sum(x["products_new"] for x in runs) if runs else None
     if path == "_removed_active":
-        return get(r, "accuracy2.removed_still_active")
+        a = get(r, "accuracy2")
+        return f"{a['removed_still_active']}/{a['removed_from_catalogue']}" if a else None
     return get(r, path)
 
 

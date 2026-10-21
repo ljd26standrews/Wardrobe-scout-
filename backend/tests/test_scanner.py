@@ -323,3 +323,45 @@ def test_upgrade_from_original_schema_keeps_data(tmp_path, monkeypatch):
     assert row[0] == "analysed" and row[1] is not None
     assert {"role", "selected", "thumb_url"} <= cols
     get_settings.cache_clear()
+
+
+def test_you_can_keep_writing_while_a_scan_runs(db, web):
+    """Rating products during a scan must not hit 'database is locked': the scan never idles holding the write
+    lock, and its progress messages go through its own session (a second connection on the scanning thread
+    used to wait on the scan's own lock until SQLite gave up)."""
+    from app.db import session_scope
+    from app.ingestion.http import PoliteClient
+    from app.ingestion.scan import scan_seller
+    from app.models import AppSetting, Job
+
+    albums, images = _catalogue(12)
+    serve(web, albums, images, per_page=4)  # several listing pages: progress messages between writes
+    seller = _seller(db)
+    job = Job(kind="scan_seller", status="running")
+    db.add(job)
+    db.commit()
+    errors, waits = [], []
+
+    from app.services import jobs
+
+    def scan():
+        try:
+            with PoliteClient(delay=0.04, transport=httpx.MockTransport(web.handler)) as c:
+                # exactly as the job runner calls it, including its progress logger
+                scan_seller(db, seller, client=c, job_id=job.id, progress=lambda m, f=None: jobs._job_log(job.id, m, f))
+        except Exception as e:  # noqa: BLE001
+            errors.append(e)
+
+    t = threading.Thread(target=scan)
+    t.start()
+    i = 0
+    while t.is_alive():
+        t0 = time.monotonic()
+        with session_scope() as s:  # a separate connection, like an API request
+            s.merge(AppSetting(key=f"probe{i % 3}", value=i))
+        waits.append(time.monotonic() - t0)
+        i += 1
+        time.sleep(0.01)
+    t.join()
+    assert not errors, errors
+    assert i > 5 and max(waits) < 1.0, (i, max(waits))

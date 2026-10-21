@@ -192,6 +192,7 @@ export type ScanStats = {
   elapsed_s?: number;
   pending_details?: number;
   pending_images?: number;
+  pending_products?: number;
   in_flight?: number;
   requests?: number;
   throughput_per_min?: number;

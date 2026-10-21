@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .api import feedback, products, sellers, system, wardrobe
-from .config import get_api_token, get_settings
+from .config import get_api_token, get_settings, limit_blas_threads
 from .db import SessionLocal, init_engine, migrate
 from .logging_setup import configure_logging, get_logger
 from .models import AppSetting
@@ -20,6 +20,9 @@ log = get_logger(__name__)
 
 def bootstrap(run_seed: bool = True) -> None:
     s = get_settings()
+    import numpy  # noqa: F401 - load BLAS so the thread limit applies to it
+
+    limit_blas_threads()
     get_api_token()  # create the token file up front so the app proxy can read it
     init_engine(s.database_url)
     migrate()

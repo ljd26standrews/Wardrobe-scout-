@@ -24,6 +24,8 @@ def main(argv: list[str] | None = None) -> int:
     iu.add_argument("url")
     ic = sub.add_parser("import-csv", help="import products from CSV")
     ic.add_argument("path")
+    sub.add_parser("continue", help="finish analysing products a cancelled/interrupted scan left pending")
+    sub.add_parser("reanalyse", help="classify photos stored before image roles existed (size charts etc.)")
     sub.add_parser("recompute", help="recompute embeddings and duplicate groups")
     ex = sub.add_parser("export", help="export a JSON backup")
     ex.add_argument("path")
@@ -39,15 +41,24 @@ def main(argv: list[str] | None = None) -> int:
         if args.cmd == "init-db":
             print(f"Database ready at {s.database_url}")
         elif args.cmd == "scan":
-            from .ingestion.scan import scan_seller
+            from .ingestion.scan import scan_many
             from .models import Seller
 
             q = db.query(Seller).filter(Seller.status == "active", Seller.base_url.isnot(None))
             if args.seller:
                 q = db.query(Seller).filter(Seller.slug == args.seller)
-            for seller in q.order_by(Seller.priority).all():
-                run = scan_seller(db, seller, mode=args.mode, progress=lambda m, f=None: print("  ", m))
-                print(f"{seller.name}: {run.status} — {run.message}")
+            sellers = q.order_by(Seller.priority).all()
+            # All sellers in one concurrent scan: their catalogue hosts proceed in parallel.
+            for run in scan_many(db, sellers, mode=args.mode, progress=lambda m, f=None: print("  ", m)):
+                print(f"{db.get(Seller, run.seller_id).name}: {run.status} — {run.message}")
+        elif args.cmd == "continue":
+            from .ingestion.scan import drain_pending
+
+            print(drain_pending(db, progress=lambda m, f=None: print("  ", m)))
+        elif args.cmd == "reanalyse":
+            from .services.jobs import reanalyse_stored
+
+            print(reanalyse_stored(db, lambda m, f=None: print("  ", m)))
         elif args.cmd == "import-url":
             from .ingestion.scan import import_url
 

@@ -35,6 +35,7 @@ def _make_engine(url: str) -> Engine:
         def _sqlite_pragmas(dbapi_conn, _):  # pragma: no cover - trivial
             cur = dbapi_conn.cursor()
             cur.execute("PRAGMA journal_mode=WAL")
+            cur.execute("PRAGMA synchronous=NORMAL")  # safe with WAL; much cheaper commits
             cur.execute("PRAGMA foreign_keys=ON")
             cur.close()
 

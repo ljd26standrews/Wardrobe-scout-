@@ -98,6 +98,17 @@ test("sellers dashboard reports genuine scan outcomes", async ({ page }) => {
   await shot(page, "sellers");
 });
 
+test("scan panel shows catalogue coverage from the server", async ({ page }) => {
+  await page.goto("/sellers");
+  const panel = page.getByTestId("scan-panel");
+  await expect(panel.getByText("Catalogue coverage")).toBeVisible();
+  await expect(panel.getByText(/Demo Seller A/)).toBeVisible();
+  await expect(panel.getByText(/analysed/).first()).toBeVisible();
+  // Survives a reload: the state lives on the server, not in this tab
+  await page.reload();
+  await expect(page.getByTestId("scan-panel").getByText("Catalogue coverage")).toBeVisible();
+});
+
 test("wardrobe: add an owned piece with a photo", async ({ page }) => {
   await page.goto("/wardrobe");
   await page.getByTestId("add-wardrobe").click();

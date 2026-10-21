@@ -39,11 +39,18 @@ def score(db, spec: dict) -> dict:
         if (sellers[p.seller_id], p.external_id) in truth
     ]
     by_key = {(sellers[p.seller_id], p.external_id): p for p in prods}
+    gone = [
+        p
+        for p in db.query(Product).filter(Product.seller_id.in_(sellers), Product.data_origin == "scraped")
+        if (sellers[p.seller_id], p.external_id) not in truth
+    ]
     out: dict = {
         "catalogue_products": len(truth),
         "products_found": len(prods),
         "products_active": sum(p.status == "active" for p in prods),
         "products_with_image_vector": sum(p.image_embedding is not None for p in prods),
+        "removed_from_catalogue": len(gone),
+        "removed_still_active": sum(p.status == "active" for p in gone),
     }
     states = Counter(getattr(p, "analysis_state", None) or "n/a" for p in prods)
     out["analysis_states"] = dict(states)

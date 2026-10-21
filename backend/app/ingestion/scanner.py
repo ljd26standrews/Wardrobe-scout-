@@ -151,6 +151,7 @@ class Scanner:
         self.relevance: dict[int, float] = {}
         self.deep_ids: set[int] = set()
         self.new_queued = 0
+        self.analysed_ids: set[int] = set()
         self.discovery_q: queue.Queue = queue.Queue()
         self.paused = threading.Event()
         self.cancelled = threading.Event()
@@ -167,10 +168,15 @@ class Scanner:
         self._last_flush = 0.0
         self._last_control = 0.0
         self._images_per_product: list[int] = []
+        self._log: list[str] = []
 
     # ------------------------------------------------------------------ helpers
     def say(self, msg: str, frac: float | None = None) -> None:
-        if self.progress:
+        if self.job_id:
+            # Written with the next flush through this session: a second connection writing the job row
+            # would compete with the scan for SQLite's single write lock.
+            self._log.append(f"{utcnow().strftime('%H:%M:%S')} {msg}")
+        elif self.progress:
             self.progress(msg, frac)
 
     def push(self, task: Task) -> None:
@@ -376,8 +382,9 @@ class Scanner:
         if deep:
             p.analysis_state = "deep" if p.detail_fetched_at else p.analysis_state
             self.stats["deep_analysed"] += 1
-        if p.analysis_state in ("analysed", "deep"):
-            self.stats["products_analysed"] += 1
+        if p.analysis_state in ("analysed", "deep") and p.id not in self.analysed_ids:
+            self.analysed_ids.add(p.id)
+            self.stats["products_analysed"] = len(self.analysed_ids)
             self.done_times.append(time.monotonic())
             self._images_per_product.append(sum(1 for i in p.images if i.fetch_status in ("ok", "failed")))
         if p.image_embedding is not None or p.links:
@@ -633,6 +640,11 @@ class Scanner:
             elapsed_s=round(elapsed),
             pending_details=sum(1 for q in self.queues.values() for t in q if t.kind == "detail"),
             pending_images=sum(1 for q in self.queues.values() for t in q if t.kind == "image"),
+            # products (not tasks) still waiting for a page or photo
+            pending_products=len(
+                {t.product_id or id(t) for q in self.queues.values() for t in q}
+                | {t.product_id or id(t) for t in self.inflight.values()}
+            ),
             in_flight=len(self.inflight),
             requests=self.client.requests_made,
             hosts=self.client.stats(),
@@ -656,10 +668,12 @@ class Scanner:
             if job is not None:
                 job.stats = dict(self.stats)
                 job.message = self._summary()
+                if self._log:
+                    job.log = (job.log or [])[-(200 - len(self._log[-50:])) :] + self._log[-50:]
+                    self._log.clear()
                 if self.stats["discovery_complete"]:
-                    pend = self.stats["pending_details"] + self.stats["pending_images"] + len(self.inflight)
                     done = self.stats["products_analysed"]
-                    job.progress = done / max(1, done + pend)
+                    job.progress = done / max(1, done + self.stats["pending_products"])
         self.db.commit()
 
     def _summary(self) -> str:
@@ -717,7 +731,10 @@ class Scanner:
                     self.stats["stage"] = "analysing" if all_discovered else "discovering"
                 if not self.paused.is_set() and not self.cancelled.is_set():
                     self._schedule(workers)
-                # Results
+                # Results. Commit before blocking so the write lock is never held while waiting: you can
+                # keep browsing and rating products while a scan runs.
+                if self.db.in_transaction():
+                    self.db.commit()
                 if self.inflight:
                     done, _ = wait(list(self.inflight), timeout=0.2, return_when=FIRST_COMPLETED)
                     for fut in done:

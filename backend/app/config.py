@@ -46,6 +46,9 @@ class Settings(BaseSettings):
     deep_images: int = 8  # photos fetched for products that get deep analysis (duplicate checks, your saves)
     refresh_days: int = 14  # re-read an unchanged product page after this long (spread across scans)
     deep_on_feedback: bool = True  # loving/saving a scanned product fetches its full gallery for comparisons
+    # numpy's BLAS spins extra threads for small matrix products; with the scanner's own worker threads
+    # that oversubscribes the CPU (measured: 3x more CPU time for a 3,000-product scan). 0 = library default.
+    blas_threads: int = 1
 
     # Optional components
     enable_scheduler: bool = True
@@ -79,6 +82,18 @@ class Settings(BaseSettings):
     @property
     def backups_dir(self) -> Path:
         return self.data_dir / "backups"
+
+
+def limit_blas_threads() -> None:
+    """Apply ``blas_threads`` to the numerical libraries already loaded in this process."""
+    n = get_settings().blas_threads
+    if n > 0:
+        try:
+            from threadpoolctl import threadpool_limits
+
+            threadpool_limits(limits=n, user_api="blas")
+        except ImportError:  # pragma: no cover - threadpoolctl ships with scikit-learn
+            pass
 
 
 def get_api_token() -> str:

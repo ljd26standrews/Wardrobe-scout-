@@ -59,7 +59,7 @@ function ActiveScan({ job, refresh }: { job: Job; refresh: () => void }) {
     }
   };
   const paused = job.control === "pause" || s?.stage === "paused";
-  const pending = (s?.pending_details ?? 0) + (s?.pending_images ?? 0) + (s?.in_flight ?? 0);
+  const pending = s?.pending_products ?? 0;
   const analysisFrac = s && s.discovery_complete ? s.products_analysed / Math.max(1, s.products_analysed + pending) : null;
   return (
     <Card className="p-5" data-testid="scan-panel-active">
@@ -117,7 +117,7 @@ function ActiveScan({ job, refresh }: { job: Job; refresh: () => void }) {
               <p className="label">2 · Product pages &amp; photos</p>
               <p className="mt-2 text-sm">
                 <span className="tabular-nums" data-testid="scan-analysed">{s.products_analysed}</span> analysed
-                {s.discovery_complete ? <> · <span className="tabular-nums">{pending}</span> queued</> : null}
+                {s.discovery_complete ? <> · <span className="tabular-nums">{pending}</span> products waiting</> : null}
               </p>
               {analysisFrac !== null ? <Bar value={analysisFrac} className="mt-2" /> : <p className="mt-2 text-xs text-muted-foreground">Progress shown once the listing has been read (the total isn&apos;t known before).</p>}
               <p className="mt-2 text-xs text-muted-foreground" data-testid="scan-eta">
@@ -130,7 +130,7 @@ function ActiveScan({ job, refresh }: { job: Job; refresh: () => void }) {
             <Stat label="Discovered" value={s.discovered} testid="scan-discovered" />
             <Stat label="New" value={s.new} />
             <Stat label="Unchanged, skipped" value={s.unchanged_skipped} hint="Already analysed and unchanged in the listing: no requests made" />
-            <Stat label="Pages fetched" value={s.details_fetched} hint="Product pages read (not-modified answers are counted separately)" />
+            <Stat label="Product pages read" value={s.details_fetched} hint={`${s.details_not_modified} more answered "not modified" (no download)`} />
             <Stat label="Photos downloaded" value={`${s.images_downloaded}`} hint={`${(s.image_bytes / 1e6).toFixed(1)} MB; ${s.images_reused} reused from other listings`} />
             <Stat label="Size charts excluded" value={s.size_charts_excluded} testid="scan-size-charts" hint="Kept for the sizing section, never used for visual taste" />
             <Stat label="Text & banners excluded" value={s.text_graphics_excluded + s.repeated_excluded} />

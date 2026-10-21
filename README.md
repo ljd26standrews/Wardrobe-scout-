@@ -7,7 +7,7 @@ A personal, local-first app for discovering, researching and deciding on clothin
 - **Compare** — cross-seller matches, clearly separated into *confirmed identical*, *same purchase link*, *same photographs (unconfirmed)* and *visually similar*, with a verdict on whether a higher price is justified.
 - **Saved** — Loved / Shortlist / Maybe / Wishlist with priorities and a landed-cost total against your budget.
 - **My Wardrobe** — what you own (with photos), gaps against seasonal essentials, redundancy warnings, outfit combinations (including saved candidates), inspiration and anti-inspiration photos.
-- **Sellers** — add, pause, prioritise and scan sellers. A status dashboard shows exactly how many products were genuinely collected from each seller and how its last scan went. Also: link / manual / CSV / JSON / bookmarklet imports, watched links, jobs and community research leads.
+- **Sellers** — add, pause, prioritise and scan sellers. A live scan panel shows discovery and analysis progress, size charts excluded, duplicates, throughput, a time-remaining range and catalogue coverage. You can pause, resume, cancel or retry a scan, and it keeps running if you close the tab. Also: link / manual / CSV / JSON / bookmarklet imports, watched links, jobs and community research leads.
 - **Insights** — what has been learned (and how confident that is), effective ranking weights, value ceilings, explanations for top picks, and the full decision history with undo.
 - **Settings** — taste profile, ranking weights, exploration rate, exchange rate, landed-cost assumptions, optional AI with a spending cap, refresh schedule, backup and restore.
 
@@ -51,6 +51,20 @@ copy .env.example .env
 powershell -ExecutionPolicy Bypass -File scripts\start-windows.ps1
 ```
 
+### Upgrading an existing installation
+
+Your data is kept. The database is upgraded in place when the app starts. Photos stored by earlier versions are then re-classified once in the background, on your computer only with no downloads, so size charts stop influencing your recommendations.
+
+```bash
+git pull
+cd backend && .venv/bin/pip install -r requirements-dev.txt        # Windows: .venv\Scripts\pip install -r requirements-dev.txt
+cd ../frontend && npm install && npm run build
+```
+
+Then start the app as usual. To run the upgrade by hand: `python -m app.cli init-db`, then `python -m app.cli reanalyse`.
+
+If your `.env` was copied from an older `.env.example`, it may say `WS_MAX_PAGES_PER_SCAN=40`. That limits each scan to about 1,600 products per seller (the scan panel then says the listing was not read to the end), so raise it to `250` or delete the line.
+
 ### First steps in the app
 
 1. **Sellers → Scan all.** This scans the five starting catalogues politely. Each seller's card then shows the real outcome: products collected, requests made, and any error or block message.
@@ -68,8 +82,15 @@ Everything lives in `.env` at the repo root (copied from `.env.example`) and in 
 |---|---|---|
 | `WS_DATABASE_URL` | SQLite in `backend/data/` | Use `postgresql+psycopg://…` for PostgreSQL (then `pip install psycopg[binary]`) |
 | `WS_DATA_DIR` | `backend/data` | Database, downloaded images, uploads, backups |
-| `WS_REQUEST_DELAY_SECONDS` | `2.0` | Minimum delay between requests to the same host |
-| `WS_MAX_PAGES_PER_SCAN` | `40` | Listing pages per scan |
+| `WS_REQUEST_DELAY_SECONDS` | `2.0` | Minimum delay between requests to the same host (each host is limited separately; hosts run in parallel) |
+| `WS_IMAGE_REQUEST_DELAY_SECONDS` | same as above | Minimum delay between requests to an image host (CDN). Unset = unchanged politeness |
+| `WS_MAX_PAGES_PER_SCAN` | `250` | Catalogue listing pages per scan (about 40 products each). If this is reached, the scan says the listing was not read to the end |
+| `WS_ANALYSIS_IMAGES` | `1` | Useful garment photos analysed per product in a normal scan. `2` doubles photo requests and finds more cross-seller duplicates (see `backend/bench/RESULTS.md`) |
+| `WS_MAX_EXAMINE_IMAGES` | `6` | At most this many photos are downloaded per product when looking for that many useful views (size charts and banners are skipped) |
+| `WS_DEEP_IMAGES` | `8` | Photos fetched for products that get deep analysis: duplicate candidates, and products you love, save or buy |
+| `WS_REFRESH_DAYS` | `14` | Unchanged product pages are re-read after this long, spread across scans |
+| `WS_DEEP_ON_FEEDBACK` | `true` | Loving or saving a scanned product fetches its full gallery for comparisons |
+| `WS_BLAS_THREADS` | `1` | Threads numpy's maths library may use (more wastes CPU alongside the scanner's own threads). `0` = library default |
 | `WS_RESPECT_ROBOTS_TXT` | `true` | Honour robots.txt (keep this on) |
 | `WS_ENABLE_SCHEDULER` | `true` | Hourly check that refreshes sellers whose interval has elapsed |
 | `WS_EMBEDDING_BACKEND` | `auto` | `auto` / `clip` / `lite` |
@@ -105,9 +126,29 @@ API keys are only read from the environment and are never stored in the database
 | Weidian shop listings | Served by authenticated JavaScript APIs, so **not traversed** | Add item links instead |
 | Anything else | Paste link · manual form with photo upload · CSV/JSON · **bookmarklet** | Always works |
 
-**Politeness and limits.** Scans run one at a time. They honour robots.txt, wait between requests, and retry only transient errors. On HTTP 401/403/429 or a verification/CAPTCHA page they **stop and report "blocked"** — nothing is ever bypassed. Image hosts that check the Referer header get the album page as Referer, exactly as your browser sends it.
+**Politeness and limits.**
+- **Robots and blocks.** Scans honour robots.txt and retry only transient errors. On HTTP 401/403/429 or a verification/CAPTCHA page they **stop and report "blocked"**. Nothing is ever bypassed.
+- **Request pacing.** Each host gets at most one request at a time, never faster than its delay (2 s by default). If a host answers with errors or slows down, its delay grows automatically and then relaxes gradually. Different hosts — each seller's catalogue and the image CDN — proceed in parallel, so waiting for one never holds up another.
+- **Referer header.** Image hosts that check the Referer header get the album page as Referer, exactly as your browser sends it.
 
-**Incremental refresh.** A scan stops after a run of already-known albums. It re-fetches an album only when its listing title changed or it hasn't been seen for a week. Products are marked *new* until you open them. Price, size and availability changes are recorded with timestamps, and a *full* rescan marks albums that have disappeared as unavailable. Nothing is deleted.
+**How a scan runs.**
+
+1. **Discovery.** The catalogue listing is read first, at one request per ~40 products. Every product found is **immediately browsable** with its title, price, category and cover photo, marked *Found in the catalogue listing*.
+2. **Prioritisation.** Products are queued for analysis in order of predicted relevance to your taste. About one slot in five goes to a random product, so nothing waits forever. Every product is analysed eventually.
+3. **Analysis.** Each product's page is read (description, sizes, links, full gallery), then its photos are analysed **progressively**:
+   - Photos are fetched in gallery order, at the 640 px size the seller's grid shows.
+   - Fetching stops at the first useful garment view (`WS_ANALYSIS_IMAGES`).
+   - **Size charts, measurement tables and diagrams, shop notices, and banners a seller reuses across listings** are recognised cheaply and excluded from your taste and from photo matching. Size charts stay on the product page under *Size charts*.
+   - Photos not needed for analysis are fetched only when you open them.
+4. **Deep analysis.** More photos are fetched for products that might be the same item at another seller, and for anything you love, save or buy, so cross-seller comparisons have enough to go on.
+
+Each product carries its state: *discovered*, *partly analysed*, *analysed* or *deep*. A scan can be paused, resumed or cancelled from the Sellers page. If it's cancelled or interrupted, the next scan, or **Continue analysis**, picks up exactly where it stopped.
+
+**Incremental refresh.** Every scan re-reads the whole catalogue listing. That is cheap, and it means new albums are found even when a seller doesn't publish in date order.
+- **What gets fetched.** Product pages are fetched only for new albums, albums whose listing title changed (price changes usually show there), and a share of the oldest ones each scan (`WS_REFRESH_DAYS`). Pages are requested conditionally (ETag / Last-Modified), so unchanged pages cost no download. Photos already analysed — including the same photo at another listing — are never downloaded again.
+- **Removals.** An album missing from a fully read listing is checked against its own page. Only a page that is gone marks the product *unavailable*. A scan that stopped early, was cancelled or hit the page limit never retires anything.
+- **Change tracking.** Price, size and availability changes are recorded with timestamps. Nothing is deleted.
+- **Full rescan.** "Full rescan" re-reads every product page, still conditionally.
 
 **Provenance.** Every product records its source URL, first/last seen times and how it entered the system (`scraped`, `manual`, `csv`, `json`, `bookmarklet`, `seed`). Every extracted claim (composition, GSM, hardware, "1:1 accurate") is stored as a *seller claim* with its source URL and capture time.
 
@@ -208,6 +249,8 @@ Every call is cached, rate-limited and checked against a monthly spending cap (d
 cd backend
 .venv/bin/python -m app.cli init-db
 .venv/bin/python -m app.cli scan --seller madebykungfu --mode incremental
+.venv/bin/python -m app.cli continue        # finish products a cancelled/interrupted scan left pending
+.venv/bin/python -m app.cli reanalyse       # classify photos stored by older versions (runs automatically too)
 .venv/bin/python -m app.cli import-url "https://weidian.com/item.html?itemID=7707075268"
 .venv/bin/python -m app.cli import-csv products.csv
 .venv/bin/python -m app.cli recompute
@@ -228,12 +271,16 @@ cd frontend && npm run typecheck && npm run lint
 
 ```
 backend/   FastAPI · SQLAlchemy 2 · Alembic · SQLite→PostgreSQL · APScheduler · structlog
-  app/ingestion/   polite HTTP client, Yupoo / Shopify / generic / Weidian adapters, parsing, translation, scans
+  app/ingestion/   polite per-host HTTP client, Yupoo / Shopify / generic / Weidian adapters, parsing, translation,
+                   staged concurrent scanner (scanner.py)
+  app/services/image_select.py   size-chart / text-graphic detection and photo selection
   app/services/    recommender, quality, dedup, embeddings, wardrobe, landed cost, AI, community, jobs, backup
   app/api/         REST endpoints (OpenAPI docs at http://localhost:8000/docs)
 frontend/  Next.js 15 (App Router) · TypeScript · Tailwind · shadcn-style Radix components · SWR · framer-motion
   src/app/api/[...path]/route.ts   runtime proxy to the backend (single origin, good for iPhone use)
 scripts/   setup.sh · start.sh · dev.sh · e2e.sh · start-windows.ps1
+backend/bench/   reproducible scanning benchmarks against a local catalogue server (see bench/README.md)
+backend/eval/    recommender evaluation with simulated shoppers
 ```
 
 ## Known limitations (please read)
@@ -244,6 +291,9 @@ scripts/   setup.sh · start.sh · dev.sh · e2e.sh · start-windows.ps1
 - **Seller reputation starts "unassessed" for all five sellers.** I couldn't reach community sources from the build environment, and popularity isn't treated as evidence. Run community searches from your machine and accept the leads you trust.
 - **Without CLIP**, visual similarity is approximate (colour, tone and shape). Install CLIP for real garment understanding.
 - The **landed-cost** figure is an estimate from editable assumptions (shipping rates, agent fee, VAT 20%, 12% duty above £135). Check current UK rules and your agent's prices.
+- **Scanning speed was measured against a local simulated catalogue.** It uses real garment photos, rendered size charts and modelled network latency (`backend/bench/`). It was not measured against live sellers.
+  - **Size-chart detection.** It wrongly excluded 1 of 3,781 real garment photos. It recognised 96% of rendered charts; photographed charts, at ~83%, are the weakest case. Real sellers' chart designs may differ, so a chart that slips through is labelled *uncertain* or *garment* rather than causing an error.
+  - **Duplicate detection.** Analysing one photo per product finds fewer cross-seller duplicates than downloading every photo did (about two thirds of re-posts, against nearly all). Duplicate candidates and anything you love or save get a deep check. Set `WS_ANALYSIS_IMAGES=2` for more thorough matching at roughly twice the photo requests.
 - **Outfit suggestions** use colour-harmony and layering rules, not a learned fashion model.
 - Duplicate grouping by **shared photos** is a strong hint but not proof of the same batch. The UI says so, and only your confirmation (or a shared purchase link) makes a match "confirmed". The photo-matching thresholds were tuned on synthetic images and still need checking on real seller photos.
 - Some catalogues may contain replicas of branded goods. Check your local rules on importing them; UK Border Force can seize counterfeit goods.
@@ -252,6 +302,7 @@ scripts/   setup.sh · start.sh · dev.sh · e2e.sh · start-windows.ps1
 
 - **"Backend not reachable"** — start the backend (`./scripts/start.sh`) or check `BACKEND_URL`.
 - **A seller shows "Blocked"** — the site restricted automated access. Use the bookmarklet or imports, and don't raise request rates.
+- **A scan seems slow** — the panel on the Sellers page shows the stage, the products waiting and a time-remaining range. Products already found are browsable while analysis continues. Scans are deliberately paced (`WS_REQUEST_DELAY_SECONDS`); please don't lower it below what a person browsing would cause.
 - **Images missing** — some image hosts reject direct fetches. The product page offers "Re-check listing", and photos you upload always work.
 - **iPhone can't connect** — set `WS_LAN=1` and `WS_ACCESS_CODE` in `.env` and restart. Both devices must be on the same network, and your computer's firewall must allow port 3000.
 - **"missing or invalid API token"** — you called the backend directly. Use the app (port 3000), or send the key from `backend/data/api_token` as the `X-WS-Token` header.
