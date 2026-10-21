@@ -86,6 +86,23 @@ def test_without_calibration_balanced_is_the_labelled_ranking_and_strict_modes_a
         assert "nothing is shown as" in s["gate"]["message"] and "more rated pieces" in s["gate"]["message"]
 
 
+def test_before_calibration_balanced_includes_a_few_labelled_learning_picks(client, db):
+    """While Balanced is only a taste ranking, a small share of labelled Learning picks keeps a taste far from the
+    written profile findable. Never in the strict modes, and never once calibrated."""
+    from app.models import FeedRequest
+
+    world(db, per=8, rated=2, calibrate=False)  # 36 undecided candidates
+    f = client.get("/api/feed", params={"limit": 20}).json()
+    picks = [i for i in f["items"] if i["recommendation"]["explore"]]
+    assert 1 <= len(picks) <= 6 and all(i["confidence"]["learning"] for i in picks)
+    assert all(i["recommendation"]["reasons"][0].startswith("Learning pick") for i in picks)
+    rows = db.get(FeedRequest, f["feed_id"]).items
+    assert all(0 < r["propensity"] <= 1 for r in rows if r["explore"]) and f["gate"]["sampling"]["pool"] > 0
+    assert not any(
+        i["recommendation"]["explore"] for i in client.get("/api/feed", params={"mode": "high"}).json()["items"]
+    )
+
+
 # ----------------------------------------------------------------- with a calibration
 def test_calibrated_modes_show_only_pieces_whose_bound_clears_the_target(client, db):
     from app.models import FeedRequest
@@ -107,6 +124,8 @@ def test_calibrated_modes_show_only_pieces_whose_bound_clears_the_target(client,
         assert all(r["bound"] >= t and r["s"] > 0 and mode in r["passes"] for r in log.items)
     assert shown["balanced"] and shown["high"]
     assert set(shown["extreme"]) <= set(shown["high"]) < set(shown["balanced"])  # stricter modes are subsets
+    feed = client.get("/api/feed", params={"limit": 10}).json()["items"]
+    assert not any(i["recommendation"]["explore"] for i in feed)  # a calibrated feed is never mixed
     bounds = [i["confidence"]["bound"] for i in client.get("/api/feed", params={"limit": 5}).json()["items"]]
     assert len(bounds) == 5  # a smaller page keeps the best pieces by conservative bound
 
@@ -198,7 +217,12 @@ def test_learning_picks_are_separate_labelled_and_carry_their_inclusion_probabil
     assert all(0 < r["propensity"] <= 1 and r["explore"] for r in log.items)
     assert abs(log.gate["sampling"]["expected"] - min(8, log.gate["sampling"]["pool"])) < 1e-6
     again = client.get("/api/feed/learning", params={"limit": 8}).json()["items"]
-    assert [i["id"] for i in again] == [i["id"] for i in picks]  # stable within the day
+    assert [i["id"] for i in again] == [i["id"] for i in picks]  # a refresh does not reshuffle
+    for it in picks:  # rated picks leave, and the next request draws afresh
+        client.post("/api/feedback", json={"product_id": it["id"], "action": "dislike", "context": {"explore": True}})
+    f2 = client.get("/api/feed/learning", params={"limit": 8}).json()
+    assert f2["gate"]["sampling"]["salt"] != f["gate"]["sampling"]["salt"]
+    assert not {i["id"] for i in f2["items"]} & {i["id"] for i in picks}
     extreme = client.get("/api/feed", params={"mode": "extreme", "limit": 100}).json()["items"]
     assert not any(i["recommendation"]["explore"] for i in extreme)  # never forced on the strictest mode
 
@@ -216,6 +240,23 @@ def test_poisson_sampling_includes_each_piece_with_its_logged_probability():
     se = np.sqrt(pi * (1 - pi) / days) + 1e-9
     assert np.all(np.abs(hits.mean(0) - pi) <= 4 * se)  # empirical inclusion frequency matches the logged π
     assert inclusion_probabilities(np.ones(3), 5).tolist() == [1.0, 1.0, 1.0]
+
+
+def test_rating_learning_picks_brings_fresh_ones():
+    """Regression: with draws fixed for the whole day, once the day's picks were rated almost none followed (the
+    pieces left had all lost their draw). Fresh draws after each decision keep the expected size at k."""
+    from app.services.selective import inclusion_probabilities, permanent_random_number
+
+    w, k = np.linspace(1.0, 2.0, 40), 5
+    fixed, fresh = [], []
+    for day in range(300):
+        pi = inclusion_probabilities(w, k)
+        first = {i for i in range(len(w)) if permanent_random_number(f"d{day}:0", i) < pi[i]}
+        rest = [i for i in range(len(w)) if i not in first]
+        pi2 = dict(zip(rest, inclusion_probabilities(w[rest], k), strict=True))
+        fixed.append(sum(permanent_random_number(f"d{day}:0", i) < pi2[i] for i in rest))
+        fresh.append(sum(permanent_random_number(f"d{day}:{len(first)}", i) < pi2[i] for i in rest))
+    assert np.mean(fresh) == pytest.approx(k, abs=0.4) and np.mean(fixed) < 1.5
 
 
 def test_diversity_reorders_but_never_changes_membership():
@@ -288,12 +329,18 @@ def test_observed_performance_counts_only_rated_served_pieces(client, db):
     client.post(
         f"/api/feed/{f['feed_id']}/viewed", json={"surface": "card", "items": [{"product_id": items[12]["id"]}]}
     )
+    obs = client.get("/api/feed", params={"limit": 5}).json()["gate"]["observed"]
+    assert obs["rated"] == 12 and obs["shortfall"] is False  # 75% [43%, 95%]: not demonstrably below 80%
     perf = client.get("/api/selective/status").json()["performance"]
     b = perf["served_in_mode"]["balanced"]
     assert (b["rated"], b["approved"], b["rate"]) == (12, 9, 0.75)  # the shown-but-unrated piece is not counted
     lo, hi = b["interval"]
     assert lo < 0.75 < hi and hi - lo > 0.3  # twelve decisions say little: the interval is wide
     assert perf["served_in_mode"]["high"]["rate"] is None  # nothing served there yet
+    for it in items[12:]:  # many more rejections: the shortfall is now demonstrable, and Discover says so
+        ctx = {"feed_id": f["feed_id"], "position": 0}
+        client.post("/api/feedback", json={"product_id": it["id"], "action": "dislike", "context": ctx})
+    assert client.get("/api/feed", params={"limit": 5}).json()["gate"]["observed"]["shortfall"] is True
 
 
 def test_calibration_history_rollback_and_settings_validation(client, db):
@@ -312,3 +359,28 @@ def test_calibration_history_rollback_and_settings_validation(client, db):
     cur = client.get("/api/settings").json()["selective"]
     assert client.put("/api/settings/selective", json={**cur, "high_target": 0.7}).status_code == 422  # < balanced
     assert client.put("/api/settings/selective", json={**cur, "mode": "reckless"}).status_code == 422
+
+
+# ----------------------------------------------------------------- the opt-in prospective trial
+def test_the_trial_alternates_days_and_compares_both_arms(client, db, monkeypatch):
+    from datetime import date
+
+    from app.models import FeedRequest
+    from app.services import selective
+
+    cfg = {"enabled": True, "trial": True}
+    arms = {selective.trial_arm(cfg, date(2026, 10, d)) for d in (20, 21)}
+    assert arms == {"ranked", "selective"} and selective.trial_arm({**cfg, "trial": False}, date.today()) is None
+    world(db)
+    _set(client, trial=True)
+    for arm in ("ranked", "selective"):
+        monkeypatch.setattr(selective, "trial_arm", lambda _cfg, _day, a=arm: a)
+        f = client.get("/api/feed", params={"limit": 12}).json()
+        assert f["gate"]["trial"] == arm and f["gate"]["policy"] == ("ranked" if arm == "ranked" else "selective")
+        assert db.get(FeedRequest, f["feed_id"]).gate["trial"] == arm
+        main = [i for i in f["items"] if not i["recommendation"]["explore"]][:10]
+        for k, it in enumerate(main):
+            ctx = {"feed_id": f["feed_id"], "position": k}
+            client.post("/api/feedback", json={"product_id": it["id"], "action": "like", "context": ctx})
+    trial = client.get("/api/selective/status").json()["performance"]["trial"]
+    assert trial["ranked"]["rated"] == trial["selective"]["rated"] == 10

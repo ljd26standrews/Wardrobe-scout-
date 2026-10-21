@@ -94,7 +94,8 @@ export function GateStatus({ gate, total }: { gate: Gate; total: number }) {
   const p = gate.progress;
   if (gate.state === "calibrated") {
     const cal = gate.calibration;
-    return (
+    const obs = gate.observed;
+    const status = (
       <p className="mt-2 text-sm text-muted-foreground" data-testid="gate-status">
         {gate.policy === "learning"
           ? `${gate.shown} learning picks from ${gate.sampling?.pool ?? 0} uncertain pieces`
@@ -108,6 +109,16 @@ export function GateStatus({ gate, total }: { gate: Gate; total: number }) {
           </>
         )}
       </p>
+    );
+    if (!obs?.shortfall || !obs.interval) return status;
+    return (
+      <>
+        <p className="mt-2 max-w-2xl rounded-lg bg-caution/10 px-3 py-2 text-sm text-caution" data-testid="gate-shortfall">
+          So far {obs.approved} of {obs.rated} rated pieces that passed {gate.mode_label} were approved ({pct(obs.rate ?? 0)}; 95% interval {pct(obs.interval[0])}–
+          {pct(obs.interval[1])}), below its {pct(gate.target ?? 0)} target. Its estimates look optimistic for you; a stricter mode or more decisions should help.
+        </p>
+        {status}
+      </>
     );
   }
   if (gate.state === "pending") return <p className="mt-2 text-sm text-muted-foreground" data-testid="gate-status">Calibrating approval estimates from your decisions…</p>;

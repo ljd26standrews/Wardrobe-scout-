@@ -190,6 +190,13 @@ export function SelectiveInsights() {
           ))}
           <RateRow label="Learning picks" r={perf.learning_picks} min={perf.min_rated} />
           <RateRow label="Before calibration" r={perf.uncalibrated_ranking} min={perf.min_rated} />
+          {(perf.trial.ranked.rated > 0 || perf.trial.selective.rated > 0) && (
+            <>
+              <p className="label mb-1 mt-4">Trial: the two feeds on alternate days</p>
+              <RateRow label="Earlier ranking" r={perf.trial.ranked} min={perf.min_rated} />
+              <RateRow label="Selective" r={perf.trial.selective} min={perf.min_rated} />
+            </>
+          )}
         </Card>
         <Card className="p-5">
           <p className="label mb-1">Calibration check</p>

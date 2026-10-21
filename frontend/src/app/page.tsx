@@ -184,7 +184,12 @@ export default function DiscoverPage() {
         <div>
           <p className="label">Today&apos;s selection</p>
           <h1 className="page-title mt-2">Discover</h1>
-          {data && data.gate?.state !== "off" && <GateStatus gate={data.gate} total={data.total_candidates} />}
+          {data?.gate?.trial === "ranked" && (
+            <p className="mt-2 max-w-2xl text-sm text-muted-foreground" data-testid="gate-status">
+              {data.gate.message}
+            </p>
+          )}
+          {data && data.gate?.state !== "off" && data.gate?.trial !== "ranked" && <GateStatus gate={data.gate} total={data.total_candidates} />}
           {data && data.gate?.state === "off" && (
             <p className="mt-2 text-sm text-muted-foreground">
               {data.total_candidates} undecided pieces ·{" "}

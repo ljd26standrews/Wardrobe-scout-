@@ -96,7 +96,7 @@ An item passes mode (t, γ) iff `p_low_i(γ) ≥ t`. Under the model, that means
 - **Weights:** `w_i = p̂_i² · s_i`, boosted for categories with few labels.
 - **Sampling:** Poisson sampling with inclusion probability `π_i = min(1, K·w_i/Σw)`. The probability is logged, so impressions from this feed support inverse-propensity estimates.
 - **Main feed:** deterministic. The log records no propensity for it, so inverse-propensity estimates cannot be made for it, and none are claimed.
-- **Stable within a day:** each piece's inclusion draw uses a permanent random number, a hash of (day, mode, piece), so refreshing does not reshuffle the picks. Each request's inclusion probability is still exactly the logged π. Requests on the same day are correlated, so variance estimates must cluster by day.
+- **Stable between decisions:** each piece's inclusion draw uses a random number fixed by a hash of (day, mode, number of decisions so far, piece). Refreshing does not reshuffle the picks; every decision brings fresh draws, and an Undo returns to the earlier ones. Each request's inclusion probability is exactly the logged π. (A first version fixed the draws for the whole day: once the day's picks were rated, almost no new ones appeared. The selective simulation caught it.)
 - **Without a calibration:** the pool is chosen on the raw model's σ(m). It is used only to choose, and never shown as a probability.
 
 ### Updating

@@ -270,6 +270,16 @@ export default function SettingsPage() {
                 </span>
                 <Switch checked={sel.value.exclude_seller_concerns} onCheckedChange={(v) => sel.update({ exclude_seller_concerns: v })} aria-label="Leave out sellers with recorded concerns" />
               </label>
+              <label className="flex items-center justify-between gap-4 text-sm">
+                <span>
+                  Compare with the earlier ranking (trial)
+                  <span className="block text-xs text-muted-foreground">
+                    On alternate days Discover shows the earlier ranked feed, exploration slots included, instead of your chosen mode, so Insights can compare how often you approve
+                    of each. Off by default; switch it off at any time.
+                  </span>
+                </span>
+                <Switch checked={sel.value.trial} onCheckedChange={(v) => sel.update({ trial: v })} aria-label="Compare with the earlier ranking (trial)" />
+              </label>
             </div>
           )}
         </Section>

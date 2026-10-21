@@ -12,9 +12,9 @@ from sqlalchemy.orm import Session, selectinload
 
 from ..db import get_db
 from ..ingestion.parsing import materials_to_text, parse_materials
-from ..models import Evidence, FeedRequest, Impression, Product
+from ..models import Evidence, Feedback, FeedRequest, Impression, Product
 from ..schemas import EvidenceIn, MatchDecision, ProductPatch, ViewedIn
-from ..services import dedup, jobs, selective
+from ..services import calibration, dedup, jobs, selective
 from ..services import embeddings as emb
 from ..services.presenter import Context, comparison, product_card
 from ..services.recommender import build_feed, build_profile, collapse_families, feed_candidates, rank_products
@@ -155,10 +155,13 @@ def feed(
     rcfg = get_setting(db, "recommender")
     ctx = Context(db)
     ranked, offers, n_candidates, quality_lookup = ranked_candidates(db, prof, ctx, flt)
-    gate = selective.evaluate(db, ranked, prof, mode, quality_lookup=quality_lookup)
+    scfg = get_setting(db, "selective")
+    warmup = selective.resolve_mode(scfg, mode) == "balanced" and not calibration.active(db)
+    gate = selective.evaluate(db, ranked, prof, mode, quality_lookup=quality_lookup, learning=warmup)
+    arm = selective.trial_arm(gate.cfg, dt.date.today())
     base = {"total_candidates": n_candidates, "learning_strength": round(prof.strength, 3),
             "decisions": prof.n_informative}  # fmt: skip
-    if gate.state == "off":
+    if gate.state == "off" or arm == "ranked":
         seed = int(dt.date.today().strftime("%Y%m%d"))
         exploration = rcfg.get("exploration_rate", 0.18)
         chosen = build_feed(ranked, prof, limit, exploration, seed=seed)
@@ -167,13 +170,35 @@ def feed(
              "family_size": 1 + len(offers.get(r.product.id, []))}
             for i, r in enumerate(chosen)
         ]  # fmt: skip
-        feed_id = _log_feed(db, rcfg, prof, n_candidates, flt, rows, exploration=exploration)
-        return {"feed_id": feed_id, "items": [feed_card(ctx, r, offers) for r in chosen], **base,
-                "gate": gate.summary(len(chosen), policy="ranked")}  # fmt: skip
-    chosen = selective.main_feed(gate, limit)
+        feed_id = _log_feed(db, rcfg, prof, n_candidates, flt, rows, exploration=exploration, trial=arm)
+        summary = gate.summary(len(chosen), policy="ranked")
+        if arm:
+            summary.update(trial=arm, message="Trial day: Discover shows the earlier ranking today (with its "
+                           "exploration slots), so the two can be compared. You can end the trial in Settings.")  # fmt: skip
+        return {"feed_id": feed_id, "items": [feed_card(ctx, r, offers) for r in chosen], **base, "gate": summary}
+    rate = rcfg.get("exploration_rate", 0.18)
+    n_explore = selective.warmup_exploration(gate, limit, rate)
+    chosen = selective.main_feed(gate, limit - n_explore)
+    sampling = None
+    if n_explore:
+        picks, sampling = selective.learning_feed(db, gate, n_explore, salt=_learning_salt(db, gate.mode))
+        for c in picks:
+            _label_learning_pick(c)
+        chosen = selective.interleave(chosen, picks, rate)
     summary = gate.summary(len(chosen))
+    if gate.calibrated:  # how this mode's claim has held up so far, said where the claim is made
+        obs = selective.performance(db)["passed_gate"][gate.mode]
+        summary["observed"] = {
+            **obs,
+            "shortfall": obs["interval"] is not None and obs["interval"][1] < summary["target"],
+        }
+    if sampling:
+        summary["sampling"] = sampling
+    if arm:
+        summary["trial"] = arm
     feed_id = _log_feed(db, rcfg, prof, n_candidates, flt, selective.log_items(gate, chosen, offers),
-                        policy="selective", mode=gate.mode, gate=gate)  # fmt: skip
+                        policy="selective", mode=gate.mode, gate=gate, trial=arm, sampling=sampling,
+                        exploration=rate if n_explore else 0.0)  # fmt: skip
     items = [feed_card(ctx, c.ranked, offers, selective.card_confidence(gate, c)) for c in chosen]
     return {"feed_id": feed_id, "items": items, **base, "gate": summary}
 
@@ -198,12 +223,9 @@ def learning_feed(
         summary = gate.summary(0, policy="learning")
         summary["message"] = "Learning picks are part of selective recommendation, which is switched off in Settings."
         return {"feed_id": None, "items": [], **base, "gate": summary}
-    salt = f"{dt.date.today().isoformat()}:{gate.mode}"
-    picks, sampling = selective.learning_feed(db, gate, limit, salt=salt)
+    picks, sampling = selective.learning_feed(db, gate, limit, salt=_learning_salt(db, gate.mode))
     for c in picks:
-        c.ranked.explore = True
-        c.ranked.reasons.insert(0, "Learning pick: the model is unsure about pieces like this, so your reaction "
-                                   "teaches it the most")  # fmt: skip
+        _label_learning_pick(c)
     summary = gate.summary(len(picks), policy="learning")
     summary["sampling"] = sampling
     feed_id = _log_feed(db, rcfg, prof, n_candidates, flt, selective.log_items(gate, picks, offers),
@@ -212,12 +234,25 @@ def learning_feed(
     return {"feed_id": feed_id, "items": items, **base, "gate": summary}
 
 
+def _learning_salt(db: Session, mode: str) -> str:
+    """Fresh draws after every decision (Undo returns to the earlier draw): a refresh does not reshuffle the picks,
+    and rating them brings new ones. Each request's inclusion probabilities stay exact and are logged."""
+    decisions = db.query(func.count(Feedback.id)).scalar() or 0
+    return f"{dt.date.today().isoformat()}:{mode}:{decisions}"
+
+
+def _label_learning_pick(c) -> None:
+    c.ranked.explore = True
+    c.ranked.reasons.insert(0, "Learning pick: the model is unsure about pieces like this, so your reaction teaches "
+                               "it the most")  # fmt: skip
+
+
 MAX_FEED_LOG = 10_000  # feeds kept in the impression log (oldest pruned)
 MAX_IMPRESSIONS = 200_000
 
 
 def _log_feed(db, rcfg, prof, n_candidates, flt, rows, *, exploration=0.0, policy="ranked", mode=None, gate=None,
-              sampling=None) -> str:  # fmt: skip
+              sampling=None, trial=None) -> str:  # fmt: skip
     """Record what this feed offered and under which model and policy (see models.FeedRequest)."""
     from ..services import preference_model as pm
 
@@ -229,6 +264,8 @@ def _log_feed(db, rcfg, prof, n_candidates, flt, rows, *, exploration=0.0, polic
                    "qualified": gate.qualified() if gate.calibrated else None}  # fmt: skip
         if sampling is not None:
             details["sampling"] = sampling
+    if trial:
+        details = {**(details or {}), "trial": trial}
     fr = FeedRequest(
         id=uuid.uuid4().hex,
         engine=engine,

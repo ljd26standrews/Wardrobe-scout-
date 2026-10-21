@@ -84,6 +84,10 @@ export type Gate = {
   progress: LabelProgress | null;
   message: string | null;
   sampling?: { method: string; pool: number; expected: number };
+  /** The opt-in prospective trial: which feed today's Discover serves. */
+  trial?: "ranked" | "selective";
+  /** Calibrated feeds: approval so far among rated pieces that passed this mode; shortfall = demonstrably below target. */
+  observed?: ObservedRate & { shortfall: boolean };
 };
 
 export type FeedResponse = { feed_id: string | null; items: Product[]; total_candidates: number; learning_strength: number; decisions: number; gate: Gate };
@@ -104,6 +108,7 @@ export type SelectiveStatus = {
     passed_gate: Record<SelectiveMode, ObservedRate>;
     learning_picks: ObservedRate;
     uncalibrated_ranking: ObservedRate;
+    trial: { ranked: ObservedRate; selective: ObservedRate };
     min_rated: number;
     note: string;
   };

@@ -25,6 +25,7 @@ import hashlib
 import math
 from collections import Counter
 from dataclasses import dataclass, field
+from datetime import date
 
 import numpy as np
 from sqlalchemy.orm import Session
@@ -68,6 +69,14 @@ def _sigmoid(x):
 def thresholds(cfg: dict, mode: str) -> tuple[float, float]:
     """(target t, confidence γ) for a mode."""
     return float(cfg[f"{mode}_target"]), float(cfg[f"{mode}_confidence"])
+
+
+def trial_arm(cfg: dict, day: date) -> str | None:
+    """The opt-in prospective trial (a daily switchback): on alternate days Discover serves the earlier ranked
+    feed instead of the gate, so the two can be compared on what you then rate. None when the trial is off."""
+    if not cfg.get("trial") or not cfg.get("enabled", True):
+        return None
+    return "ranked" if day.toordinal() % 2 else "selective"
 
 
 def resolve_mode(cfg: dict, mode: str | None) -> str:
@@ -279,6 +288,28 @@ def diversify(items: list[Candidate], max_run: int = MAX_RUN) -> list[Candidate]
     return out
 
 
+def interleave(main: list[Candidate], picks: list[Candidate], rate: float) -> list[Candidate]:
+    """Place labelled Learning picks among the ranking, about one in every 1/rate positions."""
+    gap = max(3, round(1 / rate)) if rate > 0 else 10**9
+    out, j = [], 0
+    for c in main:
+        out.append(c)
+        if j < len(picks) and len(out) % gap == gap - 1:
+            out.append(picks[j])
+            j += 1
+    return out + picks[j:]
+
+
+def warmup_exploration(gate: Gate, limit: int, rate: float) -> int:
+    """Learning picks in the main feed: only while Balanced has no calibration (the feed is labelled as a plain
+    taste ranking then), so that a taste far from the written profile is still found. Never in a calibrated feed
+    and never in the strict modes."""
+    if gate.mode != "balanced" or gate.state not in ("uncalibrated", "pending"):
+        return 0
+    eligible = sum(1 for c in gate.candidates if c.excluded["balanced"] is None)
+    return round(limit * rate) if eligible > limit else 0
+
+
 def main_feed(gate: Gate, limit: int) -> list[Candidate]:
     """The pieces this mode recommends, best first. Never relaxed to fill the feed."""
     if gate.state == "off":
@@ -317,8 +348,8 @@ def inclusion_probabilities(w: np.ndarray, k: int) -> np.ndarray:
 
 
 def permanent_random_number(salt: str, product_id: int) -> float:
-    """A uniform number fixed per (day, piece): Poisson sampling with these keeps the day's picks stable while
-    each request's inclusion probability stays exactly π."""
+    """A uniform number fixed per (salt, piece). The salt changes with every decision, so repeated requests in
+    between return the same picks while each request's inclusion probability stays exactly π."""
     h = hashlib.sha256(f"{salt}:{product_id}".encode()).digest()
     return int.from_bytes(h[:8], "big") / 2.0**64
 
@@ -470,6 +501,7 @@ def performance(db: Session) -> dict:
     passed = {m: [0, 0] for m in MODES}
     learning = [0, 0]
     uncalibrated = [0, 0]
+    trial = {"ranked": [0, 0], "selective": [0, 0]}
     for o in outcomes:
         f = feeds.get(o.feed_id)
         if f is None or getattr(f, "engine_version", None) != pm.ENGINE_VERSION:
@@ -477,9 +509,13 @@ def performance(db: Session) -> dict:
         row = next((it for it in f.items or [] if it.get("product_id") == o.product_id), None)
         if row is None:
             continue
+        arm = (f.gate or {}).get("trial")
+        if arm in trial and not row.get("explore"):  # the trial compares the two main feeds, not exploration
+            trial[arm][0] += o.y
+            trial[arm][1] += 1
         policy = getattr(f, "policy", None)
-        if policy == "learning":
-            learning[0] += o.y
+        if policy == "learning" or (policy == "selective" and row.get("propensity") is not None):
+            learning[0] += o.y  # Learning picks, in their own tab or labelled in the not-yet-calibrated feed
             learning[1] += 1
             continue
         if policy != "selective":
@@ -500,6 +536,7 @@ def performance(db: Session) -> dict:
         "passed_gate": {m: _rate(*passed[m]) for m in MODES},
         "learning_picks": _rate(*learning),
         "uncalibrated_ranking": _rate(*uncalibrated),
+        "trial": {arm: _rate(*v) for arm, v in trial.items()},
         "min_rated": MIN_PERFORMANCE_N,
         "note": "Approved = love, save or purchased; a maybe or a dislike is not. Pieces shown but not rated are "
         "left out, so these rates describe the pieces you chose to rate.",
