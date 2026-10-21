@@ -90,13 +90,20 @@ class PhashIndex:
         return out
 
 
-def distinct_photos(hashes: list[int], max_dist: int = PHASH_MAX_DISTANCE) -> int:
-    """How many different photographs a listing's images show: size variants or re-encodes of one photo
-    (near-identical hashes) count once."""
-    reps: list[int] = []
-    for h in hashes:
-        if all(int(h ^ r).bit_count() > max_dist for r in reps):
-            reps.append(h)
+def distinct_photos(
+    photos: list[tuple[int, np.ndarray | None]], min_cos: float, max_dist: int = PHASH_MAX_DISTANCE
+) -> int:
+    """How many different photographs a listing's images show. Size variants or re-encodes of one photo count
+    once, by the same rule used to match photos across listings (near-identical hash AND agreeing embedding)."""
+    reps: list[tuple[int, np.ndarray | None]] = []
+    for h, v in photos:
+        same = any(
+            int(h ^ rh).bit_count() <= max_dist
+            and (v is None or rv is None or len(v) != len(rv) or float(v @ rv) >= min_cos)
+            for rh, rv in reps
+        )
+        if not same:
+            reps.append((h, v))
     return len(reps)
 
 
@@ -261,11 +268,13 @@ def match_product(
         if excluded:
             pairs = {pid: [m for m in ms if m[2] not in excluded] for pid, ms in pairs.items()}
             pairs = {pid: ms for pid, ms in pairs.items() if ms}
-    my_hashes = {img.id: int(img.phash, 16) for img in p.images if img.phash}
+    mine_by_id = {img.id: (int(img.phash, 16), emb.from_bytes(img.embedding)) for img in p.images if img.phash}
     for pid, matches in pairs.items():
         # Count DISTINCT photographs on both sides: one photo matching twice, or listed at two sizes, is one.
-        mine = distinct_photos([my_hashes[i] for i in {m[1] for m in matches} if i in my_hashes])
-        theirs = distinct_photos([idx.hashes[i] for i in {m[2] for m in matches} if i in idx.hashes])
+        mine = distinct_photos([mine_by_id[i] for i in {m[1] for m in matches} if i in mine_by_id], min_cos)
+        theirs = distinct_photos(
+            [(idx.hashes[i], idx.vectors.get(i)) for i in {m[2] for m in matches} if i in idx.hashes], min_cos
+        )
         distinct = max(1, min(mine, theirs))
         best = min(m[0] for m in matches)
         relation = "shared_photos" if distinct >= MIN_PHOTOS_FOR_SHARED else "similar_photo"

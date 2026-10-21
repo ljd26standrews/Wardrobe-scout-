@@ -70,7 +70,7 @@ test("product page: add independent evidence changes the quality label", async (
   for (let i = 0; i < 2; i++) {
     await page.getByRole("button", { name: "Add evidence" }).click();
     await page.getByPlaceholder(/QC photos show/).fill("QC photos show neat linking at the cuffs and genuine shell buttons");
-    await page.getByPlaceholder("https://…").fill("https://example.org/qc-thread");
+    await page.getByPlaceholder("https://…").fill(`https://example.org/qc-thread-${i + 1}`); // two separate reports
     await page.getByRole("button", { name: "Save evidence" }).click();
     await expect(page.getByText("Evidence added").first()).toBeVisible();
   }

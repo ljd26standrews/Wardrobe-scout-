@@ -13,8 +13,8 @@ Every number here comes from a run whose raw output is in [`results/`](results/)
   - The *baseline* is the scanner at commit `2bca6b3` (`audit/phase-1`).
   - *Optimised* is the scanner at `f1e9ecb` (`perf/scanning`).
   - Each file records which `app` package ran (`app_code`).
-  - Later reliability fixes (branch `audit/reliability-followup`) change relation bookkeeping and image-error
-    handling but not the scanning strategy. They have not been re-benchmarked.
+  - Later reliability fixes (branch `audit/reliability-followup`) don't change the scanning strategy. Only the
+    duplicate-counting change was re-measured, and only for one catalogue (see "Tranche 2 re-check" below).
 - **How to read the times:**
   - Wall-clock times at `--scale < 1` mix scaled network waits with unscaled CPU time.
   - The comparable figures are requests, bytes, CPU seconds, and the **minimum real-world time** (requests × the
@@ -160,6 +160,28 @@ taste AUC is the AUC of a logistic model on 16 PCA components.
 | Every garment photo | 8.90 | 6.6% | 0.384 | 0.766 |
 | Progressive, 1 view (default) | 1.13 | 0.8% | 0.410 | 0.772 |
 | Progressive, 2 views | 3.13 | 1.1% | 0.384 | 0.771 |
+
+## Tranche 2 re-check: counting photographs, not files (300 products, seed 7)
+
+The tranche 2 comparison fixes changed how shared photos are counted. One photo listed at two sizes, or re-encoded, now counts once, using the same "same photograph" rule as matching across listings.
+
+The same scan was run twice on the tranche 2 code (`audit/reliability-followup`). The only difference was `dedup.py`, which was swapped for the previous version (`da62794`) in the second run.
+
+| | Previous photo counting | Tranche 2 |
+|---|---|---|
+| True duplicates found (strong) | 25/31 | **23/31** |
+| True duplicates with any photo match | 26/31 | 26/31 |
+| False matches, colourways wrongly matched | 0, 0 | 0, 0 |
+| Requests, photo MB | 965, 26.1 | 965, 26.1 |
+
+- **Why two pairs dropped.** In each of the two pairs no longer called "shared photos", the albums hold **one** source photograph plus near-identical copies of it. The benchmark generates these deliberately as `neardup` images.
+  - The previous code counted those copies as 5 and 2 matching photos.
+  - The documented rule requires two *different* photographs.
+  - Both pairs are still shown, as a "one similar photograph" hint.
+- **Not a measured gain.** The strong tier is now more conservative, so this is a recall cost, not a measured improvement.
+- **Repeat runs.** Paired runs kept for inspection gave the same 25 → 23.
+
+Files: `tranche2_opt300_s7.json`, `tranche2_opt300_s7_previous_dedup.json`.
 
 ## Not measured
 
