@@ -133,16 +133,41 @@ A dimension with no independent source is shown as **Unverified** (or *Seller cl
 
 ## The recommender
 
-A transparent hybrid score:
+The default engine is a **Bayesian taste model**: a logistic regression over your decisions, with an uncertainty estimate on every weight (a Laplace posterior). Its features are:
 
-`score = Σ weight × gate × (component − 0.5)` over **written preferences, learned attributes, visual similarity, description similarity, quality evidence, value, wardrobe fit and seller credibility**. You can adjust the weights in Settings and inspect them in Insights.
+- the attributes extracted from each listing (category, colour, material, fit, logo, etc.);
+- 16 image-embedding components;
+- a single feature for "how well this matches your written preferences", with a **learned** trust weight.
 
-- **Learning strength** `s = n / (n + k)` (k = 15 by default). Learned components are scaled by `s`, and written preferences by `1 − 0.6s`. With few decisions the app says so and leans on your written profile.
-- **Reason-aware rejections.** *Colour* only down-weights that colour. *Silhouette* teaches fit and visual shape. *Logo* teaches branding visibility. *Fabric* teaches materials. *Poor construction* makes quality stricter and lowers that seller. *Too expensive for the quality* only sets a value ceiling for the category. *Already own something similar* only signals redundancy. *This specific item* hides near-identical listings only. A dislike without a reason is a mild general negative. **Skip teaches nothing.**
-- **Seed examples.** Your four starting items count as positive style examples. The ¥510 Aristide white T-shirt is recorded with *too expensive for the quality*, which sets a T-shirt value ceiling and does **not** teach a dislike of white or heavyweight tees (this is covered by a test).
-- **Exploration.** About 18% of feed slots (adjustable) go to under-explored categories, brands and sellers, and are labelled as exploration picks.
+It is then combined with quality evidence, value, wardrobe fit and seller credibility, and you can adjust each of those weights in Settings.
+
+- **Written preferences are a prior, not a rule.** With no history the feed follows your profile. As decisions accumulate, the model learns how much to trust what you wrote. If your behaviour contradicts the profile, behaviour wins, and Insights shows the learned trust.
+- **Every learned preference carries a confidence.** Insights shows each weight as a bar with an interval, and faded bars are not yet significant. Feed reasons say how sure the model is: "You tend to like olive (fairly sure)".
+- **Reason-aware rejections.** A reason limits what gets learned:
+  - *Colour* only updates colour.
+  - *Silhouette* updates fit and visual shape.
+  - *Logo* updates branding visibility.
+  - *Fabric* updates materials.
+  - *Poor construction* makes quality stricter and lowers that seller.
+  - *Too expensive for the quality* and *Already own something similar* teach **no** taste at all. They only set a value ceiling or signal redundancy.
+  - *This specific item* hides near-identical listings only.
+  - A dislike without a reason is a mild general negative.
+  - **Skip teaches nothing.**
+- **Seed examples.** Your four starting items count as positive style examples, but they do not create seller affinity. The ¥510 Aristide white T-shirt is recorded with *too expensive for the quality*, which sets a T-shirt value ceiling and does **not** teach a dislike of white or heavyweight tees (this is covered by a test).
+- **Exploration.** About 18% of feed slots (adjustable) are chosen by *Thompson sampling*, which favours items the model is uncertain about rather than items that are merely unusual. They are labelled as exploration picks.
 - **Near-duplicates** of items you rejected (shared photos or near-identical images) are suppressed.
 - **Visual signals** come from your approvals and rejections, your uploaded inspiration and anti-inspiration photos, and your wardrobe photos (weighted by how much you love each piece).
+- **Legacy engine.** The previous hand-weighted engine is still available under Settings → Ranking → Recommendation engine.
+
+**How well does it work?** The `backend/eval/` harness simulates users and measures precision@10, the share of each 10-item feed the user actually wants. Settings were tuned on one seed and tested on 8 held-out seeds. Full details and confidence intervals are in [`backend/eval/RESULTS.md`](backend/eval/RESULTS.md).
+
+| Simulated user | Profile only | Legacy engine | Bayesian engine |
+|---|---|---|---|
+| Taste matches the written profile | 0.82 | 0.68 | **0.93** |
+| Taste partly differs from the profile | 0.39 | 0.38 | **0.48** |
+| Taste is the opposite of the profile | 0.05 | 0.17 | 0.16 (tie with legacy) |
+
+These are synthetic users with synthetic images, so the table shows learning behaviour, not real-world accuracy. If your taste has drifted far from what you wrote, updating the profile still helps a lot.
 
 **Image embeddings.** With CLIP installed (`WITH_CLIP=1`, OpenCLIP ViT-B-32 / LAION-2B) visual similarity understands garments semantically. Without it, a lightweight built-in model captures colour, tone, texture and rough shape. Switching models triggers an automatic re-embed.
 
@@ -191,7 +216,7 @@ cd backend
 ## Tests
 
 ```bash
-cd backend && .venv/bin/pytest            # 54 tests: parsing, ingestion, dedup, scoring, feedback, API, AI guardrails
+cd backend && .venv/bin/pytest            # parsing, ingestion, dedup, scoring, feedback, security, API, AI guardrails, simulated-user regression
 cd backend && .venv/bin/ruff check .
 cd frontend && npm run typecheck && npm run lint
 ./scripts/e2e.sh                          # Playwright, desktop + iPhone viewport

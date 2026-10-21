@@ -3,7 +3,7 @@
 Usage (from backend/):
     .venv/bin/python -m eval.simulate [personas] [methods] [seeds] > results.log
     .venv/bin/python -m eval.report results.log
-e.g. .venv/bin/python -m eval.simulate stated,hidden,contrarian random,rules_only,legacy,bayes 2,3
+e.g. .venv/bin/python -m eval.simulate stated,hidden,contrarian random,rules_only,legacy,bayes 2,3,4,5,6,7,8,9
 
 Methods: random | rules_only (legacy engine, learning disabled) | legacy (pre-audit engine) | bayes (default).
 
@@ -15,8 +15,8 @@ would give (their worst attribute). Metric: precision@10 = share of shown items 
 (utility in the top band).
 
 Caveats: images are simple drawings (optimistic for visual similarity), utility is attribute-based, and
-three seeds is a small sample - treat differences under ~0.05 as noise. These numbers measure learning
-dynamics, not real-world accuracy.
+seed 1 was used for calibration and seeds 2-9 are held out (see eval/RESULTS.md for paired confidence
+intervals). These numbers measure learning dynamics, not real-world accuracy.
 """
 
 from __future__ import annotations

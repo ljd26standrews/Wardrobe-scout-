@@ -1,0 +1,12 @@
+{"persona": "stated", "method": "A_attr.15_scale4", "seed": 1, "rel": 128, "prec": [0.9, 0.9, 1.0, 1.0, 0.9, 0.7, 0.9, 0.5]}
+{"persona": "hidden", "method": "A_attr.15_scale4", "seed": 1, "rel": 73, "prec": [0.3, 0.7, 0.5, 0.6, 0.4, 0.3, 0.6, 0.2]}
+{"persona": "contrarian", "method": "A_attr.15_scale4", "seed": 1, "rel": 34, "prec": [0.0, 0.4, 0.5, 0.3, 0.3, 0.6, 0.1, 0.3]}
+{"persona": "stated", "method": "B_attr.3_scale4", "seed": 1, "rel": 128, "prec": [0.9, 0.8, 1.0, 0.9, 1.0, 0.9, 0.8, 0.8]}
+{"persona": "hidden", "method": "B_attr.3_scale4", "seed": 1, "rel": 73, "prec": [0.3, 0.6, 0.7, 0.7, 0.4, 0.4, 0.3, 0.4]}
+{"persona": "contrarian", "method": "B_attr.3_scale4", "seed": 1, "rel": 34, "prec": [0.0, 0.3, 0.6, 0.4, 0.2, 0.3, 0.4, 0.4]}
+{"persona": "stated", "method": "C_attr.15_scale2", "seed": 1, "rel": 128, "prec": [0.9, 0.8, 1.0, 0.9, 1.0, 0.9, 1.0, 0.6]}
+{"persona": "hidden", "method": "C_attr.15_scale2", "seed": 1, "rel": 73, "prec": [0.3, 0.6, 0.6, 0.6, 0.4, 0.2, 0.4, 0.5]}
+{"persona": "contrarian", "method": "C_attr.15_scale2", "seed": 1, "rel": 34, "prec": [0.0, 0.4, 0.6, 0.2, 0.2, 0.5, 0.4, 0.3]}
+{"persona": "stated", "method": "D_attr.3_scale2", "seed": 1, "rel": 128, "prec": [0.9, 0.8, 1.0, 0.9, 1.0, 0.8, 0.8, 0.6]}
+{"persona": "hidden", "method": "D_attr.3_scale2", "seed": 1, "rel": 73, "prec": [0.2, 0.5, 1.0, 0.7, 0.6, 0.4, 0.1, 0.2]}
+{"persona": "contrarian", "method": "D_attr.3_scale2", "seed": 1, "rel": 34, "prec": [0.0, 0.2, 0.2, 0.6, 0.2, 0.2, 0.3, 0.5]}

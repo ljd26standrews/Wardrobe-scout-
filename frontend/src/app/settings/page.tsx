@@ -170,7 +170,7 @@ export default function SettingsPage() {
             {rec.value && (
               <>
                 <div className="md:col-span-2">
-                  <Field label="Recommendation engine" hint="Bayesian learns your taste with uncertainty and was markedly better in evaluation; Legacy is the original hand-weighted score, kept for comparison.">
+                  <Field label="Recommendation engine" hint="Bayesian learns your taste with uncertainty and scored higher in simulated-user tests (backend/eval/RESULTS.md); Legacy is the original hand-weighted score, kept for comparison.">
                     <select
                       className="flex h-10 w-full max-w-sm rounded-lg border border-input bg-card px-3 text-sm"
                       value={rec.value.engine ?? "bayes"}
