@@ -240,10 +240,28 @@ Every call is cached, rate-limited and checked against a monthly spending cap (d
 
 ## Backup and migration
 
-- **Settings → Export backup**: one JSON file with your settings, sellers, watched links, decisions, saved lists, wardrobe and inspiration (photos included), and evidence. **Import backup** merges it and is safe to run twice.
-- **Download database**: a consistent SQLite snapshot.
-- CLI: `backend/.venv/bin/python -m app.cli export backup.json` / `import-backup backup.json`.
-- **PostgreSQL**: set `WS_DATABASE_URL`. Alembic migrations run automatically on start (`backend/alembic/`).
+Two kinds of backup, for different jobs:
+
+- **Settings → Export backup (JSON).** This holds everything personal:
+  - settings, sellers and watched links;
+  - every decision, with a snapshot of the product it was about;
+  - saved lists, your evidence, and your "same / not the same" match decisions;
+  - your wardrobe and inspiration photos;
+  - every product any of these refer to, plus products you entered yourself, with their uploaded photos.
+
+  Photos that scans downloaded are referenced by link and fetched again when needed. **Import backup** merges the file into the current database and is idempotent: importing the same file again changes nothing. Older (version 1) files still import.
+- **Full snapshot (database plus every photo).** Use this to move a whole installation or restore it exactly:
+
+  ```bash
+  cd backend
+  .venv/bin/python -m app.cli backup-full ~/wardrobe-scout-snapshot.zip                 # safe while the app runs
+  .venv/bin/python -m app.cli restore-full ~/wardrobe-scout-snapshot.zip --data-dir ~/ws-restored
+  WS_DATA_DIR=~/ws-restored ./scripts/start.sh                                          # or set it in .env
+  ```
+
+  `restore-full` only restores into a new, empty folder. It never overwrites an existing installation.
+- **Settings → Download database** gives a consistent SQLite copy, without photos.
+- **PostgreSQL**: set `WS_DATABASE_URL`. Alembic migrations run automatically on start (`backend/alembic/`). `backup-full` supports SQLite only; with PostgreSQL, use `pg_dump` plus a copy of the data folder.
 
 ## Command line
 
@@ -255,6 +273,8 @@ cd backend
 .venv/bin/python -m app.cli reanalyse       # classify photos stored by older versions (runs automatically too)
 .venv/bin/python -m app.cli import-url "https://weidian.com/item.html?itemID=7707075268"
 .venv/bin/python -m app.cli import-csv products.csv
+.venv/bin/python -m app.cli backup-full snapshot.zip   # database + all photos
+.venv/bin/python -m app.cli restore-full snapshot.zip --data-dir NEW_FOLDER
 .venv/bin/python -m app.cli recompute
 ```
 
