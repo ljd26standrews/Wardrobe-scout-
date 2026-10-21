@@ -45,6 +45,72 @@ export type Recommendation = {
   explore: boolean;
 };
 
+export type SelectiveMode = "balanced" | "high" | "extreme";
+export type GateState = "calibrated" | "uncalibrated" | "pending" | "unavailable" | "off";
+export const MODES: SelectiveMode[] = ["balanced", "high", "extreme"];
+export const MODE_LABEL: Record<SelectiveMode, string> = { balanced: "Balanced", high: "High confidence", extreme: "Extremely selective" };
+
+/** Per piece, from the server's gate. ``estimate``/``bound`` exist only when your decisions have been calibrated. */
+export type Confidence = {
+  state: GateState;
+  mode: SelectiveMode;
+  passes: SelectiveMode[];
+  excluded: string | null;
+  estimate?: number;
+  bound?: number | null;
+  target?: number;
+  level?: number;
+  learning?: boolean;
+};
+
+export type CalibrationSummary = { id: number; created_at: string; labels: number; approvals: number; map: string; auc: number | null; brier: number; ece: number; base_rate: number };
+export type LabelProgress = { labels: number; approvals: number; non_approvals: number; needed: number; needed_each: number; sufficient: boolean };
+
+/** What the gate did for one feed, and why the feed is what it is. */
+export type Gate = {
+  policy: "selective" | "learning" | "ranked";
+  mode: SelectiveMode;
+  mode_label: string;
+  state: GateState;
+  target: number | null;
+  confidence: number | null;
+  targets_validated: boolean;
+  shown: number;
+  candidates: number;
+  eligible: Record<SelectiveMode, number>;
+  qualified: Record<SelectiveMode, number> | null;
+  excluded: Record<string, { count: number; label: string }>;
+  calibration: CalibrationSummary | null;
+  progress: LabelProgress | null;
+  message: string | null;
+  sampling?: { method: string; pool: number; expected: number };
+};
+
+export type FeedResponse = { feed_id: string | null; items: Product[]; total_candidates: number; learning_strength: number; decisions: number; gate: Gate };
+
+export type ObservedRate = { rated: number; approved: number; rate: number | null; interval: [number, number] | null };
+export type ReliabilityBin = { lo: number; hi: number; n: number; mean_estimate: number; observed: number; interval: [number, number] };
+export type SelectiveStatus = {
+  enabled: boolean;
+  mode: SelectiveMode;
+  modes: { mode: SelectiveMode; label: string; target: number; confidence: number }[];
+  targets_validated: boolean;
+  calibration: LabelProgress & {
+    state: "calibrated" | "pending" | "insufficient";
+    calibration?: { id: number; created_at: string; n_labels: number; n_positive: number; auc_out_of_fold: number | null; map: string; brier: number; ece: number; base_rate: number };
+  };
+  performance: {
+    served_in_mode: Record<SelectiveMode, ObservedRate>;
+    passed_gate: Record<SelectiveMode, ObservedRate>;
+    learning_picks: ObservedRate;
+    uncalibrated_ranking: ObservedRate;
+    min_rated: number;
+    note: string;
+  };
+  reliability?: ReliabilityBin[];
+  history: { id: number; created_at: string; labels: number; approvals: number; active: boolean; map: string; brier: number; ece: number; current_model: boolean }[];
+};
+
 export type Evidence = {
   id: number;
   kind: string;
@@ -109,6 +175,8 @@ export type Product = {
   cons: string[];
   saved: { list: string; priority: number; note: string | null; target_size?: string | null; added_at?: string } | null;
   recommendation?: Recommendation;
+  /** The selective gate's view of this piece (feeds and the product page). Numbers only with a calibration. */
+  confidence?: Confidence;
   /** Discover feed only: other listings of the same garment (one family is shown once). */
   family?: { size: number; offers: { product_id: number; seller: string | null; price: number | null; currency: string }[] };
   // detail only

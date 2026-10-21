@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import useSWR from "swr";
 import { toast } from "sonner";
 import { Database, Download, RefreshCw, RotateCcw, Upload } from "lucide-react";
-import { api } from "@/lib/api";
+import { api, MODE_LABEL, MODES } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, ErrorState, Skeleton } from "@/components/ui/misc";
@@ -108,6 +108,7 @@ export default function SettingsPage() {
   const taste = useSection(data, "taste_profile", refresh);
   const weights = useSection(data, "ranking_weights", refresh);
   const rec = useSection(data, "recommender", refresh);
+  const sel = useSection(data, "selective", refresh);
   const currency = useSection(data, "currency", refresh);
   const landed = useSection(data, "landed_cost", refresh);
   const ai = useSection(data, "ai", refresh);
@@ -188,7 +189,7 @@ export default function SettingsPage() {
                     <span className="tabular-nums text-muted-foreground">{Math.round(rec.value.exploration_rate * 100)}%</span>
                   </div>
                   <Slider min={0} max={0.4} step={0.01} value={[rec.value.exploration_rate]} onValueChange={([nv]) => rec.update({ exploration_rate: nv })} aria-label="exploration" />
-                  <p className="text-xs text-muted-foreground">Share of suggestions that deliberately test new designers, styles and categories.</p>
+                  <p className="text-xs text-muted-foreground">Only when selective recommendation is off: the share of the main feed that deliberately tests new designers, styles and categories. With it on, these live in Learning picks instead.</p>
                 </div>
                 <div className="grid grid-cols-2 gap-3">
                   <Field label="Decisions to 50% learned" hint="Higher = slower to trust learned signals">
@@ -201,6 +202,76 @@ export default function SettingsPage() {
               </>
             )}
           </div>
+        </Section>
+
+        <Section
+          title="Selective recommendation"
+          description="Discover recommends a piece only when the model is sure enough you'll approve of it. Each mode's target is an aspiration until your own outcomes confirm it (Insights)."
+          onSave={sel.save}
+          onReset={sel.reset}
+          dirty={sel.dirty}
+        >
+          {sel.value && (
+            <div className="grid gap-5">
+              <label className="flex items-center justify-between gap-4 text-sm">
+                <span>
+                  Selective recommendation
+                  <span className="block text-xs text-muted-foreground">Off: Discover returns to the earlier ranked feed with exploration slots.</span>
+                </span>
+                <Switch checked={sel.value.enabled} onCheckedChange={(v) => sel.update({ enabled: v })} aria-label="Selective recommendation" />
+              </label>
+              <Field label="Default mode" hint="Also switchable on Discover.">
+                <select className="flex h-10 w-full max-w-sm rounded-lg border border-input bg-card px-3 text-sm" value={sel.value.mode} onChange={(e) => sel.update({ mode: e.target.value })} aria-label="Default mode">
+                  {MODES.map((m) => (
+                    <option key={m} value={m}>
+                      {MODE_LABEL[m]}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              <div className="grid gap-3 sm:grid-cols-3">
+                {MODES.map((m) => (
+                  <div key={m} className="grid grid-cols-2 gap-2">
+                    <Field label={`${MODE_LABEL[m]} target`} hint="Approval at least…">
+                      <NumberInput value={sel.value[`${m}_target`]} onChange={(v) => sel.update({ [`${m}_target`]: v })} />
+                    </Field>
+                    <Field label="Confidence" hint="…this sure">
+                      <NumberInput value={sel.value[`${m}_confidence`]} onChange={(v) => sel.update({ [`${m}_confidence`]: v })} />
+                    </Field>
+                  </div>
+                ))}
+              </div>
+              <p className="text-xs text-muted-foreground">Values between 0.5 and 0.99 (0.9 = 90%). Stricter modes must not have lower targets or confidence than gentler ones.</p>
+              <div className="grid gap-3 sm:grid-cols-4">
+                <Field label="Rated pieces before estimates" hint="At least 20">
+                  <NumberInput value={sel.value.min_labels} step="1" onChange={(v) => sel.update({ min_labels: v })} />
+                </Field>
+                <Field label="…of which approvals and rejections each">
+                  <NumberInput value={sel.value.min_each_class} step="1" onChange={(v) => sel.update({ min_each_class: v })} />
+                </Field>
+                <Field label="Recalibrate after new decisions">
+                  <NumberInput value={sel.value.recalibrate_every} step="1" onChange={(v) => sel.update({ recalibrate_every: v })} />
+                </Field>
+                <Field label="Learning picks: lowest estimate" hint="Plausible pieces only">
+                  <NumberInput value={sel.value.learning_min_estimate} onChange={(v) => sel.update({ learning_min_estimate: v })} />
+                </Field>
+              </div>
+              <label className="flex items-center justify-between gap-4 text-sm">
+                <span>
+                  Require independent quality evidence
+                  <span className="block text-xs text-muted-foreground">Every mode leaves out pieces whose quality is unverified. Unknown quality is otherwise never treated as poor.</span>
+                </span>
+                <Switch checked={sel.value.require_quality_evidence} onCheckedChange={(v) => sel.update({ require_quality_evidence: v })} aria-label="Require independent quality evidence" />
+              </label>
+              <label className="flex items-center justify-between gap-4 text-sm">
+                <span>
+                  Leave out sellers with recorded concerns
+                  <span className="block text-xs text-muted-foreground">In High confidence and Extremely selective.</span>
+                </span>
+                <Switch checked={sel.value.exclude_seller_concerns} onCheckedChange={(v) => sel.update({ exclude_seller_concerns: v })} aria-label="Leave out sellers with recorded concerns" />
+              </label>
+            </div>
+          )}
         </Section>
 
         <div className="grid gap-6 lg:grid-cols-2">

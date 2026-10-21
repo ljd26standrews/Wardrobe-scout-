@@ -3,6 +3,7 @@ import Link from "next/link";
 import { AlertCircle, CheckCircle2, Sparkles } from "lucide-react";
 import type { Product } from "@/lib/api";
 import { AlternativesPreview } from "./alternatives";
+import { ConfidencePanel } from "./confidence";
 import { LinkButtons, OriginBadge, PriceBlock, SpecList } from "./meta";
 import { QualityPanel } from "./quality";
 
@@ -16,7 +17,8 @@ export function Section({ title, children }: { title: string; children: React.Re
 }
 
 /** Information column shared by Discover and the product page. */
-export function ProductInfo({ product, showAlternatives = true }: { product: Product; showAlternatives?: boolean }) {
+/** ``inFeed``: Discover's status line already explains a missing calibration, so only an actual estimate is shown. */
+export function ProductInfo({ product, showAlternatives = true, inFeed = false }: { product: Product; showAlternatives?: boolean; inFeed?: boolean }) {
   const rec = product.recommendation;
   return (
     <div>
@@ -42,6 +44,12 @@ export function ProductInfo({ product, showAlternatives = true }: { product: Pro
       <div className="mt-4">
         <PriceBlock product={product} large />
       </div>
+
+      {product.confidence && product.confidence.state !== "off" && (!inFeed || product.confidence.estimate != null) && (
+        <Section title="Approval estimate">
+          <ConfidencePanel c={product.confidence} />
+        </Section>
+      )}
 
       {rec && (
         <Section title={rec.explore ? "Why you're seeing this" : "Why it matches you"}>

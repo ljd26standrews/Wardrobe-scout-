@@ -524,9 +524,13 @@ def status(db: Session) -> dict:
     }
     cur = calibration.active(db)
     if cur is not None:
-        out["reliability"] = (cur.diagnostics or {}).get("reliability_chosen") or (cur.diagnostics or {}).get(
-            "reliability"
-        )
+        d = cur.diagnostics or {}
+        bins = d.get("reliability_chosen") or d.get("reliability") or []
+        out["reliability"] = []
+        for b in bins:  # out-of-fold estimate vs observed approval per bin, with how little a small bin says
+            k, n = round(b["observed"] * b["n"]), int(b["n"])
+            lo, hi = clopper_pearson(k, n) if n else (0.0, 1.0)
+            out["reliability"].append({**b, "interval": [round(lo, 3), round(hi, 3)]})
     out["history"] = [
         {
             "id": c.id, "created_at": c.created_at.isoformat(), "labels": c.n_labels, "approvals": c.n_positive,

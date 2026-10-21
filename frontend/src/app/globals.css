@@ -26,6 +26,7 @@
     --love: 352 45% 46%;
     --div-pos: 206 54% 40%;
     --div-neg: 17 55% 46%;
+    --chart-accent: 206 58% 40%; /* single-series chart marks; validated vs --card with the dataviz checks */
     --border: 34 16% 84%;
     --input: 34 16% 82%;
     --ring: 30 8% 30%;
@@ -55,6 +56,7 @@
       --love: 352 50% 62%;
       --div-pos: 207 50% 54%;
       --div-neg: 19 53% 54%;
+      --chart-accent: 207 50% 54%;
       --border: 30 5% 20%;
       --input: 30 5% 22%;
       --ring: 38 20% 70%;
@@ -83,6 +85,7 @@
     --love: 352 50% 62%;
     --div-pos: 207 50% 54%;
     --div-neg: 19 53% 54%;
+    --chart-accent: 207 50% 54%;
     --border: 30 5% 20%;
     --input: 30 5% 22%;
     --ring: 38 20% 70%;

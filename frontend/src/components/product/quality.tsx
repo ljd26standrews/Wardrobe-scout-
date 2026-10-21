@@ -6,7 +6,6 @@ import { Meter, Tip } from "@/components/ui/misc";
 import { cn } from "@/lib/utils";
 
 const DIM_LABEL: Record<string, string> = {
-  design_compatibility: "Design compatibility",
   construction: "Demonstrated construction",
   material: "Material evidence",
   seller_reliability: "Seller reliability",
@@ -14,7 +13,6 @@ const DIM_LABEL: Record<string, string> = {
 };
 
 const DIM_HELP: Record<string, string> = {
-  design_compatibility: "How well this matches your taste. Confidence grows as you give feedback.",
   construction: "Only independent QC photos, buyer reports, verified tests or your own notes count. Seller claims and AI photo checks never move this.",
   material: "Seller-stated composition is shown as a claim. It only becomes evidence when independently confirmed.",
   seller_reliability: "The seller's service and track record, from buyer reports and evidence you've accepted — never on popularity alone. Shown separately: it does not count towards this garment's quality.",
@@ -63,9 +61,7 @@ function DimRow({ name, d }: { name: string; d: Dimension }) {
                 .join(" · ")
             : name === "value"
               ? (d.notes ?? [])[0] ?? ""
-              : name === "design_compatibility"
-                ? ""
-                : "no evidence yet"}
+              : "no evidence yet"}
         </span>
         <span>confidence {Math.round((d.confidence ?? 0) * 100)}%</span>
       </div>
@@ -82,7 +78,8 @@ export function QualityPanel({ product }: { product: Product }) {
         <QualityStatus product={product} />
       </div>
       <div className="divide-y">
-        {(["design_compatibility", "construction", "material", "seller_reliability", "value"] as const).map((k) => (
+        {/* Taste is not quality: how likely you are to approve is shown separately (Approval estimate). */}
+        {(["construction", "material", "seller_reliability", "value"] as const).map((k) => (
           <DimRow key={k} name={k} d={dims[k]} />
         ))}
       </div>

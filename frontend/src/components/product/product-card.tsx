@@ -2,6 +2,7 @@
 import Link from "next/link";
 import { Heart, Sparkles } from "lucide-react";
 import type { Product } from "@/lib/api";
+import { ConfidenceBadge } from "./confidence";
 import { Gallery } from "./gallery";
 import { OriginBadge, Swatches } from "./meta";
 import { QualityStatus } from "./quality";
@@ -17,7 +18,7 @@ export function ProductCard({ product, footer, onOpen }: { product: Product; foo
           {product.is_new && <span className="rounded-full bg-background/90 px-2 py-0.5 text-[10px] font-medium uppercase tracking-label backdrop-blur">New</span>}
           {rec?.explore && (
             <span className="inline-flex items-center gap-1 rounded-full bg-background/90 px-2 py-0.5 text-[10px] font-medium uppercase tracking-label backdrop-blur">
-              <Sparkles className="size-3" /> Explore
+              <Sparkles className="size-3" /> {product.confidence?.learning ? "Learning pick" : "Explore"}
             </span>
           )}
           {product.saved?.list === "loved" && <Heart className="size-4 fill-love text-love" />}
@@ -34,7 +35,7 @@ export function ProductCard({ product, footer, onOpen }: { product: Product; foo
         <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
           <span className="font-medium tabular-nums">{formatPrice(product.price, product.currency)}</span>
           {product.price_gbp != null && product.currency !== "GBP" && <span className="text-muted-foreground">{formatGBP(product.price_gbp)}</span>}
-          {rec && <span className="ml-auto text-xs tabular-nums text-muted-foreground">match {Math.round(rec.design_score * 100)}</span>}
+          <ConfidenceBadge c={product.confidence} />
         </div>
         <div className="mt-2 flex flex-wrap gap-1">
           <QualityStatus product={product} />

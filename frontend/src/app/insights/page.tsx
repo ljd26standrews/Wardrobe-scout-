@@ -3,7 +3,10 @@ import Link from "next/link";
 import useSWR from "swr";
 import { toast } from "sonner";
 import { Undo2 } from "lucide-react";
+import type { Confidence, Gate } from "@/lib/api";
 import { api } from "@/lib/api";
+import { ConfidenceBadge } from "@/components/product/confidence";
+import { SelectiveInsights } from "@/components/selective-insights";
 import { Card, ErrorState, Meter, Skeleton } from "@/components/ui/misc";
 import { cn, formatPrice, timeAgo, titleCase } from "@/lib/utils";
 
@@ -29,7 +32,8 @@ type InsightsResponse = {
   };
   weights: Record<string, number>;
   embedding: { image_backend: string; is_clip: boolean; note: string | null };
-  top_explained: { id: number; title: string; score: number; contributions: Record<string, number>; reasons: string[]; cautions: string[]; image: string | null }[];
+  top_explained: { id: number; title: string; score: number; contributions: Record<string, number>; reasons: string[]; cautions: string[]; image: string | null; confidence: Confidence | null }[];
+  top_gate?: Gate;
 };
 type FeedbackRow = { id: number; product_id: number | null; action: string; reasons: string[]; note: string | null; title: string | null; seller: string | null; created_at: string };
 
@@ -141,6 +145,9 @@ export default function InsightsPage() {
           Evaluate
         </Link>
       </Card>
+
+      <h2 className="mt-14 text-3xl">Selective recommendation</h2>
+      <SelectiveInsights />
 
       <h2 className="mt-14 text-3xl">Learned preferences</h2>
       {data.engine === "bayes" && data.model ? (
@@ -263,9 +270,22 @@ export default function InsightsPage() {
         </div>
       </div>
 
+      {data.top_explained.length === 0 && data.top_gate?.message && (
+        <>
+          <h2 className="mt-14 text-3xl">Top picks</h2>
+          <p className="mt-3 max-w-2xl text-sm leading-relaxed text-muted-foreground" data-testid="top-picks-empty">
+            {data.top_gate.message}
+          </p>
+        </>
+      )}
       {data.top_explained.length > 0 && (
         <>
           <h2 className="mt-14 text-3xl">Why the top picks rank highly</h2>
+          {data.top_gate && data.top_gate.state !== "off" && (
+            <p className="mt-2 max-w-2xl text-sm text-muted-foreground">
+              What Discover recommends now in {data.top_gate.mode_label} mode{data.top_gate.state === "calibrated" ? "" : " (not yet calibrated: a taste ranking, without approval estimates)"}.
+            </p>
+          )}
           <div className="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
             {data.top_explained.map((t) => {
               const contribs = Object.entries(t.contributions).filter(([, v]) => Math.abs(v) > 0.001).sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]));
@@ -279,9 +299,12 @@ export default function InsightsPage() {
                     )}
                   </div>
                   <div className="min-w-0 flex-1">
-                    <Link href={`/product/${t.id}`} className="line-clamp-2 text-sm hover:underline">
-                      {t.title}
-                    </Link>
+                    <div className="flex items-start gap-2">
+                      <Link href={`/product/${t.id}`} className="line-clamp-2 text-sm hover:underline">
+                        {t.title}
+                      </Link>
+                      <ConfidenceBadge c={t.confidence ?? undefined} />
+                    </div>
                     <div className="mt-2 space-y-1">
                       {contribs.slice(0, 4).map(([k, v]) => (
                         <div key={k} className="grid grid-cols-[6.5rem_1fr] items-center gap-2 text-[11px]" title={`${COMPONENT_LABEL[k]}: ${v > 0 ? "+" : ""}${v.toFixed(3)}`}>

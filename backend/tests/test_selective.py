@@ -305,6 +305,7 @@ def test_calibration_history_rollback_and_settings_validation(client, db):
     st = client.get("/api/selective/status").json()
     assert len(st["history"]) == 2 and st["history"][0]["active"] and st["calibration"]["state"] == "calibrated"
     assert st["reliability"] and all({"n", "mean_estimate", "observed"} <= set(b) for b in st["reliability"])
+    assert all(b["interval"][0] <= b["observed"] <= b["interval"][1] for b in st["reliability"])
     st = client.post(f"/api/selective/calibrations/{first}/activate").json()
     assert next(h for h in st["history"] if h["id"] == first)["active"]
     assert client.post("/api/selective/calibrations/9999/activate").status_code == 404
