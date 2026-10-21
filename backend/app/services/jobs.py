@@ -21,7 +21,11 @@ from .settings_store import get_setting
 
 log = get_logger(__name__)
 
-_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ws-job")
+# Two serial queues: long-running catalogue work, and interactive jobs you are waiting on (importing a
+# pasted link, an AI photo check). Without the split a pasted link could wait hours behind a scan.
+_background = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ws-bg")
+_interactive = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ws-ui")
+BACKGROUND_KINDS = {"scan_seller", "scan_all", "check_watched", "recompute", "dedup", "fetch_images"}
 _scheduler: BackgroundScheduler | None = None
 _lock = threading.Lock()
 
@@ -169,7 +173,7 @@ def enqueue(kind: str, params: dict | None = None) -> int:
         db.add(job)
         db.flush()
         job_id = job.id
-    _executor.submit(_run, job_id)
+    (_background if kind in BACKGROUND_KINDS else _interactive).submit(_run, job_id)
     return job_id
 
 

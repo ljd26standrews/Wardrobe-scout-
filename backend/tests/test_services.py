@@ -100,3 +100,35 @@ def test_landed_cost_duty_threshold():
     assert dear["duty_gbp"] == pytest.approx(2000 * 0.105 * 0.12, rel=1e-3)
     assert estimate_landed_cost(None, "CNY", "t-shirt", 0.105, cfg) is None
     assert estimate_landed_cost(100, "USD", "t-shirt", 0.105, cfg) is None  # no guessed conversion
+
+
+def test_interactive_jobs_do_not_wait_behind_scans(env, monkeypatch):
+    """A pasted link must run while a long scan is still going (separate queues)."""
+    import threading
+
+    from app.db import create_all
+    from app.services import jobs
+
+    create_all()
+    release = threading.Event()
+    started = {}
+
+    def fake_run(job_id):
+        from app.db import session_scope
+        from app.models import Job
+
+        with session_scope() as db:
+            kind = db.get(Job, job_id).kind
+        started[kind] = True
+        if kind == "scan_all":
+            release.wait(10)
+
+    monkeypatch.setattr(jobs, "_run", fake_run)
+    jobs.enqueue("scan_all", {"mode": "full"})
+    jobs.enqueue("import_url", {"url": "https://shop.example.com/x"})
+    for _ in range(100):
+        if started.get("import_url"):
+            break
+        threading.Event().wait(0.02)
+    assert started.get("import_url"), "import waited behind the scan"
+    release.set()
