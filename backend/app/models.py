@@ -272,8 +272,15 @@ class FeedRequest(Base):
     candidates: Mapped[int] = mapped_column(Integer, default=0)  # undecided listings eligible for the feed
     exploration_rate: Mapped[float] = mapped_column(Float, default=0.0)
     filters: Mapped[dict] = mapped_column(JSON, default=dict)
-    # [{"product_id", "position", "score", "explore", "family_size"}] in served order
+    # [{"product_id", "position", "score", "explore", "family_size"}] in served order; selective feeds add each
+    # piece's raw logit "m", its s.d. "s", "estimate", "bound", the modes it "passes" and (Learning picks) the
+    # inclusion "propensity"
     items: Mapped[list] = mapped_column(JSON, default=list)
+    # ranked (the earlier feed with exploration slots) | selective (the gated main feed) | learning (Learning picks)
+    policy: Mapped[str] = mapped_column(String(20), default="ranked", server_default="ranked")
+    mode: Mapped[str | None] = mapped_column(String(20), nullable=True)  # balanced | high | extreme
+    calibration_id: Mapped[int | None] = mapped_column(Integer, nullable=True)  # None: no approval estimates
+    gate: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # thresholds, state, counts, sampling details
 
 
 class Impression(Base):

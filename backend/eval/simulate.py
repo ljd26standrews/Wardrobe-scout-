@@ -166,7 +166,9 @@ def decide(it: dict, u: float, fn) -> tuple[str, list[str]]:
 
 
 # --------------------------------------------------------------- harness
-def run(persona: str, method: str, seed: int, rounds: int = 8, k: int = 10) -> dict:
+def run(persona: str, method: str, seed: int, rounds: int = 8, k: int = 10, policy: str = "ranked") -> dict:
+    """``policy``: "ranked" is the feed these engine comparisons were made with (selective recommendation off,
+    exploration slots in the main feed), so RESULTS.md stays reproducible; "selective" serves the gated feed."""
     tmp = tempfile.mkdtemp(prefix="wseval")
     os.environ.update(
         WS_DATA_DIR=tmp, WS_DATABASE_URL=f"sqlite:///{tmp}/e.db", WS_ENABLE_SCHEDULER="false",
@@ -219,6 +221,9 @@ def run(persona: str, method: str, seed: int, rounds: int = 8, k: int = 10) -> d
         if method == "rules_only":
             cfg["cold_start_k"] = 10**9
         set_setting(db, "recommender", cfg)
+        sel = get_setting(db, "selective")
+        sel["enabled"] = policy == "selective"
+        set_setting(db, "selective", sel)
         ext_of = {p.id: p.external_id for p in db.query(Product)}
         db.close()
         rng = random.Random(seed + 99)

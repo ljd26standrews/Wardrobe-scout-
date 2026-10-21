@@ -16,12 +16,12 @@ from ..db import get_db
 from ..ingestion.http import BlockedError, PoliteClient
 from ..ingestion.pipeline import apply_analysis, fetch_and_analyse
 from ..models import Feedback, Job, Product, ProductImage, SavedItem, Seller, WardrobeItem, utcnow
-from ..services import ai, jobs
+from ..services import ai, jobs, selective
 from ..services import embeddings as emb
 from ..services.backup import export_all, import_all
 from ..services.images import ImageError
-from ..services.presenter import Context, product_card
-from ..services.recommender import build_profile, describe_profile, rank_products
+from ..services.presenter import Context
+from ..services.recommender import build_profile, describe_profile
 from ..services.settings_store import DEFAULTS, all_settings, get_setting, set_setting, validate_setting
 from .uploads import MAX_FILE_UPLOAD, read_capped
 
@@ -146,10 +146,18 @@ def insights(db: Session = Depends(get_db)):
         }
     out["weights"] = weights
     out["embedding"] = emb.backend_info()
-    # Top recommendations with explanations (sample of the current catalogue)
-    products = db.query(Product).filter(Product.status == "active", Product.data_origin != "seed").limit(2000).all()
-    ranked = rank_products(db, products, prof)[:6]
+    # Top picks with explanations: what Discover's main feed would recommend now, through the same gate (so
+    # nothing reaches you here that the chosen mode would withhold).
+    from .products import NO_FILTERS, feed_card, ranked_candidates
+
     ctx = Context(db)
+    ranked, offers, _, quality_lookup = ranked_candidates(db, prof, ctx, NO_FILTERS)
+    gate = selective.evaluate(db, ranked, prof, None, quality_lookup=quality_lookup)
+    if gate.state == "off":
+        top = [(r, None) for r in ranked if not r.suppressed][:6]
+    else:
+        top = [(c.ranked, selective.card_confidence(gate, c)) for c in selective.main_feed(gate, 6)]
+    out["top_gate"] = gate.summary(len(top), policy="ranked" if gate.state == "off" else "selective")
     out["top_explained"] = [
         {
             "id": r.product.id,
@@ -158,9 +166,11 @@ def insights(db: Session = Depends(get_db)):
             "contributions": {k: round(v, 4) for k, v in r.contributions.items()},
             "reasons": r.reasons,
             "cautions": r.cautions,
-            "image": (product_card(ctx, r.product)["images"] or [{}])[0].get("src"),
+            "image": (card["images"] or [{}])[0].get("src"),
+            "confidence": conf,
         }
-        for r in ranked
+        for r, conf in top
+        for card in [feed_card(ctx, r, offers)]
     ]
     return out
 

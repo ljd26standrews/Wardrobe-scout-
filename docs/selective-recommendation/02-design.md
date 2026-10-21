@@ -76,7 +76,7 @@ An item passes mode (t, γ) iff `p_low_i(γ) ≥ t`. Under the model, that means
 
 | Mode | t | γ | Below sufficiency (uncalibrated) |
 |---|---|---|---|
-| Balanced | 0.80 | 0.50 (the estimate itself) | The existing ranked feed, labelled "not yet calibrated"; clearly labelled exploration picks may appear |
+| Balanced | 0.80 | 0.50 (the estimate itself) | The existing taste ranking, labelled "not yet calibrated"; no exploration mixed in (it lives in Learning picks) |
 | High confidence | 0.90 | 0.80 | Empty, with what is needed |
 | Extremely selective | 0.95 | 0.90 | Empty, with what is needed |
 
@@ -95,7 +95,9 @@ An item passes mode (t, γ) iff `p_low_i(γ) ≥ t`. Under the model, that means
 - **Pool:** eligible items that did not pass the current mode, with `p̂ ≥ 0.35`.
 - **Weights:** `w_i = p̂_i² · s_i`, boosted for categories with few labels.
 - **Sampling:** Poisson sampling with inclusion probability `π_i = min(1, K·w_i/Σw)`. The probability is logged, so impressions from this feed support inverse-propensity estimates.
-- **Main feed:** deterministic. The log records it as propensity 1, so inverse-propensity estimates cannot be made for it, and none are claimed.
+- **Main feed:** deterministic. The log records no propensity for it, so inverse-propensity estimates cannot be made for it, and none are claimed.
+- **Stable within a day:** each piece's inclusion draw uses a permanent random number, a hash of (day, mode, piece), so refreshing does not reshuffle the picks. Each request's inclusion probability is still exactly the logged π. Requests on the same day are correlated, so variance estimates must cluster by day.
+- **Without a calibration:** the pool is chosen on the raw model's σ(m). It is used only to choose, and never shown as a probability.
 
 ### Updating
 
@@ -131,3 +133,26 @@ An item passes mode (t, γ) iff `p_low_i(γ) ≥ t`. Under the model, that means
 6. `eval/selective.py`, synthetic correctness fixtures, simulation of the modes, ablations.
 7. Interaction features (shrunk), kept only if the simulation shows no harm and an interaction persona benefits.
 8. Latency and memory benchmarks at 1k, 5k and 20k products; prospective-trial flag; documentation.
+
+## 6. As built (milestone 4)
+
+- **States:**
+
+  | State | When | Main feed |
+  |---|---|---|
+  | `calibrated` | An active calibration exists | Pieces passing the mode, ordered by bound |
+  | `uncalibrated` | Too few labels | Balanced: the ranking, labelled. Strict modes: empty, saying how many labels are needed |
+  | `pending` | Enough labels; the calibration job has not finished | As `uncalibrated` |
+  | `unavailable` | The model or calibration raised, or the legacy engine is selected | As `uncalibrated`, saying why |
+  | `off` | `selective.enabled` is false | The earlier feed, with exploration slots (rollback) |
+
+- **Eligibility constants:**
+  - known poor quality means an independent-evidence quality score below 40;
+  - a price at or above 0.9× your "too expensive" ceiling for the category is withheld unless quality evidence scores at least 60;
+  - "already own" given twice for a category withholds that category.
+
+  Every exclusion is counted with its reason in the response.
+- **One gate everywhere.** Discover, Learning picks, the Insights top picks and the product page all call the same `selective.evaluate`. A piece's confidence block always comes from the server.
+- **Logged per served item:** `m`, `s`, `estimate`, `bound`, the modes passed and, for Learning picks, `propensity`.
+- **Logged per feed:** `policy`, `mode`, `calibration_id`, and `gate` (state, thresholds, counts, sampling details). This uses additive migration `f3d2c8a1e6b9`.
+- **Observed performance:** `/api/selective/status` reports approval among served pieces that were then rated, by serving mode and by gate passed, with 95% Clopper–Pearson intervals. Nothing is reported below 10 rated pieces. Pieces shown but not rated are not counted.

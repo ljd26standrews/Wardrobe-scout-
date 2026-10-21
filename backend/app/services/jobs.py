@@ -141,6 +141,10 @@ def _run(job_id: int) -> None:
             result = ai_visual_assess(db, params["product_id"])
         else:
             raise ValueError(f"unknown job kind {kind}")
+        if kind in SCAN_KINDS:
+            from . import calibration
+
+            calibration.maybe_schedule(db)  # a much larger catalogue can shift what raw compatibility means
         status = outcome(status, result)
     except Exception as e:  # job failures are recorded, never crash the worker
         log.exception("job_failed", job_id=job_id, kind=kind)

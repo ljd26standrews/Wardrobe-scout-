@@ -137,3 +137,22 @@ def test_decisions_queue_a_recalibration_when_enough_changed(env, db, monkeypatc
     _world(db, n=40, rated=40, seed=2, prefix="more")
     calibration.maybe_schedule(db)
     assert queued == ["recalibrate"]
+
+
+def test_a_failed_recalibration_is_retried_only_after_a_pause(env, db, monkeypatch):
+    from datetime import timedelta
+
+    from app.models import Job, utcnow
+    from app.services import calibration, jobs
+
+    queued = []
+    monkeypatch.setattr(jobs, "enqueue", lambda kind, params=None: queued.append(kind) or 1)
+    _world(db, n=60, rated=50)
+    db.add(Job(kind="recalibrate", status="failed", finished_at=utcnow()))
+    db.commit()
+    calibration.maybe_schedule(db)
+    assert queued == []  # not straight back into a failing job
+    db.query(Job).update({Job.finished_at: utcnow() - timedelta(minutes=11)})
+    db.commit()
+    calibration.maybe_schedule(db)
+    assert queued == ["recalibrate"]

@@ -27,14 +27,14 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from statistics import NormalDist
 
 import numpy as np
 from sqlalchemy.orm import Session
 
 from ..logging_setup import get_logger
-from ..models import Calibration, Product
+from ..models import Calibration, Job, Product, utcnow
 from . import embeddings as emb
 from . import preference_model as pm
 from .approval_data import RatedOutcome, rated_outcomes
@@ -174,7 +174,7 @@ def diagnostics(m: np.ndarray, y: np.ndarray, fold: np.ndarray) -> dict:
     def logloss(p):
         return float(-np.mean(y * np.log(p + eps) + (1 - y) * np.log(1 - p + eps)))
 
-    ece_raw, _ = _ece(raw, y, bins)
+    ece_raw, bins_raw = _ece(raw, y, bins)
     ece_cal, bins_cal = _ece(cal, y, bins)
     return {
         "n": int(len(y)), "positives": int(y.sum()), "base_rate": round(float(y.mean()), 4),
@@ -182,6 +182,7 @@ def diagnostics(m: np.ndarray, y: np.ndarray, fold: np.ndarray) -> dict:
         "brier_raw": round(float(np.mean((raw - y) ** 2)), 4), "brier_calibrated": round(float(np.mean((cal - y) ** 2)), 4),
         "logloss_raw": round(logloss(raw), 4), "logloss_calibrated": round(logloss(cal), 4),
         "ece_raw": round(ece_raw, 4), "ece_calibrated": round(ece_cal, 4), "reliability": bins_cal,
+        "reliability_raw": bins_raw,
     }  # fmt: skip
 
 
@@ -245,6 +246,7 @@ def recalibrate(db: Session, *, force: bool = False) -> dict:
     diag["map"] = "platt" if use_platt else "identity"
     diag["brier_chosen"] = diag["brier_calibrated"] if use_platt else diag["brier_raw"]
     diag["ece_chosen"] = diag["ece_calibrated"] if use_platt else diag["ece_raw"]
+    diag["reliability_chosen"] = diag["reliability"] if use_platt else diag["reliability_raw"]
     db.query(Calibration).filter(Calibration.active.is_(True)).update({Calibration.active: False})
     cal = Calibration(engine_version=pm.ENGINE_VERSION, method=METHOD, n_labels=len(y), n_positive=int(y.sum()),
                       label_hash=label_hash, active=True,
@@ -287,10 +289,21 @@ def needs_refit(db: Session) -> bool:
     return len(changed) >= int(cfg["recalibrate_every"]) or _catalogue_grew(cur, db.query(Product.id).count())
 
 
+RETRY_AFTER_FAILURE = timedelta(minutes=10)
+
+
 def maybe_schedule(db: Session) -> None:
-    """Queue a recalibration when enough has changed. Never raises: a decision must always be recorded."""
+    """Queue a recalibration when enough has changed (one at a time; not again for a while after a failure).
+    Never raises: a decision must always be recorded and a feed always served."""
     try:
-        if needs_refit(db):
+        if not needs_refit(db):
+            return
+        failed = (
+            db.query(Job.id)
+            .filter(Job.kind == "recalibrate", Job.status == "failed", Job.finished_at > utcnow() - RETRY_AFTER_FAILURE)
+            .first()
+        )
+        if failed is None:
             from . import jobs
 
             jobs.enqueue("recalibrate", {})

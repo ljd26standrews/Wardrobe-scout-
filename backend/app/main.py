@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .api import evaluation, feedback, products, sellers, system, wardrobe
+from .api import evaluation, feedback, products, selective, sellers, system, wardrobe
 from .config import get_api_token, get_settings, limit_blas_threads
 from .db import SessionLocal, init_engine, migrate
 from .logging_setup import configure_logging, get_logger
@@ -115,7 +115,8 @@ def create_app() -> FastAPI:
         # seller site) calls localhost; without this the preflight is rejected with 400.
         allow_private_network=True,
     )
-    for r in (products.router, feedback.router, sellers.router, wardrobe.router, system.router, evaluation.router):
+    routers = (products, feedback, sellers, wardrobe, system, evaluation, selective)
+    for r in (m.router for m in routers):
         app.include_router(r)
 
     return app

@@ -14,7 +14,7 @@ from ..db import get_db
 from ..ingestion.parsing import materials_to_text, parse_materials
 from ..models import Evidence, FeedRequest, Impression, Product
 from ..schemas import EvidenceIn, MatchDecision, ProductPatch, ViewedIn
-from ..services import dedup, jobs
+from ..services import dedup, jobs, selective
 from ..services import embeddings as emb
 from ..services.presenter import Context, comparison, product_card
 from ..services.recommender import build_feed, build_profile, collapse_families, feed_candidates, rank_products
@@ -80,9 +80,7 @@ def _load(db: Session, status: str | None = "active"):
     return q
 
 
-@router.get("/feed")
-def feed(
-    limit: int = Query(20, ge=1, le=100),
+def feed_filters(
     q: str | None = None,
     brand: list[str] | None = Query(None),
     seller_id: list[int] | None = Query(None),
@@ -94,75 +92,143 @@ def feed(
     size: str | None = None,
     quality: str | None = None,
     include_seed: bool = False,
-    db: Session = Depends(get_db),
-):
-    """Personalised discovery feed: undecided products ranked for you, with exploration slots."""
-    prof = build_profile(db)
+) -> dict:
+    return {
+        "q": q, "brand": brand, "seller_id": seller_id, "category": category, "material": material,
+        "min_price": min_price, "max_price": max_price, "season": season, "size": size, "quality": quality,
+        "include_seed": include_seed,
+    }  # fmt: skip
+
+
+NO_FILTERS = {k: None for k in ("q", "brand", "seller_id", "category", "material", "min_price", "max_price", "season",
+                                "size", "quality")} | {"include_seed": False}  # fmt: skip
+
+
+def ranked_candidates(db: Session, prof, ctx: Context, flt: dict) -> tuple[list, dict, int, dict]:
+    """Undecided pieces matching the filters, ranked, one per garment: (ranked, offers, n candidates, quality)."""
     rcfg = get_setting(db, "recommender")
-    ctx = Context(db)
     ids = {p.id for p in feed_candidates(db, prof, include_skipped_after_days=rcfg.get("skip_resurface_days", 10))}
     candidates = [p for p in _load(db).filter(Product.id.in_(ids)).all()] if ids else []
-    if not include_seed:
+    if not flt.get("include_seed"):
         candidates = [p for p in candidates if p.data_origin != "seed"]
-    candidates = _apply_filters(
-        candidates,
-        q=q,
-        brand=brand,
-        seller_id=seller_id,
-        category=category,
-        material=material,
-        min_price=min_price,
-        max_price=max_price,
-        season=season,
-        size=size,
-        quality=quality,
-        origin=None,
-        ctx=ctx,
-    )
+    filters = {k: v for k, v in flt.items() if k != "include_seed"}
+    candidates = _apply_filters(candidates, **filters, origin=None, ctx=ctx)
     quality_lookup = {p.id: ctx.quality(p) for p in candidates}
     ranked = rank_products(
         db, candidates, prof, quality_lookup=quality_lookup, wardrobe_lookup=complement_scores(db, candidates)
     )
     ranked, offers = collapse_families(ranked)  # one slot per garment, its other listings as offers
-    seed = int(dt.date.today().strftime("%Y%m%d"))
-    exploration = rcfg.get("exploration_rate", 0.18)
-    chosen = build_feed(ranked, prof, limit, exploration, seed=seed)
-    items = []
-    for r in chosen:
-        card = product_card(ctx, r.product, r)
-        others = offers.get(r.product.id, [])
-        card["family"] = {
-            "size": 1 + len(others),
-            "offers": [
-                {"product_id": o.id, "seller": o.seller.name if o.seller else None, "price": o.price,
-                 "currency": o.currency}
-                for o in others
-            ],
-        }  # fmt: skip
-        items.append(card)
-    filters = {
-        "q": q, "brand": brand, "seller_id": seller_id, "category": category, "material": material,
-        "min_price": min_price, "max_price": max_price, "season": season, "size": size, "quality": quality,
-    }  # fmt: skip
-    feed_id = _log_feed(db, rcfg, prof, chosen, offers, len(candidates), exploration, filters)
-    return {
-        "feed_id": feed_id,
-        "items": items,
-        "total_candidates": len(candidates),
-        "learning_strength": round(prof.strength, 3),
-        "decisions": prof.n_informative,
+    return ranked, offers, len(candidates), quality_lookup
+
+
+def feed_card(ctx: Context, r, offers: dict, confidence: dict | None = None) -> dict:
+    card = product_card(ctx, r.product, r)
+    others = offers.get(r.product.id, [])
+    card["family"] = {
+        "size": 1 + len(others),
+        "offers": [
+            {
+                "product_id": o.id,
+                "seller": o.seller.name if o.seller else None,
+                "price": o.price,
+                "currency": o.currency,
+            }
+            for o in others
+        ],
     }
+    if confidence is not None:
+        card["confidence"] = confidence
+    return card
+
+
+@router.get("/feed")
+def feed(
+    limit: int = Query(20, ge=1, le=100),
+    mode: str | None = Query(None, pattern="^(balanced|high|extreme)$"),
+    flt: dict = Depends(feed_filters),
+    db: Session = Depends(get_db),
+):
+    """Discover's main feed. With selective recommendation on (the default), only pieces that pass the chosen
+    mode's gate, best first, and never padded with weaker ones; ``gate`` says what qualified and why the feed
+    is what it is. With it off, the earlier ranked feed with exploration slots."""
+    prof = build_profile(db)
+    rcfg = get_setting(db, "recommender")
+    ctx = Context(db)
+    ranked, offers, n_candidates, quality_lookup = ranked_candidates(db, prof, ctx, flt)
+    gate = selective.evaluate(db, ranked, prof, mode, quality_lookup=quality_lookup)
+    base = {"total_candidates": n_candidates, "learning_strength": round(prof.strength, 3),
+            "decisions": prof.n_informative}  # fmt: skip
+    if gate.state == "off":
+        seed = int(dt.date.today().strftime("%Y%m%d"))
+        exploration = rcfg.get("exploration_rate", 0.18)
+        chosen = build_feed(ranked, prof, limit, exploration, seed=seed)
+        rows = [
+            {"product_id": r.product.id, "position": i, "score": round(float(r.score), 4), "explore": bool(r.explore),
+             "family_size": 1 + len(offers.get(r.product.id, []))}
+            for i, r in enumerate(chosen)
+        ]  # fmt: skip
+        feed_id = _log_feed(db, rcfg, prof, n_candidates, flt, rows, exploration=exploration)
+        return {"feed_id": feed_id, "items": [feed_card(ctx, r, offers) for r in chosen], **base,
+                "gate": gate.summary(len(chosen), policy="ranked")}  # fmt: skip
+    chosen = selective.main_feed(gate, limit)
+    summary = gate.summary(len(chosen))
+    feed_id = _log_feed(db, rcfg, prof, n_candidates, flt, selective.log_items(gate, chosen, offers),
+                        policy="selective", mode=gate.mode, gate=gate)  # fmt: skip
+    items = [feed_card(ctx, c.ranked, offers, selective.card_confidence(gate, c)) for c in chosen]
+    return {"feed_id": feed_id, "items": items, **base, "gate": summary}
+
+
+@router.get("/feed/learning")
+def learning_feed(
+    limit: int = Query(24, ge=1, le=100),
+    mode: str | None = Query(None, pattern="^(balanced|high|extreme)$"),
+    flt: dict = Depends(feed_filters),
+    db: Session = Depends(get_db),
+):
+    """Learning picks: plausible pieces the model is unsure about, kept apart from the main feed. Sampled with
+    known inclusion probabilities (logged), so what you think of them can be evaluated without bias."""
+    prof = build_profile(db)
+    rcfg = get_setting(db, "recommender")
+    ctx = Context(db)
+    ranked, offers, n_candidates, quality_lookup = ranked_candidates(db, prof, ctx, flt)
+    gate = selective.evaluate(db, ranked, prof, mode, quality_lookup=quality_lookup, learning=True)
+    base = {"total_candidates": n_candidates, "learning_strength": round(prof.strength, 3),
+            "decisions": prof.n_informative}  # fmt: skip
+    if gate.state == "off":
+        summary = gate.summary(0, policy="learning")
+        summary["message"] = "Learning picks are part of selective recommendation, which is switched off in Settings."
+        return {"feed_id": None, "items": [], **base, "gate": summary}
+    salt = f"{dt.date.today().isoformat()}:{gate.mode}"
+    picks, sampling = selective.learning_feed(db, gate, limit, salt=salt)
+    for c in picks:
+        c.ranked.explore = True
+        c.ranked.reasons.insert(0, "Learning pick: the model is unsure about pieces like this, so your reaction "
+                                   "teaches it the most")  # fmt: skip
+    summary = gate.summary(len(picks), policy="learning")
+    summary["sampling"] = sampling
+    feed_id = _log_feed(db, rcfg, prof, n_candidates, flt, selective.log_items(gate, picks, offers),
+                        policy="learning", mode=gate.mode, gate=gate, sampling=sampling)  # fmt: skip
+    items = [feed_card(ctx, c.ranked, offers, selective.card_confidence(gate, c)) for c in picks]
+    return {"feed_id": feed_id, "items": items, **base, "gate": summary}
 
 
 MAX_FEED_LOG = 10_000  # feeds kept in the impression log (oldest pruned)
 MAX_IMPRESSIONS = 200_000
 
 
-def _log_feed(db, rcfg, prof, chosen, offers, n_candidates, exploration, filters) -> str:
-    """Record what this feed offered and under which model (see models.FeedRequest)."""
+def _log_feed(db, rcfg, prof, n_candidates, flt, rows, *, exploration=0.0, policy="ranked", mode=None, gate=None,
+              sampling=None) -> str:  # fmt: skip
+    """Record what this feed offered and under which model and policy (see models.FeedRequest)."""
     from ..services import preference_model as pm
 
     engine = rcfg.get("engine", "bayes")
+    details = None
+    if gate is not None:
+        t, g = selective.thresholds(gate.cfg, gate.mode)
+        details = {"state": gate.state, "target": t, "confidence": g, "eligible": len(gate.candidates),
+                   "qualified": gate.qualified() if gate.calibrated else None}  # fmt: skip
+        if sampling is not None:
+            details["sampling"] = sampling
     fr = FeedRequest(
         id=uuid.uuid4().hex,
         engine=engine,
@@ -170,13 +236,13 @@ def _log_feed(db, rcfg, prof, chosen, offers, n_candidates, exploration, filters
         decisions=prof.n_informative,
         candidates=n_candidates,
         exploration_rate=exploration,
-        filters={k: v for k, v in filters.items() if v not in (None, [], "")},
-        items=[
-            {"product_id": r.product.id, "position": i, "score": round(float(r.score), 4), "explore": bool(r.explore),
-             "family_size": 1 + len(offers.get(r.product.id, []))}
-            for i, r in enumerate(chosen)
-        ],
-    )  # fmt: skip
+        filters={k: v for k, v in flt.items() if v not in (None, [], "", False)},
+        items=rows,
+        policy=policy,
+        mode=mode,
+        calibration_id=gate.calibration.id if gate is not None and gate.calibration is not None else None,
+        gate=details,
+    )
     db.add(fr)
     db.flush()
     _prune(db, FeedRequest, FeedRequest.created_at, MAX_FEED_LOG)
@@ -318,11 +384,17 @@ def _get(db: Session, product_id: int) -> Product:
 def get_product(product_id: int, db: Session = Depends(get_db)):
     p = _get(db, product_id)
     ctx = Context(db)
-    ranked = rank_products(db, [p], wardrobe_lookup=complement_scores(db, [p]))[0]
+    prof = build_profile(db)
+    quality_lookup = {p.id: ctx.quality(p)}
+    ranked = rank_products(db, [p], prof, quality_lookup=quality_lookup, wardrobe_lookup=complement_scores(db, [p]))[0]
     if p.is_new:
         p.is_new = False
         db.commit()
-    return product_card(ctx, p, ranked, detail=True)
+    card = product_card(ctx, p, ranked, detail=True)
+    gate = selective.evaluate(db, [ranked], prof, None, quality_lookup=quality_lookup)
+    if gate.state != "off" and gate.candidates:  # the same gate as the feeds, so the two always agree
+        card["confidence"] = selective.card_confidence(gate, gate.candidates[0])
+    return card
 
 
 @router.patch("/products/{product_id}")
