@@ -236,7 +236,7 @@ Off by default. With `ANTHROPIC_API_KEY` set and **Settings → AI** enabled, it
 - photo observations (stored as *AI visual assessment* evidence with caveats; never used for fibre content or durability)
 - research summaries of collected leads, with citations
 
-Every call is cached, rate-limited and checked against a monthly spending cap (default $5, estimated from token usage). The default model is `claude-opus-5-5` and can be changed in Settings.
+Every call is cached and rate-limited. The monthly spending cap (default $5) is a hard limit: before each call, the most it could cost (a conservative input estimate plus the maximum output length) is reserved. The call is refused if that would exceed what is left, and the reservation is then settled to the actual cost reported by the provider. The cap is enforced within one running app; two separate copies of the app pointed at the same database could each spend up to it. The default model is `claude-opus-5-5` and can be changed in Settings.
 
 ## Backup and migration
 

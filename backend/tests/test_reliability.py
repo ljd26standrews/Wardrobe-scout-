@@ -385,3 +385,105 @@ def test_scanner_downloads_no_photos_when_downloads_are_off(db, web, monkeypatch
     assert run.status == "succeeded"
     assert not any(r.url.host == "photo.yupoo.com" for r in web.requests)
     assert db.query(Product).filter_by(seller_id=s.id).count() == 2
+
+
+# ------------------------------------------------------------------ 1f: AI budget is a hard cap
+def _fake_anthropic(monkeypatch, calls: list, usage=(100, 50), delay=0.0, fail=False):
+    import sys
+    import time
+    import types
+
+    class Err(Exception):
+        status_code = 500
+
+    class Msgs:
+        def create(self, **kw):
+            calls.append(kw)
+            time.sleep(delay)
+            if fail:
+                raise Err("boom")
+            return types.SimpleNamespace(
+                usage=types.SimpleNamespace(input_tokens=usage[0], output_tokens=usage[1]),
+                content=[types.SimpleNamespace(type="text", text="ok")],
+                stop_reason="end_turn",
+            )
+
+    fake = types.SimpleNamespace(
+        Anthropic=lambda api_key: types.SimpleNamespace(beta=types.SimpleNamespace(messages=Msgs())),
+        RateLimitError=type("RateLimitError", (Exception,), {}),
+        AuthenticationError=type("AuthenticationError", (Exception,), {}),
+        APIStatusError=Err,
+        APIConnectionError=type("APIConnectionError", (Exception,), {}),
+    )
+    monkeypatch.setitem(sys.modules, "anthropic", fake)
+
+
+def _ai_on(db, monkeypatch, cap):
+    from app.config import get_settings
+    from app.services.settings_store import get_setting, set_setting
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-only")
+    get_settings.cache_clear()
+    cfg = get_setting(db, "ai")
+    cfg.update(enabled=True, monthly_cap_usd=cap, min_seconds_between_calls=0)
+    set_setting(db, "ai", cfg)
+
+
+def _spent():
+    from app.services import ai
+
+    return ai.month_spend()
+
+
+def test_ai_call_that_could_exceed_the_cap_is_refused_before_any_request(env, db, monkeypatch):
+    import pytest
+
+    from app.services import ai
+
+    calls: list = []
+    _fake_anthropic(monkeypatch, calls)
+    _ai_on(db, monkeypatch, 0.001)
+    with pytest.raises(ai.AIUnavailable, match="cap"):
+        ai._call("translate", "sys", [{"type": "text", "text": "hello"}], max_tokens=300)
+    assert calls == [] and _spent() == 0
+
+
+def test_concurrent_ai_calls_cannot_jointly_overshoot_and_reservations_reconcile(env, db, monkeypatch):
+    import threading
+
+    from app.services import ai
+
+    calls: list = []
+    _fake_anthropic(monkeypatch, calls, usage=(100, 50), delay=0.3)
+    _ai_on(db, monkeypatch, 0.01)  # room for one worst-case reservation (~$0.0068), not two
+    outcomes: list = []
+
+    def call(i):
+        try:
+            outcomes.append(ai._call("translate", "sys", [{"type": "text", "text": f"hello {i}"}], max_tokens=300))
+        except ai.AIUnavailable as e:
+            outcomes.append(e)
+
+    threads = [threading.Thread(target=call, args=(i,)) for i in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(calls) == 1 and sum(isinstance(o, ai.AIUnavailable) for o in outcomes) == 1
+    actual = (100 * 4.0 + 50 * 20.0) / 1e6
+    assert abs(_spent() - actual) < 1e-9  # reconciled to the actual cost
+    ai._call("translate", "sys", [{"type": "text", "text": "hello again"}], max_tokens=300)  # freed budget usable
+    assert _spent() <= 0.01
+
+
+def test_failed_ai_call_releases_its_reservation(env, db, monkeypatch):
+    import pytest
+
+    from app.services import ai
+
+    calls: list = []
+    _fake_anthropic(monkeypatch, calls, fail=True)
+    _ai_on(db, monkeypatch, 1.0)
+    with pytest.raises(ai.AIUnavailable):
+        ai._call("translate", "sys", [{"type": "text", "text": "hello"}], max_tokens=300)
+    assert len(calls) == 1 and _spent() == 0
