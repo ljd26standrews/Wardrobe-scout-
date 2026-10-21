@@ -5,9 +5,11 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
+from ..config import get_settings
 from ..db import get_db
 from ..models import Feedback, Product, SavedItem, WardrobeItem
 from ..schemas import FeedbackIn, SavedPatch
+from ..services import jobs
 from ..services.presenter import Context, product_card
 from ..services.recommender import REASONS, snapshot
 
@@ -72,6 +74,14 @@ def give_feedback(body: FeedbackIn, db: Session = Depends(get_db)):
             db.flush()
             wardrobe_id = item.id
     db.commit()
+    if (
+        body.action in (*LIST_FOR_ACTION, "purchased")
+        and p.data_origin == "scraped"
+        and p.analysis_state != "deep"
+        and get_settings().deep_on_feedback
+    ):
+        # You are interested: compare it properly (full gallery, cross-seller photo matching).
+        jobs.enqueue("deep_product", {"product_id": p.id})
     return {
         "ok": True,
         "feedback_id": fb.id,

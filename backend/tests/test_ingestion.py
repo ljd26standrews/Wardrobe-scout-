@@ -95,7 +95,13 @@ def test_scan_seller_end_to_end(db, web):
     assert hoodie.category == "hoodie" and hoodie.price == 919 and hoodie.seller_item_code == "8009"
     assert hoodie.materials[0] == {"fibre": "wool", "pct": 70.0}
     assert hoodie.data_origin == "scraped" and hoodie.completeness == "complete"
-    assert all(i.local_path for i in hoodie.images) and hoodie.image_embedding is not None
+    assert hoodie.analysis_state == "analysed" and hoodie.image_embedding is not None
+    # Progressive photo policy: one useful view is analysed; the rest stay listed for on-demand viewing.
+    assert hoodie.images[0].local_path and hoodie.images[0].selected and hoodie.images[0].role == "garment"
+    assert [i.url for i in hoodie.images] == [
+        "https://photo.yupoo.com/testseller/aaa1/big.jpg",
+        "https://photo.yupoo.com/testseller/aaa2/big.jpg",
+    ]
     # every extracted claim has provenance
     claims = [e for e in hoodie.evidence if e.kind == "seller_claim"]
     assert claims and all(e.source_url == hoodie.source_url and e.captured_at for e in claims)
@@ -130,6 +136,7 @@ def test_price_change_and_removal_tracking(db, web):
         .replace('max="2"', 'max="1"')
         .replace("/albums?page=2", "/x"),
     )
+    web.add(f"{BASE}/albums/1003?uid=1", "gone", status=404)  # the album itself was deleted
     with web.client() as client:
         run = scan_seller(db, seller, mode="full", client=client)
     hoodie = db.query(Product).filter_by(external_id="1001").one()
@@ -137,6 +144,29 @@ def test_price_change_and_removal_tracking(db, web):
     assert any(o.change and "919 → 899" in o.change for o in hoodie.observations)
     assert run.products_updated >= 1
     assert db.query(Product).filter_by(external_id="1003").one().status == "unavailable"
+
+
+def test_unlisted_album_whose_page_still_loads_stays_active(db, web):
+    """Missing from the listing is not proof of removal: the album's own page is checked first."""
+    from app.ingestion.scan import scan_seller
+    from app.models import Product, Seller
+
+    _serve_catalogue(web)
+    seller = Seller(name="Test", slug="testseller", platform="yupoo", base_url=BASE)
+    db.add(seller)
+    db.commit()
+    with web.client() as client:
+        scan_seller(db, seller, mode="full", client=client)
+    web.add(
+        f"{BASE}/albums?page=1",
+        fixture_text("yupoo_albums_p1.html")
+        .replace('<a href="/albums?page=2">2</a>', "")
+        .replace('max="2"', 'max="1"')
+        .replace("/albums?page=2", "/x"),
+    )
+    with web.client() as client:
+        scan_seller(db, seller, mode="incremental", client=client)
+    assert db.query(Product).filter_by(external_id="1003").one().status == "active"
 
 
 def test_jsonld_generic_product():

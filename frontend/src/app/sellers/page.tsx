@@ -12,6 +12,7 @@ import { Field, Input, Select, Textarea } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { AddEvidenceDialog } from "@/components/product/evidence";
 import { useJobWatcher } from "@/components/job-watcher";
+import { ScanPanel } from "@/components/scan-panel";
 import * as DM from "@radix-ui/react-dropdown-menu";
 import { cn, timeAgo, titleCase } from "@/lib/utils";
 
@@ -20,6 +21,7 @@ const STATUS_ICON: Record<string, React.ReactNode> = {
   partial: <AlertTriangle className="size-4 text-caution" />,
   blocked: <XCircle className="size-4 text-destructive" />,
   failed: <XCircle className="size-4 text-destructive" />,
+  cancelled: <XCircle className="size-4 text-muted-foreground" />,
   running: <Spinner />,
 };
 
@@ -451,6 +453,10 @@ export default function SellersPage() {
           </Button>
           <SellerDialog onSaved={refresh} trigger={<Button><Plus /> Add seller</Button>} />
         </div>
+      </div>
+
+      <div className="mt-8">
+        <ScanPanel onChange={refresh} />
       </div>
 
       <div className="mt-8 space-y-3">

@@ -89,12 +89,24 @@ class Context:
 
 
 def image_view(img) -> dict:
+    # Photos not downloaded by the scan are fetched on demand when first shown (see /api/images/{id}).
+    viewable = img.local_path or (img.fetch_status != "failed" and not img.url.startswith("upload:"))
     return {
         "id": img.id,
-        "src": f"/api/images/{img.id}" if img.local_path else None,
+        "src": f"/api/images/{img.id}" if viewable else None,
         "remote_url": img.url if not img.url.startswith("upload:") else None,
         "status": img.fetch_status,
+        "role": img.role,
+        "selected": bool(img.selected),
     }
+
+
+def gallery(p: Product) -> tuple[list, list]:
+    """(garment photos in the seller's order, size charts). Text graphics and banners are left out."""
+    from .image_select import NON_AESTHETIC_ROLES, SIZE_CHART
+
+    imgs = sorted(p.images, key=lambda i: i.position)
+    return [i for i in imgs if i.role not in NON_AESTHETIC_ROLES], [i for i in imgs if i.role == SIZE_CHART]
 
 
 def product_card(ctx: Context, p: Product, ranked: Ranked | None = None, detail: bool = False) -> dict:
@@ -141,7 +153,9 @@ def product_card(ctx: Context, p: Product, ranked: Ranked | None = None, detail:
         "landed_cost": landed,
         "source_url": p.source_url if not p.source_url.startswith("manual://") else None,
         "links": links,
-        "images": [image_view(i) for i in p.images],
+        "images": [image_view(i) for i in gallery(p)[0]],
+        "sizing_images": [image_view(i) for i in gallery(p)[1]],
+        "analysis_state": p.analysis_state,
         "status": p.status,
         "data_origin": p.data_origin,
         "completeness": p.completeness,

@@ -137,6 +137,13 @@ class Product(Base):
     last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
     content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Progressive scanning: discovered (catalogue listing only) -> partial (product page OR photo analysed)
+    # -> analysed (product page AND photos) -> deep (extra photos fetched, duplicates verified).
+    analysis_state: Mapped[str] = mapped_column(String(20), default="analysed", server_default="analysed", index=True)
+    detail_fetched_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    analysed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    etag: Mapped[str | None] = mapped_column(String(200), nullable=True)  # HTTP validators for conditional refresh
+    last_modified: Mapped[str | None] = mapped_column(String(80), nullable=True)
 
     group_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     image_embedding: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
@@ -158,7 +165,7 @@ class ProductImage(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     product_id: Mapped[int] = mapped_column(ForeignKey("products.id", ondelete="CASCADE"), index=True)
-    url: Mapped[str] = mapped_column(String(1500))
+    url: Mapped[str] = mapped_column(String(1500), index=True)
     referer: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     local_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     position: Mapped[int] = mapped_column(Integer, default=0)
@@ -169,6 +176,14 @@ class ProductImage(Base):
     height: Mapped[int | None] = mapped_column(Integer, nullable=True)
     fetch_status: Mapped[str] = mapped_column(String(20), default="pending")  # pending|ok|failed|uploaded
     fetch_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Smaller variant shown by the listing / album grid (e.g. Yupoo medium.jpg). Analysis uses it; `url` stays
+    # the original full-resolution source.
+    thumb_url: Mapped[str | None] = mapped_column(String(1500), nullable=True)
+    # garment | detail | uncertain | size_chart | text_graphic | repeated (see services.image_select)
+    role: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    role_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    selected: Mapped[bool | None] = mapped_column(Boolean, nullable=True)  # feeds the aesthetic product vector
+    analysis: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     product: Mapped[Product] = relationship(back_populates="images")
 
@@ -313,6 +328,8 @@ class Job(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    control: Mapped[str | None] = mapped_column(String(20), nullable=True)  # pause | cancel (set by the UI)
+    stats: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # live structured progress
 
 
 class ScanRun(Base):
@@ -330,6 +347,10 @@ class ScanRun(Base):
     products_updated: Mapped[int] = mapped_column(Integer, default=0)
     errors: Mapped[list] = mapped_column(JSON, default=list)
     message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    mode: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # True only when catalogue pagination was genuinely exhausted (the listing was read to its end).
+    discovery_complete: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    stats: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
 
 class AICall(Base):

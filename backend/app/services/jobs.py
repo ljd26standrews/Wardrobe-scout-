@@ -14,6 +14,7 @@ from datetime import timedelta
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
+from ..config import get_settings
 from ..db import SessionLocal, session_scope
 from ..logging_setup import get_logger
 from ..models import Job, Seller, utcnow
@@ -25,7 +26,10 @@ log = get_logger(__name__)
 # pasted link, an AI photo check). Without the split a pasted link could wait hours behind a scan.
 _background = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ws-bg")
 _interactive = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ws-ui")
-BACKGROUND_KINDS = {"scan_seller", "scan_all", "check_watched", "recompute", "dedup", "fetch_images"}
+BACKGROUND_KINDS = {
+    "scan_seller", "scan_all", "check_watched", "recompute", "dedup", "fetch_images", "analyse_pending", "reanalyse",
+}  # fmt: skip
+SCAN_KINDS = {"scan_seller", "scan_all", "analyse_pending"}
 _scheduler: BackgroundScheduler | None = None
 _lock = threading.Lock()
 
@@ -47,6 +51,8 @@ def _run(job_id: int) -> None:
 
     with session_scope() as db:
         job = db.get(Job, job_id)
+        if job.status == "cancelled":
+            return
         job.status, job.started_at = "running", utcnow()
         kind, params = job.kind, dict(job.params or {})
     db = SessionLocal()
@@ -56,7 +62,9 @@ def _run(job_id: int) -> None:
         if kind == "scan_seller":
             seller = db.get(Seller, params["seller_id"])
             run = scan.scan_seller(db, seller, mode=params.get("mode", "incremental"), progress=progress, job_id=job_id)
-            status = {"succeeded": "succeeded", "partial": "partial"}.get(run.status, "failed")
+            status = {"succeeded": "succeeded", "partial": "partial", "cancelled": "cancelled"}.get(
+                run.status, "failed"
+            )
             result = {
                 "scan_run_id": run.id,
                 "scan_status": run.status,
@@ -65,24 +73,30 @@ def _run(job_id: int) -> None:
                 "updated": run.products_updated,
             }
         elif kind == "scan_all":
-            ids = [
-                s.id
-                for s in db.query(Seller)
+            sellers = (
+                db.query(Seller)
                 .filter(Seller.status == "active", Seller.base_url.isnot(None))
                 .order_by(Seller.priority)
+                .all()
+            )
+            # One concurrent scan: each seller's catalogue host and the image hosts proceed in parallel.
+            runs = scan.scan_many(db, sellers, mode=params.get("mode", "incremental"), progress=progress, job_id=job_id)
+            summary = [
+                {"seller": db.get(Seller, r.seller_id).name, "status": r.status, "new": r.products_new} for r in runs
             ]
-            summary = []
-            for i, sid in enumerate(ids):
-                seller = db.get(Seller, sid)
-                run = scan.scan_seller(
-                    db, seller, mode=params.get("mode", "incremental"), progress=progress, job_id=job_id
-                )
-                summary.append({"seller": seller.name, "status": run.status, "new": run.products_new})
-                _job_log(job_id, f"finished {seller.name}: {run.status}", (i + 1) / max(1, len(ids)))
-            watched = scan.check_watched_urls(db, progress)
+            if all(r.status != "cancelled" for r in runs):
+                watched = scan.check_watched_urls(db, progress)
+            else:
+                watched, status = {}, "cancelled"
             result = {"sellers": summary, "watched": watched}
-            if any(s["status"] in ("failed", "blocked") for s in summary):
+            if status != "cancelled" and any(s["status"] in ("failed", "blocked") for s in summary):
                 status = "partial"
+        elif kind == "deep_product":
+            result = deep_product(db, params["product_id"])
+        elif kind == "analyse_pending":
+            result = scan.drain_pending(db, progress=progress, job_id=job_id)
+        elif kind == "reanalyse":
+            result = reanalyse_stored(db, progress)
         elif kind == "import_url":
             result = scan.import_url(db, params["url"], seller_id=params.get("seller_id"))
             status = "succeeded" if result.get("ok") else "failed"
@@ -133,6 +147,68 @@ def _run(job_id: int) -> None:
         job = s.get(Job, job_id)
         job.status, job.result, job.finished_at, job.progress = status, result, utcnow(), 1.0
         job.message = result.get("message") or result.get("error") or job.message
+        job.control = None
+
+
+def deep_product(db, product_id: int) -> dict:
+    """Full gallery + cross-seller matching for one product you showed interest in."""
+    from ..ingestion import scan
+    from ..ingestion.http import PoliteClient
+    from ..ingestion.pipeline import process_images
+    from ..models import Product
+    from . import dedup
+
+    p = db.get(Product, product_id)
+    if p is None or p.data_origin != "scraped":
+        return {"skipped": True}
+    if p.detail_fetched_at is None:  # only seen in a catalogue listing so far
+        res = scan.import_url(db, p.source_url, seller_id=p.seller_id)
+        if not res.get("ok"):
+            return res
+        p = db.get(Product, product_id)
+    else:
+        with PoliteClient() as client:
+            process_images(db, p, client, deep=True)
+        dedup.match_product(db, p)
+        dedup.recompute_groups(db)
+    p.analysis_state = "deep"
+    db.commit()
+    return {"product_id": p.id, "photos": sum(1 for i in p.images if i.local_path)}
+
+
+def reanalyse_stored(db, progress=None) -> dict:
+    """One-off upgrade for photos stored before image roles existed: classify them (size charts, text
+    graphics) and rebuild product vectors from the selected views. Local files only - no network.
+    Resumable: only images without a role are processed."""
+    from ..ingestion.pipeline import analyse_image_file, apply_analysis, finalize_product
+    from ..models import Product, ProductImage
+    from ..services.images import ImageError
+    from . import dedup
+
+    k = get_settings().analysis_images
+    ids = [
+        pid
+        for (pid,) in db.query(ProductImage.product_id)
+        .filter(ProductImage.role.is_(None), ProductImage.local_path.isnot(None))
+        .distinct()
+    ]
+    for i, pid in enumerate(ids):
+        p = db.get(Product, pid)
+        for img in p.images:
+            if img.role is None and img.local_path:
+                try:
+                    apply_analysis(img, analyse_image_file(img.local_path))
+                except (ImageError, OSError) as e:
+                    img.fetch_error = str(e)[:300]
+                    img.role = "uncertain"
+        finalize_product(db, p, k)
+        if i % 25 == 0:
+            db.commit()
+            if progress:
+                progress(f"re-analysed photos of {i + 1}/{len(ids)} products", (i + 1) / max(1, len(ids)))
+    db.commit()
+    res = dedup.match_all(db) if ids else {}
+    return {"products": len(ids), **res}
 
 
 def recompute_all(db, progress=None) -> dict:
@@ -175,6 +251,29 @@ def enqueue(kind: str, params: dict | None = None) -> int:
         job_id = job.id
     (_background if kind in BACKGROUND_KINDS else _interactive).submit(_run, job_id)
     return job_id
+
+
+def set_control(job_id: int, action: str) -> dict:
+    """pause | resume | cancel a running or queued job (scans honour these within about a second)."""
+    with session_scope() as db:
+        job = db.get(Job, job_id)
+        if job is None:
+            raise KeyError(job_id)
+        if job.status not in ("queued", "running"):
+            return {"ok": False, "status": job.status}
+        job.control = None if action == "resume" else action
+        if action == "cancel" and job.status == "queued":
+            job.status, job.finished_at, job.message = "cancelled", utcnow(), "cancelled before it started"
+        return {"ok": True, "status": job.status, "control": job.control}
+
+
+def retry(job_id: int) -> int:
+    with session_scope() as db:
+        job = db.get(Job, job_id)
+        if job is None:
+            raise KeyError(job_id)
+        kind, params = job.kind, dict(job.params or {})
+    return enqueue(kind, params)
 
 
 def run_sync(kind: str, params: dict | None = None) -> int:
@@ -232,7 +331,22 @@ def stop_scheduler() -> None:
 
 
 def mark_interrupted_jobs() -> None:
-    """Jobs left 'running'/'queued' by a previous process are marked failed on startup."""
+    """Jobs left 'running'/'queued' by a previous process are marked interrupted on startup. Scans resume
+    on their own: products they left discovered/partial are picked up by the next scan or by
+    'Continue analysis'."""
     with session_scope() as db:
         for j in db.query(Job).filter(Job.status.in_(["queued", "running"])):
             j.status, j.message, j.finished_at = "failed", "interrupted by restart", utcnow()
+            j.control = None
+
+
+def enqueue_upgrade_jobs() -> None:
+    """After an upgrade, classify photos stored by the previous pipeline (once, in the background)."""
+    from ..models import ProductImage
+
+    with session_scope() as db:
+        pending = (
+            db.query(ProductImage.id).filter(ProductImage.role.is_(None), ProductImage.local_path.isnot(None)).first()
+        )
+    if pending:
+        enqueue("reanalyse")

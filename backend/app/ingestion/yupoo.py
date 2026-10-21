@@ -68,9 +68,10 @@ def parse_listing_page(html: str, page_url: str) -> ListingPage:
         title_el = a.select_one(".album__title") or a.select_one("[class*='title']")
         title = normalise_space(a.get("title") or (title_el.get_text(" ") if title_el else a.get_text(" ")))
         img = a.select_one("img")
-        cover = None
+        cover = thumb = None
         if img is not None:
             cover = img.get("data-origin-src") or img.get("data-src") or img.get("src")
+            thumb = img.get("data-src") or img.get("src")
         seen.add(album_id)
         albums.append(
             AlbumRef(
@@ -78,6 +79,7 @@ def parse_listing_page(html: str, page_url: str) -> ListingPage:
                 url=_abs(f"/albums/{album_id}?uid=1", page_url) or page_url,
                 title=title or None,
                 cover_url=_abs(cover, page_url),
+                cover_thumb=_abs(thumb, page_url) if thumb and thumb != cover else None,
             )
         )
 
@@ -158,6 +160,7 @@ def parse_album_page(html: str, page_url: str) -> RawListing:
     links["yupoo"] = page_url
 
     images: list[str] = []
+    thumbs: list[str | None] = []
     imgs = (
         soup.select(".showalbum__children img")
         or soup.select(".image__imagewrap img")
@@ -168,6 +171,8 @@ def parse_album_page(html: str, page_url: str) -> RawListing:
         u = _abs(src, page_url)
         if u and u not in images and not u.endswith((".gif", ".svg")):
             images.append(u)
+            small = _abs(img.get("data-src") or img.get("src"), page_url)
+            thumbs.append(small if small and small != u else None)
 
     if not title and not images:
         raise ParserError(f"album structure not recognised: {page_url}")
@@ -178,6 +183,7 @@ def parse_album_page(html: str, page_url: str) -> RawListing:
         title=title,
         description=description,
         image_urls=images,
+        image_thumbs=thumbs,
         image_referer=page_url,
         price=parse_price(title) or parse_price(description),
         links=links,
@@ -215,6 +221,8 @@ class YupooAdapter(SellerAdapter):
         while url and pages < max_pages:
             page = self.list_page(url)
             pages += 1
+            self.pages_read = pages
+            self.total_pages = page.total_pages or self.total_pages
             if progress:
                 progress(
                     f"listing page {pages}{f'/{page.total_pages}' if page.total_pages else ''}: {len(page.albums)} albums"
@@ -238,4 +246,19 @@ class YupooAdapter(SellerAdapter):
         listing = parse_album_page(r.text, str(r.url))
         if isinstance(ref_or_url, AlbumRef) and not listing.image_urls and ref_or_url.cover_url:
             listing.image_urls = [ref_or_url.cover_url]
+            listing.image_thumbs = [ref_or_url.cover_thumb]
         return listing
+
+    def fetch_listing_conditional(
+        self, ref: AlbumRef, etag: str | None, last_modified: str | None
+    ) -> tuple[RawListing | None, dict]:
+        """Fetch a product page, or return (None, validators) if the server says it is unchanged (304)."""
+        r = self.client.get(ref.url, etag=etag, last_modified=last_modified)
+        validators = {"etag": r.headers.get("etag"), "last_modified": r.headers.get("last-modified")}
+        if r.status_code == 304:
+            return None, validators
+        listing = parse_album_page(r.text, str(r.url))
+        if not listing.image_urls and ref.cover_url:
+            listing.image_urls = [ref.cover_url]
+            listing.image_thumbs = [ref.cover_thumb]
+        return listing, validators

@@ -90,11 +90,14 @@ def create_all() -> None:
     Base.metadata.create_all(get_engine())
 
 
+INITIAL_REVISION = "53601a417a9c"
+
+
 def migrate() -> None:
     """Bring the schema to the latest Alembic revision.
 
-    A database created earlier with `create_all` (no alembic_version table) is
-    stamped at head rather than re-created.
+    A database created earlier with `create_all` (no alembic_version table) has the initial schema: it is
+    stamped at the initial revision and then upgraded, so later migrations still add their columns.
     """
     from pathlib import Path
 
@@ -106,9 +109,19 @@ def migrate() -> None:
     ini = Path(__file__).resolve().parent.parent / "alembic.ini"
     cfg = Config(str(ini))
     cfg.set_main_option("script_location", str(ini.parent / "alembic"))
-    tables = set(inspect(get_engine()).get_table_names())
+    insp = inspect(get_engine())
+    tables = set(insp.get_table_names())
     if "products" in tables and "alembic_version" not in tables:
-        create_all()  # add any new tables
-        command.stamp(cfg, "head")
-    else:
-        command.upgrade(cfg, "head")
+        # Created by create_all: at head if it already has every current column, else at the initial schema.
+        from . import models  # noqa: F401 - register models
+
+        missing = [
+            (t.name, c.name)
+            for t in Base.metadata.sorted_tables
+            if t.name in tables
+            for c in t.columns
+            if c.name not in {col["name"] for col in insp.get_columns(t.name)}
+        ]
+        create_all()  # add any missing tables
+        command.stamp(cfg, INITIAL_REVISION if missing else "head")
+    command.upgrade(cfg, "head")

@@ -74,7 +74,30 @@ export function ProductInfo({ product, showAlternatives = true }: { product: Pro
 
       <Section title="Details">
         <SpecList product={product} />
+        {product.analysis_state && product.analysis_state !== "analysed" && product.analysis_state !== "deep" && (
+          <p className="mt-3 text-xs text-muted-foreground" data-testid="analysis-state">
+            {product.analysis_state === "discovered"
+              ? "Found in the catalogue listing; the product page and photos are still being analysed."
+              : "Partly analysed; the rest is queued."}
+          </p>
+        )}
       </Section>
+
+      {!!product.sizing_images?.length && (
+        <Section title="Size charts">
+          <p className="mb-3 text-xs text-muted-foreground">Found in the seller&apos;s gallery. Kept for sizing; never used to judge style.</p>
+          <div className="flex gap-2 overflow-x-auto" data-testid="sizing-images">
+            {product.sizing_images.map((img) =>
+              img.src ? (
+                <a key={img.id} href={img.src} target="_blank" rel="noreferrer" className="shrink-0">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img src={img.src} alt="Size chart" className="h-40 w-auto rounded-lg border bg-white object-contain" loading="lazy" />
+                </a>
+              ) : null,
+            )}
+          </div>
+        </Section>
+      )}
 
       <Section title="Buy / view">
         <LinkButtons product={product} />

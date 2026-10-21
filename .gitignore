@@ -15,3 +15,6 @@ frontend/tsconfig.tsbuildinfo
 .env
 .e2e-data/
 *.db
+
+# Benchmark photo dataset (downloaded separately, see backend/bench/README.md)
+backend/bench/data

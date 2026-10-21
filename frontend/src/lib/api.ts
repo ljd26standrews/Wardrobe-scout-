@@ -61,6 +61,15 @@ export type Evidence = {
   scope?: "seller";
 };
 
+export type ProductImage = {
+  id: number;
+  src: string | null;
+  remote_url: string | null;
+  status: string;
+  role?: string | null;
+  selected?: boolean;
+};
+
 export type Product = {
   id: number;
   title: string;
@@ -83,7 +92,11 @@ export type Product = {
   landed_cost: LandedCost | null;
   source_url: string | null;
   links: Record<string, string>;
-  images: { id: number; src: string | null; remote_url: string | null; status: string }[];
+  images: ProductImage[];
+  /** Size charts found in the gallery: shown for sizing, never used for visual taste. */
+  sizing_images?: ProductImage[];
+  /** discovered (catalogue listing only) · partial · analysed · deep */
+  analysis_state?: "discovered" | "partial" | "analysed" | "deep";
   status: string;
   data_origin: "scraped" | "manual" | "csv" | "json" | "bookmarklet" | "seed";
   completeness: "complete" | "partial" | "seed_unverified";
@@ -127,7 +140,7 @@ export type Seller = {
 export type Job = {
   id: number;
   kind: string;
-  status: "queued" | "running" | "succeeded" | "failed" | "partial";
+  status: "queued" | "running" | "succeeded" | "failed" | "partial" | "cancelled";
   params: Record<string, unknown>;
   progress: number;
   message: string | null;
@@ -136,6 +149,71 @@ export type Job = {
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
+  control?: "pause" | "cancel" | null;
+  stats?: ScanStats | null;
+};
+
+export type ScanSellerProgress = {
+  id: number;
+  name: string;
+  pages: number;
+  total_pages: number | null;
+  discovery_done: boolean;
+  catalogue_complete: boolean;
+  status: string | null;
+  discovered: number;
+  new: number;
+  changed: number;
+  unchanged: number;
+};
+
+export type ScanStats = {
+  stage: string;
+  discovered: number;
+  new: number;
+  changed: number;
+  unchanged_skipped: number;
+  details_fetched: number;
+  details_not_modified: number;
+  images_downloaded: number;
+  image_bytes: number;
+  images_reused: number;
+  size_charts_excluded: number;
+  text_graphics_excluded: number;
+  repeated_excluded: number;
+  products_analysed: number;
+  duplicates_found: number;
+  similar_found: number;
+  deep_analysed: number;
+  removed: number;
+  verified_present: number;
+  errors: number;
+  error_samples: string[];
+  elapsed_s?: number;
+  pending_details?: number;
+  pending_images?: number;
+  in_flight?: number;
+  requests?: number;
+  throughput_per_min?: number;
+  eta_seconds?: [number, number] | null;
+  discovery_complete?: boolean;
+  sellers?: ScanSellerProgress[];
+};
+
+export type ScanStatus = {
+  active: Job[];
+  last: Job | null;
+  pending_analysis: number;
+  sellers: {
+    id: number;
+    name: string;
+    products: number;
+    states: { discovered: number; partial: number; analysed: number; deep: number };
+    last_scan_at: string | null;
+    last_status: string | null;
+    catalogue_complete: boolean | null;
+    pages: number | null;
+  }[];
 };
 
 export type Comparison = {

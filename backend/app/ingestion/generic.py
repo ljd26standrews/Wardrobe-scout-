@@ -164,6 +164,11 @@ class GenericPageAdapter(SellerAdapter):
         return parse_generic_product(r.text, str(r.url))
 
 
+def shopify_thumb(src: str, width: int = 640) -> str:
+    """Shopify's image CDN serves resized variants via the documented ``width`` query parameter."""
+    return f"{src}{'&' if '?' in src else '?'}width={width}"
+
+
 def shopify_product_to_listing(p: dict, base_url: str) -> RawListing:
     handle = p.get("handle", "")
     url = urljoin(base_url, f"/products/{handle}")
@@ -180,6 +185,7 @@ def shopify_product_to_listing(p: dict, base_url: str) -> RawListing:
         title=normalise_space(p.get("title")),
         description=normalise_space(body) or None,
         image_urls=[i["src"] for i in p.get("images") or [] if i.get("src")],
+        image_thumbs=[shopify_thumb(i["src"]) for i in p.get("images") or [] if i.get("src")],
         image_referer=url,
         price=min(prices) if prices else None,
         currency="",  # Shopify feed has no currency; caller sets from seller config
@@ -214,7 +220,17 @@ class ShopifyAdapter(SellerAdapter):
             for p in products:
                 listing = shopify_product_to_listing(p, base_url)
                 self._cache[listing.external_id] = listing
-                yield AlbumRef(external_id=listing.external_id, url=listing.source_url, title=listing.title)
+                yield AlbumRef(
+                    external_id=listing.external_id,
+                    url=listing.source_url,
+                    title=listing.title,
+                    cover_url=listing.image_urls[0] if listing.image_urls else None,
+                    cover_thumb=listing.image_thumbs[0] if listing.image_thumbs else None,
+                )
+
+    def cached_listing(self, ref: AlbumRef) -> RawListing | None:
+        """The catalogue feed already contained the full product: no product-page request needed."""
+        return getattr(self, "_cache", {}).get(ref.external_id)
 
     def fetch_listing(self, ref_or_url: AlbumRef | str) -> RawListing:
         if isinstance(ref_or_url, AlbumRef) and ref_or_url.external_id in getattr(self, "_cache", {}):

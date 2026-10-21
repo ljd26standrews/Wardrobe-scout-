@@ -141,7 +141,7 @@ DEFAULTS: dict[str, Any] = {
         "enabled": True,
         "check_every_minutes": 60,
         "default_interval_hours": 24,
-        "max_products_per_scan": 300,
+        "max_products_per_scan": 5000,  # products fully analysed per scan; the rest stay browsable and continue next scan
     },
     "community": {
         "reddit_enabled": False,

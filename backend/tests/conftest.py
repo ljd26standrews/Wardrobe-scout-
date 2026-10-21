@@ -24,6 +24,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("WS_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("WS_DATABASE_URL", f"sqlite:///{tmp_path / 'test.db'}")
     monkeypatch.setenv("WS_ENABLE_SCHEDULER", "false")
+    monkeypatch.setenv("WS_DEEP_ON_FEEDBACK", "false")
     monkeypatch.setenv("WS_REQUEST_DELAY_SECONDS", "0")
     monkeypatch.setenv("WS_EMBEDDING_BACKEND", "lite")
     monkeypatch.setenv("WS_API_TOKEN", API_TOKEN)

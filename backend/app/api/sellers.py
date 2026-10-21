@@ -6,9 +6,11 @@ import csv
 import io
 import json
 import uuid
+from typing import Literal
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import PlainTextResponse
+from pydantic import BaseModel
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -453,6 +455,8 @@ def _job_view(j: Job) -> dict:
         "created_at": j.created_at.isoformat(),
         "started_at": j.started_at.isoformat() if j.started_at else None,
         "finished_at": j.finished_at.isoformat() if j.finished_at else None,
+        "control": j.control,
+        "stats": j.stats,
     }
 
 
@@ -467,6 +471,81 @@ def get_job(job_id: int, db: Session = Depends(get_db)):
     if j is None:
         raise HTTPException(404, "job not found")
     return _job_view(j)
+
+
+class JobControlIn(BaseModel):
+    action: Literal["pause", "resume", "cancel"]
+
+
+@router.post("/jobs/{job_id}/control")
+def control_job(job_id: int, body: JobControlIn):
+    try:
+        return jobs.set_control(job_id, body.action)
+    except KeyError:
+        raise HTTPException(404, "job not found") from None
+
+
+@router.post("/jobs/{job_id}/retry")
+def retry_job(job_id: int):
+    try:
+        return {"job_id": jobs.retry(job_id)}
+    except KeyError:
+        raise HTTPException(404, "job not found") from None
+
+
+@router.post("/scan/continue")
+def continue_analysis():
+    """Analyse products a cancelled, interrupted or capped scan left discovered / partly analysed."""
+    return {"job_id": jobs.enqueue("analyse_pending")}
+
+
+@router.get("/scan/status")
+def scan_status(db: Session = Depends(get_db)):
+    """Everything the scan panel needs, from the server (survives page reloads and closed tabs)."""
+    active = (
+        db.query(Job)
+        .filter(Job.kind.in_(jobs.SCAN_KINDS | {"reanalyse"}), Job.status.in_(["queued", "running"]))
+        .order_by(Job.created_at.desc())
+        .all()
+    )
+    last = (
+        db.query(Job)
+        .filter(Job.kind.in_(jobs.SCAN_KINDS), Job.status.notin_(["queued", "running"]))
+        .order_by(Job.created_at.desc())
+        .first()
+    )
+    counts = (
+        db.query(Product.seller_id, Product.analysis_state, func.count(Product.id))
+        .filter(Product.status == "active", Product.seller_id.isnot(None))
+        .group_by(Product.seller_id, Product.analysis_state)
+        .all()
+    )
+    coverage: dict[int, dict] = {}
+    for sid, state, n in counts:
+        coverage.setdefault(sid, {"discovered": 0, "partial": 0, "analysed": 0, "deep": 0})[state] = n
+    sellers = []
+    for s in db.query(Seller).order_by(Seller.priority, Seller.name):
+        run = db.query(ScanRun).filter(ScanRun.seller_id == s.id).order_by(ScanRun.started_at.desc()).first()
+        cov = coverage.get(s.id, {"discovered": 0, "partial": 0, "analysed": 0, "deep": 0})
+        sellers.append(
+            {
+                "id": s.id,
+                "name": s.name,
+                "products": sum(cov.values()),
+                "states": cov,
+                "last_scan_at": s.last_scan_at.isoformat() if s.last_scan_at else None,
+                "last_status": s.last_scan_status,
+                "catalogue_complete": run.discovery_complete if run else None,
+                "pages": (run.stats or {}).get("pages") if run else None,
+            }
+        )
+    pending = sum(c["discovered"] + c["partial"] for c in coverage.values())
+    return {
+        "active": [_job_view(j) for j in active],
+        "last": _job_view(last) if last else None,
+        "sellers": sellers,
+        "pending_analysis": pending,
+    }
 
 
 # ------------------------------------------------------------------ research

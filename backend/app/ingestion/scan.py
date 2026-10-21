@@ -4,16 +4,14 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
-from datetime import timedelta
 from urllib.parse import urlparse
 
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
 from ..logging_setup import get_logger
-from ..models import Product, ScanRun, Seller, WatchedUrl, utcnow
+from ..models import ScanRun, Seller, WatchedUrl, utcnow
 from ..services import ai, dedup
-from ..services.settings_store import get_setting
 from .base import RawListing, SellerAdapter
 from .generic import GenericPageAdapter, ShopifyAdapter, WeidianAdapter, parse_generic_product, parse_weidian_html
 from .http import BlockedError, FetchError, PoliteClient
@@ -31,10 +29,9 @@ ADAPTERS: dict[str, type[SellerAdapter]] = {
 
 Progress = Callable[[str, float | None], None]
 
-BLOCKED_HELP = (
-    "The site restricted automated access ({reason}). Nothing was bypassed. Use the bookmarklet while "
-    "browsing the catalogue yourself, paste individual links, or import a CSV/JSON export."
-)
+from .scanner import BLOCKED_HELP, drain_pending, scan_many  # noqa: E402
+
+__all__ = ["ADAPTERS", "drain_pending", "import_html", "import_url", "scan_many", "scan_seller"]
 
 
 def adapter_for_url(url: str) -> type[SellerAdapter]:
@@ -160,112 +157,10 @@ def scan_seller(
     job_id: int | None = None,
     max_products: int | None = None,
 ) -> ScanRun:
-    """Traverse a seller catalogue. Incremental mode stops after a run of already-known albums."""
-    s = get_settings()
-    sched = get_setting(db, "schedule")
-    max_products = max_products or sched.get("max_products_per_scan", 300)
-    run = ScanRun(seller_id=seller.id, job_id=job_id, status="running")
-    db.add(run)
-    db.commit()
-    adapter_cls = ADAPTERS.get(seller.platform)
-    if adapter_cls is None or not seller.base_url:
-        run.status, run.message = "failed", f"No automatic adapter for platform '{seller.platform}'. Use manual import."
-        run.finished_at = utcnow()
-        seller.last_scan_at, seller.last_scan_status, seller.last_scan_message = utcnow(), run.status, run.message
-        db.commit()
-        return run
-
-    own = client is None
-    client = client or PoliteClient()
-    adapter = adapter_cls(client)
-    known = {
-        ext: (pid, title, last)
-        for pid, ext, title, last in db.query(
-            Product.id, Product.external_id, Product.title_original, Product.last_seen_at
-        ).filter(Product.seller_id == seller.id)
-    }
-    seen_ids: set[str] = set()
-    consecutive_known = 0
-    refresh_after = timedelta(days=7)
-    completed_traversal = False
-
-    def say(msg: str, frac: float | None = None) -> None:
-        if progress:
-            progress(f"{seller.name}: {msg}", frac)
-
-    try:
-        for ref in adapter.iter_album_refs(seller.base_url, s.max_pages_per_scan, progress=lambda m: say(m)):
-            run.pages_fetched = client.requests_made
-            seen_ids.add(ref.external_id)
-            run.products_seen += 1
-            k = known.get(ref.external_id)
-            if k is not None:
-                pid, old_title, last_seen = k
-                title_same = ref.title is None or (old_title or "").strip() == (ref.title or "").strip()
-                if mode == "incremental" and title_same and last_seen and utcnow() - last_seen < refresh_after:
-                    db.query(Product).filter(Product.id == pid).update(
-                        {Product.last_seen_at: utcnow(), Product.status: "active"}
-                    )
-                    consecutive_known += 1
-                    if consecutive_known >= 40:
-                        say("reached previously-scanned albums; stopping incremental scan")
-                        break
-                    continue
-            consecutive_known = 0
-            try:
-                raw = adapter.fetch_listing(ref)
-                res = _ingest_one(db, seller, raw, client)
-                if res.created:
-                    run.products_new += 1
-                elif res.changes:
-                    run.products_updated += 1
-                db.commit()
-            except BlockedError:
-                raise
-            except FetchError as e:
-                db.rollback()
-                run.errors = (run.errors or []) + [f"{ref.url}: {e}"][:1]
-                if len(run.errors) > 25:
-                    raise FetchError("too many product-page errors; stopping") from e
-            say(f"{run.products_seen} seen · {run.products_new} new · {run.products_updated} updated")
-            if run.products_new + run.products_updated >= max_products:
-                say(f"reached per-scan limit of {max_products} new/updated products")
-                break
-        else:
-            completed_traversal = True
-
-        # Products not seen in a complete full traversal are marked unavailable (never deleted).
-        # "Complete" requires the adapter to confirm pagination ended - a page limit is not the end.
-        exhausted = completed_traversal and getattr(adapter, "exhausted", False)
-        if mode == "full" and completed_traversal and not exhausted:
-            say("page limit reached before the end of the catalogue; removals were not checked")
-        if mode == "full" and exhausted and seen_ids:
-            for p in db.query(Product).filter(
-                Product.seller_id == seller.id, Product.status == "active", Product.data_origin == "scraped"
-            ):
-                if p.external_id not in seen_ids:
-                    p.status = "unavailable"
-        run.status = "partial" if run.errors else "succeeded"
-        run.message = f"{run.products_seen} albums seen, {run.products_new} new, {run.products_updated} updated"
-    except BlockedError as e:
-        db.rollback()
-        run.status, run.message = "blocked", BLOCKED_HELP.format(reason=str(e))
-    except ParserError as e:
-        db.rollback()
-        run.status, run.message = "failed", f"Page layout not recognised — the parser may need updating. {e}"
-    except FetchError as e:
-        db.rollback()
-        run.status, run.message = "failed", str(e)
-    finally:
-        if own:
-            client.close()
-    run.finished_at = utcnow()
-    run.pages_fetched = client.requests_made
-    seller.last_scan_at, seller.last_scan_status, seller.last_scan_message = utcnow(), run.status, run.message
-    dedup.recompute_groups(db)
-    db.commit()
-    log.info("scan_finished", seller=seller.slug, status=run.status, new=run.products_new, seen=run.products_seen)
-    return run
+    """Scan one seller's catalogue (see ``scanner`` for the staged design)."""
+    return scan_many(
+        db, [seller], mode=mode, progress=progress, client=client, job_id=job_id, max_products=max_products
+    )[0]
 
 
 def check_watched_urls(db: Session, progress: Progress | None = None) -> dict:

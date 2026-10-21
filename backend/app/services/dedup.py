@@ -12,6 +12,9 @@ Relation types (strongest first) - the UI keeps these clearly distinct:
 * ``visually_similar``      embeddings + text are close; may be a different product of a similar design.
 * ``not_same``              you rejected a suggested match (never re-suggested).
 
+Only garment photographs take part in photo matching: size charts, text graphics and banners a seller
+reuses across listings (``image_select`` roles) would otherwise make unrelated products look identical.
+
 Per-photo thresholds were chosen on a synthetic benchmark (audit, Oct 2026): ``phash <= 10`` and lite
 cosine ``>= 0.97`` cut false photo matches by ~85% versus the old ``<= 6 / 0.90`` rule while finding more
 re-posted photos (crop/resize/watermark/recompression). They should be re-tuned on real labelled pairs.
@@ -30,6 +33,7 @@ from sqlalchemy.orm import Session
 from ..ingestion.parsing import weidian_item_id
 from ..models import Product, ProductImage, ProductRelation
 from . import embeddings as emb
+from .image_select import NON_AESTHETIC_ROLES
 
 PHASH_MAX_DISTANCE = 10
 # Perceptual hashes ignore colour, so the same silhouette in another colourway collides.
@@ -84,14 +88,69 @@ class PhashIndex:
         return out
 
 
+def matchable(img: ProductImage) -> bool:
+    return bool(img.phash) and img.role not in NON_AESTHETIC_ROLES
+
+
 def build_phash_index(db: Session) -> PhashIndex:
     idx = PhashIndex()
     rows = db.query(ProductImage.product_id, ProductImage.phash, ProductImage.id, ProductImage.embedding).filter(
-        ProductImage.phash.isnot(None)
+        ProductImage.phash.isnot(None),
+        or_(ProductImage.role.is_(None), ProductImage.role.notin_(NON_AESTHETIC_ROLES)),
     )
     for pid, h, image_id, vec in rows:
         idx.add(pid, h, image_id, emb.from_bytes(vec))
     return idx
+
+
+class GrowingMatrix:
+    """Product embedding matrix that grows in place (amortised O(1) appends) and supports updates."""
+
+    def __init__(self, mat: np.ndarray, ids: list[int]) -> None:
+        dim = mat.shape[1] if len(ids) else 0
+        self._buf = np.zeros((max(64, 2 * len(ids)), dim), dtype=np.float32)
+        self._buf[: len(ids)] = mat if len(ids) else self._buf[:0]
+        self.ids = list(ids)
+        self.pos = {pid: i for i, pid in enumerate(ids)}
+
+    def upsert(self, pid: int, v: np.ndarray) -> None:
+        if self._buf.shape[1] == 0:
+            self._buf = np.zeros((64, len(v)), dtype=np.float32)
+        if pid in self.pos:
+            self._buf[self.pos[pid]] = v
+            return
+        if len(self.ids) == len(self._buf):
+            self._buf = np.vstack([self._buf, np.zeros_like(self._buf)])
+        self.pos[pid] = len(self.ids)
+        self._buf[len(self.ids)] = v
+        self.ids.append(pid)
+
+    def view(self) -> tuple[np.ndarray, list[int]]:
+        return self._buf[: len(self.ids)], self.ids
+
+
+class MatchContext:
+    """Indexes built once per scan and extended as products are analysed (instead of once per product)."""
+
+    def __init__(self, db: Session) -> None:
+        self.idx = build_phash_index(db)
+        self.matrices: dict[str | None, GrowingMatrix] = {}
+        self.db = db
+
+    def matrix(self, backend: str | None) -> GrowingMatrix:
+        if backend not in self.matrices:
+            self.matrices[backend] = GrowingMatrix(*embedding_matrix(self.db, backend))
+        return self.matrices[backend]
+
+    def match(self, p: Product) -> int:
+        m = self.matrix(p.embedding_backend)
+        n = match_product(self.db, p, phash_index=self.idx, matrix=m.view())
+        for img in p.images:
+            if matchable(img):
+                self.idx.add(p.id, img.phash, img.id, emb.from_bytes(img.embedding))
+        if p.image_embedding is not None:
+            m.upsert(p.id, emb.from_bytes(p.image_embedding))
+        return n
 
 
 _STRIP = re.compile(r"[\[【(（].*?[\]】)）]|[¥￥]\s*\d+|\bp\d+\b|\d{3,}|#\w+", re.I)
@@ -146,7 +205,7 @@ def match_product(
     # For each other product: which of MY photos matched which of THEIR photos
     pairs: dict[int, list[tuple[int, int, int]]] = defaultdict(list)
     for img in p.images:
-        if img.phash:
+        if matchable(img):
             for pid, matches in idx.query(img.phash, vector=emb.from_bytes(img.embedding), min_cos=min_cos).items():
                 if pid != p.id:
                     pairs[pid].extend((d, img.id, other_img) for d, other_img in matches)
@@ -229,14 +288,14 @@ def recompute_groups(db: Session) -> int:
         ra, rb = find(rel.a_id), find(rel.b_id)
         if ra != rb:
             parent[max(ra, rb)] = min(ra, rb)
-    db.query(Product).update({Product.group_id: None})
-    groups = 0
-    for pid in list(parent):
-        root = find(pid)
-        db.query(Product).filter(Product.id == pid).update({Product.group_id: root})
-    groups = len({find(x) for x in parent})
+    want = {pid: find(pid) for pid in parent}
+    have = dict(db.query(Product.id, Product.group_id).filter(Product.group_id.isnot(None)))
+    changes = [{"id": pid, "group_id": g} for pid, g in want.items() if have.get(pid) != g]
+    changes += [{"id": pid, "group_id": None} for pid in have if pid not in want]
+    if changes:  # write only rows whose group changed
+        db.bulk_update_mappings(Product, changes)
     db.flush()
-    return groups
+    return len(set(want.values()))
 
 
 def match_all(db: Session) -> dict:

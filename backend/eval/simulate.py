@@ -163,7 +163,7 @@ def run(persona: str, method: str, seed: int, rounds: int = 8, k: int = 10) -> d
     tmp = tempfile.mkdtemp(prefix="wseval")
     os.environ.update(
         WS_DATA_DIR=tmp, WS_DATABASE_URL=f"sqlite:///{tmp}/e.db", WS_ENABLE_SCHEDULER="false",
-        WS_EMBEDDING_BACKEND="lite", WS_DOWNLOAD_IMAGES="false", WS_API_TOKEN="eval",
+        WS_EMBEDDING_BACKEND="lite", WS_DOWNLOAD_IMAGES="false", WS_API_TOKEN="eval", WS_DEEP_ON_FEEDBACK="false",
     )  # fmt: skip
     from app.config import get_settings
 

@@ -1,8 +1,13 @@
 """Polite HTTP fetching for permitted public pages.
 
 * Honours robots.txt (configurable, on by default).
-* Enforces a minimum delay between requests to the same host.
+* Enforces a minimum delay between requests to the same host, with at most one request in flight per
+  host. Different hosts (a seller's catalogue, the image CDN) proceed in parallel: a request only
+  ever waits for its own host.
+* Adapts: a host that answers 5xx, times out or slows down gets a longer delay (never shorter than the
+  configured minimum), relaxing again gradually once it recovers.
 * Retries only transient failures (timeouts, 5xx) with exponential backoff.
+* Supports conditional requests (ETag / Last-Modified) so unchanged pages cost no body transfer.
 * Detects blocks (401/403/429, CAPTCHA / verification pages) and raises
   `BlockedError` instead of retrying. We never attempt to bypass these.
 """
@@ -90,17 +95,39 @@ def assert_public_url(url: str) -> None:
 _SCRIPT = re.compile(r"<(script|style)\b.*?</\1>", re.S | re.I)
 
 
+class _Host:
+    """Per-host politeness state."""
+
+    __slots__ = ("next_at", "delay", "gate", "requests", "bytes", "errors", "slow")
+
+    def __init__(self, delay: float) -> None:
+        self.next_at = 0.0
+        self.delay = delay
+        self.gate = threading.Semaphore(1)  # one request in flight per host
+        self.requests = 0
+        self.bytes = 0
+        self.errors = 0
+        self.slow = 0
+
+
 class PoliteClient:
+    MAX_DELAY = 30.0
+
     def __init__(
         self,
         *,
         delay: float | None = None,
+        image_delay: float | None = None,
         respect_robots: bool | None = None,
         transport: httpx.BaseTransport | None = None,
         user_agent: str | None = None,
     ) -> None:
         s = get_settings()
         self.delay = s.request_delay_seconds if delay is None else delay
+        configured_image = getattr(s, "image_request_delay_seconds", None)
+        self.image_delay = (
+            image_delay if image_delay is not None else (self.delay if configured_image is None else configured_image)
+        )
         self.respect_robots = s.respect_robots_txt if respect_robots is None else respect_robots
         self.user_agent = user_agent or s.user_agent
         self.max_bytes = s.max_download_bytes
@@ -115,10 +142,26 @@ class PoliteClient:
                 "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
             },
         )
-        self._last_request: dict[str, float] = {}
+        self._hosts: dict[str, _Host] = {}
         self._robots: dict[str, RobotFileParser | None] = {}
+        self._robots_locks: dict[str, threading.Lock] = {}
         self._lock = threading.Lock()
         self.requests_made = 0
+        self.bytes_received = 0
+
+    def host_state(self, host: str, binary: bool = False) -> _Host:
+        with self._lock:
+            h = self._hosts.get(host)
+            if h is None:
+                h = self._hosts[host] = _Host(self.image_delay if binary else self.delay)
+            return h
+
+    def stats(self) -> dict[str, dict]:
+        with self._lock:
+            return {
+                k: {"requests": h.requests, "bytes": h.bytes, "delay": round(h.delay, 2), "errors": h.errors}
+                for k, h in self._hosts.items()
+            }
 
     # ------------------------------------------------------------------ robots
     def _robots_for(self, url: str) -> RobotFileParser | None:
@@ -126,11 +169,21 @@ class PoliteClient:
         origin = f"{p.scheme}://{p.netloc}"
         if origin in self._robots:
             return self._robots[origin]
+        with self._lock:
+            olock = self._robots_locks.setdefault(origin, threading.Lock())
+        with olock:  # concurrent first requests to a host fetch robots.txt once
+            if origin in self._robots:
+                return self._robots[origin]
+            return self._fetch_robots(origin, p.netloc)
+
+    def _fetch_robots(self, origin: str, netloc: str) -> RobotFileParser | None:
         rp: RobotFileParser | None = RobotFileParser()
+        h = self.host_state(netloc)
         try:
-            self._throttle(p.netloc)
-            r = self._client.get(origin + "/robots.txt")
-            self.requests_made += 1
+            with h.gate:
+                self._throttle(netloc)
+                r = self._client.get(origin + "/robots.txt")
+            self._count(h, len(r.content))
             if r.status_code == 200 and "text" in r.headers.get("content-type", "text"):
                 rp.parse(r.text.splitlines())
             elif r.status_code in (401, 403):
@@ -152,30 +205,74 @@ class PoliteClient:
 
     # ---------------------------------------------------------------- throttle
     def _throttle(self, host: str) -> None:
+        """Wait for this host's next slot. The lock is held only to book the slot, never while sleeping."""
+        h = self.host_state(host)
         with self._lock:
-            last = self._last_request.get(host)
             now = time.monotonic()
-            if last is not None and now - last < self.delay:
-                time.sleep(self.delay - (now - last))
-            self._last_request[host] = time.monotonic()
+            start = max(now, h.next_at)
+            h.next_at = start + h.delay
+        if start > now:
+            time.sleep(start - now)
+
+    def _count(self, h: _Host, nbytes: int) -> None:
+        with self._lock:
+            h.requests += 1
+            h.bytes += nbytes
+            self.requests_made += 1
+            self.bytes_received += nbytes
+
+    def _adapt(self, h: _Host, *, failed: bool, elapsed: float, base: float) -> None:
+        """Back off on errors or slow answers; relax gradually back towards the configured minimum."""
+        with self._lock:
+            if failed:
+                h.errors += 1
+                h.delay = min(self.MAX_DELAY, max(h.delay, base, 0.5) * 2)
+            elif elapsed > max(5.0, 4 * base):
+                h.slow += 1
+                h.delay = min(self.MAX_DELAY, max(h.delay, elapsed / 2))
+            elif h.delay > base:
+                h.delay = max(base, h.delay * 0.9)
 
     # ------------------------------------------------------------------- fetch
     def get(
-        self, url: str, *, referer: str | None = None, binary: bool = False, check_robots: bool = True, retries: int = 2
+        self,
+        url: str,
+        *,
+        referer: str | None = None,
+        binary: bool = False,
+        check_robots: bool = True,
+        retries: int = 2,
+        etag: str | None = None,
+        last_modified: str | None = None,
     ) -> httpx.Response:
+        """GET with politeness. With ``etag``/``last_modified`` an unchanged resource returns status 304."""
         if check_robots and not self.allowed(url):
             raise BlockedError(f"robots.txt disallows {url}")
         host = urlparse(url).netloc
+        h = self.host_state(host, binary)
+        base = self.image_delay if binary else self.delay
         headers = {"Referer": referer} if referer else {}
+        if etag:
+            headers["If-None-Match"] = etag
+        if last_modified:
+            headers["If-Modified-Since"] = last_modified
         attempt = 0
         while True:
-            self._throttle(host)
-            try:
-                r = self._bounded_get(url, headers)
-                self.requests_made += 1
-            except (httpx.TimeoutException, httpx.TransportError) as e:
+            with h.gate:
+                self._throttle(host)
+                t0 = time.monotonic()
+                try:
+                    r = self._bounded_get(url, headers)
+                except (httpx.TimeoutException, httpx.TransportError) as e:
+                    self._adapt(h, failed=True, elapsed=time.monotonic() - t0, base=base)
+                    err: Exception | None = e
+                else:
+                    err = None
+                    self._count(h, len(r.content))
+                    self._adapt(h, failed=r.status_code >= 500, elapsed=time.monotonic() - t0, base=base)
+            if err is not None:
                 if attempt >= retries:
-                    raise FetchError(f"network error for {url}: {e}") from e
+                    raise FetchError(f"network error for {url}: {err}") from err
                 attempt += 1
                 time.sleep(2**attempt)
                 continue
@@ -187,6 +284,8 @@ class PoliteClient:
                 attempt += 1
                 time.sleep(2**attempt)
                 continue
+            if r.status_code == 304:
+                return r
             if r.status_code >= 400:
                 raise FetchError(f"HTTP {r.status_code} for {url}")
             if not binary:

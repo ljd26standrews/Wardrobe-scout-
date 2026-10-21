@@ -14,11 +14,12 @@ from sqlalchemy.orm import Session
 from ..config import get_settings
 from ..db import get_db
 from ..ingestion.http import PoliteClient
+from ..ingestion.pipeline import apply_analysis, fetch_and_analyse
 from ..models import Feedback, Job, Product, ProductImage, SavedItem, Seller, WardrobeItem, utcnow
 from ..services import ai, jobs
 from ..services import embeddings as emb
 from ..services.backup import export_all, import_all
-from ..services.images import ImageError, download_image, phash_of
+from ..services.images import ImageError
 from ..services.presenter import Context, product_card
 from ..services.recommender import build_profile, describe_profile, rank_products
 from ..services.settings_store import DEFAULTS, all_settings, get_setting, set_setting
@@ -173,11 +174,13 @@ def image(image_id: int, db: Session = Depends(get_db)):
     if img is None:
         raise HTTPException(404, "image not found")
     if img.local_path is None and img.fetch_status != "uploaded" and get_settings().download_images:
-        # On-demand fetch (same politeness rules as scans)
+        # On-demand fetch of a photo the scan did not need (display size), analysed on arrival so a size
+        # chart moves to the sizing section.
         try:
             with PoliteClient(delay=0.5) as client:
-                rel, pil = download_image(client, img.url, img.referer)
-            img.local_path, img.fetch_status, img.phash = rel, "ok", phash_of(pil)
+                a = fetch_and_analyse(client, img.thumb_url or img.url, img.referer, fallback=img.url)
+            apply_analysis(img, a)
+            img.selected = img.selected or False
             db.commit()
         except ImageError as e:
             img.fetch_status, img.fetch_error = "failed", str(e)[:300]

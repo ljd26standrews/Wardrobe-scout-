@@ -30,11 +30,22 @@ class Settings(BaseSettings):
     # HTTP / ingestion politeness
     user_agent: str = "Mozilla/5.0 (compatible; WardrobeScout/1.0; personal catalogue reader; +local)"
     request_delay_seconds: float = 2.0  # minimum delay between requests to the same host
+    # Minimum delay between requests to an image host (CDN). Unset = same as request_delay_seconds.
+    image_request_delay_seconds: float | None = None
     request_timeout_seconds: float = 25.0
-    max_pages_per_scan: int = 40
+    # Catalogue listing pages are cheap (one request per ~40 products), so a scan reads the whole listing.
+    max_pages_per_scan: int = 250
     respect_robots_txt: bool = True
     download_images: bool = True
-    max_images_per_product: int = 12
+    max_images_per_product: int = 12  # upper bound for imports and deep analysis
+    # Progressive photo analysis (see services/image_select.py and bench/ablate_selection.py):
+    # photos are fetched in gallery order until `analysis_images` useful, non-redundant views are found
+    # (size charts, text graphics and repeated banners are skipped) or `max_examine_images` were fetched.
+    analysis_images: int = 1
+    max_examine_images: int = 6
+    deep_images: int = 8  # photos fetched for products that get deep analysis (duplicate checks, your saves)
+    refresh_days: int = 14  # re-read an unchanged product page after this long (spread across scans)
+    deep_on_feedback: bool = True  # loving/saving a scanned product fetches its full gallery for comparisons
 
     # Optional components
     enable_scheduler: bool = True

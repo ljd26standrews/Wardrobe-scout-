@@ -63,6 +63,7 @@ async def lifespan(app: FastAPI):
     bootstrap()
     _recompute_if_backend_changed()
     if s.enable_scheduler:
+        jobs.enqueue_upgrade_jobs()
         jobs.start_scheduler()
     yield
     jobs.stop_scheduler()
