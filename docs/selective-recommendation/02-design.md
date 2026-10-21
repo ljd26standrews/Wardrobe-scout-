@@ -1,0 +1,133 @@
+# Selective recommendation: design and plan
+
+## 1. Labels and target
+
+- **Target quantity:** `P(Y = 1 | you, item, features, item shown and explicitly rated)`.
+- **Y = 1:** love, like (save) or purchased.
+- **Y = 0:** dislike, for any reason, and "maybe". A maybe is not an approval, so the metric is conservative.
+- **No label:**
+  - skips, and items displayed but not rated;
+  - items never shown. The taste model's "typical items" background sample is a modelling device, never counted as a rejection in any metric.
+  - decisions you undid. Undo deletes the row, so none remain.
+- **Families:** one label per garment family, taken from the latest decision on any of its listings. Photos of one garment are never independent evidence.
+- **Representative labels:** the Evaluate page's uniform, blinded taste grades, where grade ≥ 2 counts as approval. These are used for evaluation, never for training.
+
+## 2. Approaches considered
+
+| Approach | Strengths | Weaknesses | Data needed | Cost |
+|---|---|---|---|---|
+| Platt or isotonic on the current feed score | Trivial | The feed score mixes taste, quality, value and seller on different scales; isotonic overfits small samples | Isotonic: hundreds of labels | Negligible |
+| **Bayesian posterior predictive + cross-fitted Bayesian Platt on the taste logit** | Reuses the current model; per-item uncertainty from the posterior; calibration uncertainty from a 2-parameter posterior; honest when data is scarce | Laplace is an approximation; Platt assumes a monotone, roughly logistic miscalibration | ~30 rated garments to start; improves continuously | One d×d inverse per data change; K refits per recalibration |
+| Separate approval model on explicit outcomes only (many features) | Models price and redundancy objections directly | Too many parameters for the first hundred labels; unstable | Hundreds of labels | Low |
+| Bootstrap ensemble of the logistic model | Captures some misspecification | B refits per change; variance is unstable with small samples | Same as the chosen approach | B× fit cost |
+| Gradient-boosted trees | Interactions for free | One user rarely reaches the thousands of labels needed; poorly calibrated without a large holdout | Thousands | Moderate |
+| Conformal or guaranteed-risk thresholds | Distribution-free risk bound | Needs exchangeable calibration data, which the exposure-biased Discover logs are not (the uniform Evaluate grades are) | A held-out split | Negligible |
+
+**Chosen:** the Bayesian posterior predictive with cross-fitted Bayesian Platt calibration, gated per item on a conservative bound. Guaranteed-risk thresholds are used in **evaluation**, on the uniform grades, to check and suggest thresholds. Nothing heavier is justified until real labels show the simple model is inadequate.
+
+## 3. Architecture (stages A–F)
+
+### A. Candidates
+
+Unchanged: `feed_candidates` and `collapse_families`.
+
+### B. Eligibility
+
+Every decision is recorded with its reason.
+
+- **All modes:**
+  - existing rules (active, undecided, family, skip window, not seed);
+  - near-duplicates of rejected items are withheld;
+  - garments with **known** poor quality (independent evidence scoring below 40) are withheld. Unknown quality stays unknown and is never treated as poor.
+- **High and Extremely selective additionally require:**
+  - an analysed garment photo;
+  - not a seller with recorded concerns;
+  - not above your learned "too expensive" ceiling for the category, unless quality evidence supports the price;
+  - not a category you have repeatedly said you already own.
+- **Optional:** require independent quality evidence.
+
+### C. Compatibility
+
+Existing Bayesian logistic taste model, with three changes:
+
+- full-covariance Laplace posterior;
+- a logo rejection teaches about logos only, not the brand;
+- three new optional reasons: "not my style" (taste), "wrong category" (data error, teaches nothing) and "too repetitive" (no taste learning; feeds diversity).
+
+The model produces `m_i` (mean logit = raw compatibility) and `s_i` (posterior sd of the logit).
+
+### D. Calibration
+
+1. Out-of-fold logits for every rated garment family: K = 5 folds grouped by family; each fold's taste model is fitted without that fold's decisions.
+2. Bayesian Platt fit on the out-of-fold logits: `u = a·m + b`, with priors `a ~ N(1, 0.5²)`, `b ~ N(0, 1²)`, giving a Laplace posterior over `(a, b)`.
+3. Estimates for each item:
+
+   | Name | Formula | Meaning |
+   |---|---|---|
+   | Approval estimate | `p̂_i = σ(â·m_i + b̂)` | Calibrated estimate of approval |
+   | Conservative bound | `p_low_i(γ) = σ(â·m_i + b̂ − z_γ·σ_u)` | Lower bound at confidence γ |
+   | Bound spread | `σ_u² = â²·s_i² + [m_i 1]·S_ab·[m_i 1]ᵀ` | Combines the model's uncertainty about this item with the calibration's own uncertainty |
+
+**Sufficiency:** calibration is used only with at least 30 rated garment families, including at least 5 approvals and 5 rejections. All three numbers are configurable. Below that the status is *insufficient*, and no probability is shown anywhere.
+
+### E. Gate
+
+An item passes mode (t, γ) iff `p_low_i(γ) ≥ t`. Under the model, that means you are at least γ sure its approval probability is at least t.
+
+| Mode | t | γ | Below sufficiency (uncalibrated) |
+|---|---|---|---|
+| Balanced | 0.80 | 0.50 (the estimate itself) | The existing ranked feed, labelled "not yet calibrated"; clearly labelled exploration picks may appear |
+| High confidence | 0.90 | 0.80 | Empty, with what is needed |
+| Extremely selective | 0.95 | 0.90 | Empty, with what is needed |
+
+- **Targets are aspirations.** The 80/90/95% figures are targets for later validation, not achieved precision.
+- **Thresholds never drop.** The gate is never relaxed to fill the feed.
+- **Empty feeds explain themselves:** what qualified under other modes, and a link to Learning picks.
+
+### F. Ranking
+
+- **Order:** gated items by `p_low`.
+- **Diversity:** a greedy pass avoids more than two consecutive items from the same category or seller. It reorders only; membership never changes.
+- **Strict modes:** High and Extremely selective have no exploration slots.
+
+### Learning picks (separate, optional, labelled)
+
+- **Pool:** eligible items that did not pass the current mode, with `p̂ ≥ 0.35`.
+- **Weights:** `w_i = p̂_i² · s_i`, boosted for categories with few labels.
+- **Sampling:** Poisson sampling with inclusion probability `π_i = min(1, K·w_i/Σw)`. The probability is logged, so impressions from this feed support inverse-propensity estimates.
+- **Main feed:** deterministic. The log records it as propensity 1, so inverse-propensity estimates cannot be made for it, and none are claimed.
+
+### Updating
+
+- **Taste model:** refitted on every data change, with the posterior cached by data version.
+- **Calibration:** a background job, queued when at least 5 new rated families have arrived since the last fit (or none exists). Each fit is stored with its diagnostics.
+- **Rollback:** reactivate a previous calibration, or switch the gate off with the feature flag.
+- **Feed log:** every served feed records the policy, mode, calibration id, and each item's `m`, `p̂`, `p_low` and gate decision.
+
+## 4. Evaluation
+
+- **Script:** `eval/selective.py`, on real labels only.
+- **Logged protocol:** Discover decisions, in time order and family-disjoint. Rolling origin: fit and calibrate on earlier labels, predict the next block.
+  - Calibration: ECE, Brier score and reliability bins, each with counts.
+  - Precision–coverage curves for gating on raw, calibrated and conservative estimates.
+  - Per-mode precision with Clopper–Pearson intervals.
+  - Learning progression by training size.
+- **Representative protocol:** the uniform Evaluate grades as an untouched test set.
+  - Same metrics, plus an unbiased coverage estimate.
+  - Baseline: the current ranking's precision@K.
+  - Thresholds are suggested on a validation half and reported on the test half.
+- **Ablations:** calibration; uncertainty in the gate; family deduplication; reason masks; quality eligibility; personalised versus profile-only; interaction features.
+- **Refusals:** no metric is reported below its minimum sample size.
+- **Synthetic checks:** synthetic fixtures verify correctness only, for example that calibration recovers a known logistic and that intervals cover. The simulation shows gate behaviour and is labelled synthetic.
+- **Prospective trial (opt-in):** a daily switchback between the old and selective policies. The policy is logged; approval is compared with intervals.
+
+## 5. Milestones (each a reviewable commit, tests first)
+
+1. Labels and rated-outcome extraction (undo-, family- and maybe-aware); logo reason repair; new optional reasons.
+2. Full-covariance posterior, posterior cache, predictive `m`/`s`.
+3. Calibration service, `calibrations` table (additive migration), recalibration job, sufficiency, rollback.
+4. Gate service, `selective` settings, Stage B eligibility, ranking; feed, learning, insights and status endpoints; feed-log columns (additive migration).
+5. Frontend: mode selector, status, Learning picks tab, honest confidence display, empty states, gate-consistent Undo, observed performance.
+6. `eval/selective.py`, synthetic correctness fixtures, simulation of the modes, ablations.
+7. Interaction features (shrunk), kept only if the simulation shows no harm and an interaction persona benefits.
+8. Latency and memory benchmarks at 1k, 5k and 20k products; prospective-trial flag; documentation.
