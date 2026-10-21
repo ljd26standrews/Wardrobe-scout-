@@ -27,7 +27,7 @@ from bs4 import BeautifulSoup
 from ..logging_setup import get_logger
 from .base import AlbumRef, ListingPage, ProgressFn, RawListing, SellerAdapter
 from .http import FetchError
-from .parsing import extract_purchase_links, normalise_space, parse_price
+from .parsing import canonical_url, classify_link, extract_purchase_links, normalise_space, parse_price
 
 log = get_logger(__name__)
 
@@ -151,11 +151,10 @@ def parse_album_page(html: str, page_url: str) -> RawListing:
             br.replace_with("\n")
         description = "\n".join(normalise_space(x) for x in desc_el.get_text().splitlines() if x.strip())
         for a in desc_el.select("a[href]"):
-            href = a["href"]
-            if "weidian.com" in href:
-                links.setdefault("weidian", href)
-            elif "taobao.com" in href or "tmall.com" in href:
-                links.setdefault("taobao", href)
+            href = canonical_url(_abs(a["href"], page_url))
+            kind = classify_link(href) if href else None
+            if kind in ("weidian", "taobao"):
+                links.setdefault(kind, href)
     links.update({k: v for k, v in extract_purchase_links(description).items() if k not in links})
     links["yupoo"] = page_url
 

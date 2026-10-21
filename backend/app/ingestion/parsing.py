@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from urllib.parse import parse_qsl, unquote, urlparse
 
 from .vocab import (
     BRAND_ABBREVIATIONS,
@@ -45,6 +46,8 @@ def _alias_in(alias: str, low: str) -> bool:
 _PRICE_PATTERNS = [
     re.compile(r"[¥￥]\s*(\d{2,6}(?:\.\d{1,2})?)"),
     re.compile(r"(\d{2,6}(?:\.\d{1,2})?)\s*(?:元|rmb|cny|RMB|CNY)"),
+    # "(429￥)": ¥ directly after the number and not starting the next price ("8009¥919" is code + price)
+    re.compile(r"(?<![\d.])(\d{2,6}(?:\.\d{1,2})?)[¥￥](?!\s*\d)"),
     re.compile(r"(?:价格|售价|price|Price|PRICE)\s*[:：]?\s*[¥￥]?\s*(\d{2,6}(?:\.\d{1,2})?)"),
     re.compile(r"(?<![A-Za-z0-9])[PpＰ]\s?(\d{2,5})(?![0-9])"),  # Yupoo convention: "P399"
 ]
@@ -348,24 +351,73 @@ def infer_seasons(category: str | None, materials: list[dict], text: str | None 
 _URL = re.compile(r"https?://[^\s\"'<>，。）)]+")
 
 
+_MAX_UNWRAP = 3
+_MAX_URL = 2048
+
+
+def canonical_url(url: str | None) -> str | None:
+    """Resolve redirect wrappers (e.g. a catalogue's ``/external?url=<percent-encoded target>``) to the real
+    destination. Bounded: at most three nested wrappers and 2,048 characters; only http(s) targets."""
+    if not url:
+        return None
+    u = url.strip()[:_MAX_URL]
+    for _ in range(_MAX_UNWRAP):
+        target = None
+        for _k, v in parse_qsl(urlparse(u).query, keep_blank_values=False):
+            cand = v
+            for _ in range(_MAX_UNWRAP):  # tolerate double-encoding
+                if cand.lower().startswith(("http://", "https://")):
+                    break
+                cand = unquote(cand)
+            if cand.lower().startswith(("http://", "https://")):
+                target = cand[:_MAX_URL]
+                break
+        if target is None:
+            break
+        u = target
+    p = urlparse(u)
+    return u if p.scheme in ("http", "https") and p.hostname else None
+
+
+def _host_is(url: str, *domains: str) -> bool:
+    host = (urlparse(url).hostname or "").lower()
+    return any(host == d or host.endswith("." + d) for d in domains)
+
+
+def classify_link(url: str) -> str | None:
+    """Which purchase/catalogue site a (canonical) link points to - by its host, not by substring."""
+    if _host_is(url, "weidian.com"):
+        return "weidian"
+    if _host_is(url, "taobao.com", "tmall.com"):
+        return "taobao"
+    if _host_is(url, "yupoo.com"):
+        return "yupoo"
+    return None
+
+
 def extract_purchase_links(text: str | None) -> dict[str, str]:
     links: dict[str, str] = {}
     for url in _URL.findall(text or ""):
-        u = url.rstrip(".,;")
-        if "weidian.com" in u and "weidian" not in links:
-            links["weidian"] = u
-        elif ("taobao.com" in u or "tmall.com" in u) and "taobao" not in links:
-            links["taobao"] = u
-        elif "yupoo.com" in u and "yupoo" not in links:
-            links["yupoo"] = u
+        u = canonical_url(url.rstrip(".,;"))
+        kind = classify_link(u) if u else None
+        if kind and kind not in links:
+            links[kind] = u
     return links
 
 
 def weidian_item_id(url: str | None) -> str | None:
     if not url:
         return None
-    m = re.search(r"itemI[Dd]=(\d+)", url) or re.search(r"/item/(\d+)", url)
-    return m.group(1) if m else None
+    u = canonical_url(url) or url
+    for _ in range(_MAX_UNWRAP):  # an encoded query (itemID%3D123) still identifies the item
+        m = re.search(r"itemI[Dd]=(\d+)", u) or re.search(r"/item/(\d+)", u)
+        if m:
+            return m.group(1)
+        decoded = unquote(u)
+        if decoded == u:
+            break
+        u = decoded
+    return None
 
 
 @dataclass

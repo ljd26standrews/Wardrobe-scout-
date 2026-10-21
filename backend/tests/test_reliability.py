@@ -297,3 +297,41 @@ def test_unstated_currency_is_unknown_not_cny(db):
     html = '<script type="application/ld+json">{"@type":"Product","name":"Knit","offers":{"price":"90"}}</script>'
     assert parse_generic_product(html, "https://shop.example/p/knit").currency == ""
     assert estimate_landed_cost(120, "", "overcoat", 0.1, {}) is None
+
+
+def test_suffix_yen_prices_without_mistaking_item_codes():
+    from app.ingestion.parsing import parse_price
+
+    assert parse_price("YSL patchwork jacket (429￥)") == 429
+    assert parse_price("货号8009 ¥919") == 919
+    assert parse_price("8009¥919") == 919
+    assert parse_price("专柜价12800￥ 现价899￥") == 899
+
+
+WRAPPED = "https://x.yupoo.com/external?url=https%3A%2F%2Fweidian.com%2Fitem.html%3FitemID%3D7707075268"
+
+
+def test_wrapped_purchase_links_resolve_to_their_destination():
+    from app.ingestion.parsing import canonical_url, extract_purchase_links, weidian_item_id
+    from app.ingestion.yupoo import parse_album_page
+
+    assert extract_purchase_links(f"购买链接 {WRAPPED}") == {"weidian": "https://weidian.com/item.html?itemID=7707075268"}
+    assert weidian_item_id(WRAPPED) == "7707075268"  # links stored before this fix still match
+    html = (f'<span class="showalbumheader__gallerytitle">coat ¥500</span><div class="showalbumheader__gallerysubtitle">'
+            f'<a href="{WRAPPED}">微店</a></div>')  # fmt: skip
+    raw = parse_album_page(html, "https://s.x.yupoo.com/albums/1?uid=1")
+    assert raw.links["weidian"] == "https://weidian.com/item.html?itemID=7707075268"
+    # Classified by destination host, not by substring; non-web targets are not followed.
+    assert extract_purchase_links("https://evil.example/weidian.com/item.html?itemID=1") == {}
+    assert canonical_url("https://x.example/r?u=javascript%3Aalert(1)") == "https://x.example/r?u=javascript%3Aalert(1)"
+
+
+def test_wrapped_and_direct_links_to_the_same_item_match(db):
+    from app.services import dedup
+
+    s1, s2 = _seller(db, "w1"), _seller(db, "w2")
+    a = _product(db, s1, "a", links={"weidian": WRAPPED})  # as stored by older versions
+    b = _product(db, s2, "b", links={"weidian": "https://weidian.com/item.html?itemID=7707075268"})
+    dedup.match_product(db, a)
+    db.commit()
+    assert {r.relation for r, other in dedup.relations_for(db, a.id) if other == b.id} == {"same_purchase_link"}
