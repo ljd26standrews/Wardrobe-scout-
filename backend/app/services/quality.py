@@ -3,8 +3,9 @@
 Principles
 ----------
 * Price never raises a quality score.
-* Seller claims carry very little weight; AI visual assessments even less, and
-  are never used for fibre content or durability.
+* Seller claims and AI visual assessments are shown but never move a score;
+  AI is never used for fibre content or durability.
+* Each source counts once: a review reposted or imported twice is one source.
 * If the weighted evidence for a dimension is below a threshold the dimension
   is reported as **Unverified** (score ``None``), not as good or bad.
 """
@@ -13,6 +14,7 @@ from __future__ import annotations
 
 import math
 from statistics import median
+from urllib.parse import urlsplit
 
 from sqlalchemy.orm import Session
 
@@ -50,16 +52,43 @@ def _weight(e: Evidence) -> float:
     return w
 
 
+INDEPENDENT = ("verified", "buyer_report", "user_note")
+MIN_INDEPENDENT_WEIGHT = 0.3  # e.g. one moderately specific buyer report; below this a dimension stays unverified
+
+
+def _source_key(e: Evidence) -> tuple:
+    """Which source an item came from: the same review or post reposted or re-imported counts once."""
+    if e.source_url:
+        p = urlsplit(e.source_url.strip())
+        return ("url", (p.hostname or "").lower().removeprefix("www."), p.path.rstrip("/"), p.query)
+    return ("text", e.kind, e.aspect, " ".join((e.claim or "").lower().split()), e.created_by)
+
+
+def _sources(items: list[Evidence]) -> list[tuple[str, float, int]]:
+    """(kind, weight, polarity) per distinct source: its strongest item's weight, its net direction."""
+    groups: dict[tuple, list[Evidence]] = {}
+    for e in items:
+        groups.setdefault(_source_key(e), []).append(e)
+    out = []
+    for group in groups.values():
+        strongest = max(group, key=_weight)
+        net = sum(_weight(e) * e.polarity for e in group)
+        out.append((strongest.kind, _weight(strongest), (net > 0) - (net < 0)))
+    return out
+
+
 def score_dimension(items: list[Evidence]) -> dict:
-    total = sum(_weight(e) for e in items)
-    signed = sum(_weight(e) * e.polarity for e in items)
-    directional = sum(_weight(e) for e in items if e.polarity != 0)
-    confidence = 1 - math.exp(-total / 1.2)
+    """Score one quality dimension from distinct independent sources. Seller claims and AI impressions are
+    listed (``evidence_counts``) but never move the score, so marketing alone cannot make a garment look good."""
     by_kind: dict[str, int] = {}
     for e in items:
         by_kind[e.kind] = by_kind.get(e.kind, 0) + 1
-    independent = sum(1 for e in items if e.kind in ("verified", "buyer_report", "user_note"))
-    if confidence < UNVERIFIED_BELOW or independent == 0:
+    independent = [(w, pol) for kind, w, pol in _sources(items) if kind in INDEPENDENT]
+    total = sum(w for w, _ in independent)
+    signed = sum(w * pol for w, pol in independent)
+    directional = sum(w for w, pol in independent if pol != 0)
+    confidence = 1 - math.exp(-total / 1.2)
+    if confidence < UNVERIFIED_BELOW or total < MIN_INDEPENDENT_WEIGHT:
         label = "Seller claim only" if by_kind and set(by_kind) <= {"seller_claim", "ai_visual"} else "Unverified"
         return {"score": None, "label": label, "confidence": round(confidence, 2), "evidence_counts": by_kind}
     score = 50 + 50 * signed / (directional + 0.8) if directional else 55.0

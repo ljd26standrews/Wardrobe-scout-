@@ -172,8 +172,11 @@ Each product gets separate ratings for **design compatibility, demonstrated cons
 | Verified evidence | 1.0 | Lab test, clear label photos plus multiple QC sets, etc. |
 | Your own note | 0.8 | After you own the item |
 | Independent buyer report | 0.6 | ×0.35 if marked affiliate/promotional |
-| Seller claim | 0.12 | Shown, but never sufficient on its own |
-| AI photo observation | 0.08 | Never accepted for fibre content or fabric weight |
+| Seller claim | – | Shown and counted, but never moves a score |
+| AI photo observation | – | Shown, but never moves a score; never accepted for fibre content or fabric weight |
+
+- **Each source counts once.** A review reposted or imported twice is one source (same link, or same text without a link).
+- **Unverified until real evidence arrives.** A dimension needs independent evidence worth at least one moderately specific buyer report before it gets a score.
 
 A dimension with no independent source is shown as **Unverified** (or *Seller claim only*), never as good or bad. Price never raises a quality score. Value compares price with the category median in your catalogue, adjusts for evidence, and drops when the same photographs are listed more cheaply elsewhere. Add evidence from any product page or seller card. Community search (Sellers → ⋯ → Search community reviews) finds Reddit posts as **leads**; you decide which become evidence and whether they are positive or negative, and promotional language is flagged automatically.
 
