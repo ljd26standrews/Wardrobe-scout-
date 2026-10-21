@@ -234,6 +234,11 @@ Matches are tiered, and the UI never blurs the tiers:
 
 The per-photo rule was chosen on a synthetic benchmark during development (crop / resize / watermark / recompression of re-posted photos versus different products). That benchmark is not checked in, so treat its reported improvement (about 85% fewer false photo matches) as unverified here. Re-tune it on real labelled pairs. You can confirm or reject any suggestion, and your decision is never overridden.
 
+- **"Distinct" means different photographs.** One photo listed at two sizes, or re-encoded, counts once.
+- **"Not the same" decisions hold across groups.** Two listings you marked as not the same never end up in one group through a chain of other matches.
+- **Recognised photos stop matching.** A photo later recognised as a size chart or shop banner no longer counts as a match.
+- **Price comparisons are like for like.** "Cheaper elsewhere" only compares listings in the same stated currency that are still for sale.
+
 ## Optional AI (Anthropic Claude)
 
 Off by default. With `ANTHROPIC_API_KEY` set and **Settings → AI** enabled, it provides:

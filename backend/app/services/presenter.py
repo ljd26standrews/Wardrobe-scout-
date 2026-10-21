@@ -66,7 +66,7 @@ class Context:
                 and o.price
                 and o.status == "active"
                 and p.currency
-                and o.currency == p.currency
+                and _currency_key(o.currency) == _currency_key(p.currency)
                 and o.price < p.price * 0.9
             ):
                 if best is None or o.price < best.price:
@@ -284,13 +284,32 @@ def comparison(ctx: Context, p: Product) -> dict:
     return {"product": base, "alternatives": rows, "verdict": verdict}
 
 
+def _currency_key(c: str | None) -> str:
+    c = (c or "").upper()
+    return "CNY" if c == "RMB" else c
+
+
 def price_verdict(base: dict, rows: list[dict]) -> dict:
     same = [r for r in rows if r["relation"] in ("confirmed_identical", "same_purchase_link", "shared_photos")]
     similar = [r for r in rows if r["relation"] in ("visually_similar", "similar_photo")]
     price = base["price"]
     notes = []
     recommendation = "insufficient_data"
-    if price and same:
+    currency = _currency_key(base.get("currency"))
+    # Prices are only compared like for like: the same, stated currency and a listing still for sale.
+    comparable = [
+        r
+        for r in same
+        if currency and _currency_key(r["product"].get("currency")) == currency
+        and r["product"].get("status", "active") == "active"
+    ]  # fmt: skip
+    if price and same and not comparable:
+        notes.append(
+            "Listings that appear to be the same product are in another or unstated currency, or no longer for "
+            "sale, so prices were not compared."
+        )
+    elif price and comparable:
+        same = comparable
         cheaper = [r for r in same if r["product"]["price"] and r["product"]["price"] < price * 0.95]
         if cheaper:
             best = min(cheaper, key=lambda r: r["product"]["price"])

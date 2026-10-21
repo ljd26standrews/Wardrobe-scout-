@@ -58,6 +58,7 @@ class PhashIndex:
         self._hashes: list[int] = []
         self._pids: list[int] = []
         self._image_ids: list[int] = []
+        self.hashes: dict[int, int] = {}  # image id -> hash
         self.vectors: dict[int, np.ndarray] = {}
         self._arr: np.ndarray | None = None
 
@@ -65,6 +66,7 @@ class PhashIndex:
         self._hashes.append(int(h, 16))
         self._pids.append(product_id)
         self._image_ids.append(image_id)
+        self.hashes[image_id] = int(h, 16)
         if vector is not None:
             self.vectors[image_id] = vector
         self._arr = None
@@ -86,6 +88,16 @@ class PhashIndex:
                 continue  # same shape, different colours/content
             out[self._pids[i]].append((int(dist[i]), image_id))
         return out
+
+
+def distinct_photos(hashes: list[int], max_dist: int = PHASH_MAX_DISTANCE) -> int:
+    """How many different photographs a listing's images show: size variants or re-encodes of one photo
+    (near-identical hashes) count once."""
+    reps: list[int] = []
+    for h in hashes:
+        if all(int(h ^ r).bit_count() > max_dist for r in reps):
+            reps.append(h)
+    return len(reps)
 
 
 def matchable(img: ProductImage) -> bool:
@@ -238,9 +250,23 @@ def match_product(
             if shared:
                 _propose(found, other.id, "same_purchase_link", 1.0, {"purchase_ids": sorted(shared)})
 
+    if pairs:  # a photo indexed earlier may since have been recognised as a size chart or banner
+        others = {m[2] for matches in pairs.values() for m in matches}
+        excluded = {
+            i
+            for (i,) in db.query(ProductImage.id).filter(
+                ProductImage.id.in_(others), ProductImage.role.in_(NON_AESTHETIC_ROLES)
+            )
+        }
+        if excluded:
+            pairs = {pid: [m for m in ms if m[2] not in excluded] for pid, ms in pairs.items()}
+            pairs = {pid: ms for pid, ms in pairs.items() if ms}
+    my_hashes = {img.id: int(img.phash, 16) for img in p.images if img.phash}
     for pid, matches in pairs.items():
-        # Count DISTINCT photos on both sides: one photo matching twice is still one photo.
-        distinct = min(len({m[1] for m in matches}), len({m[2] for m in matches}))
+        # Count DISTINCT photographs on both sides: one photo matching twice, or listed at two sizes, is one.
+        mine = distinct_photos([my_hashes[i] for i in {m[1] for m in matches} if i in my_hashes])
+        theirs = distinct_photos([idx.hashes[i] for i in {m[2] for m in matches} if i in idx.hashes])
+        distinct = max(1, min(mine, theirs))
         best = min(m[0] for m in matches)
         relation = "shared_photos" if distinct >= MIN_PHOTOS_FOR_SHARED else "similar_photo"
         score = min(1.0, 0.5 + 0.15 * distinct - 0.02 * best)
@@ -290,8 +316,14 @@ def embedding_matrix(db: Session, backend: str | None) -> tuple[np.ndarray, list
 
 
 def recompute_groups(db: Session) -> int:
-    """Union-find over strong relations -> Product.group_id."""
+    """Union-find over strong relations -> Product.group_id.
+
+    Your "not the same" decisions are respected transitively: two listings you separated never end up in
+    one group through a chain of other matches. Strongest evidence is merged first, so when a chain would
+    join them, its weakest link is the one left out."""
     parent: dict[int, int] = {}
+    members: dict[int, set[int]] = {}
+    cannot: dict[int, set[int]] = defaultdict(set)
 
     def find(x: int) -> int:
         while parent.setdefault(x, x) != x:
@@ -299,12 +331,24 @@ def recompute_groups(db: Session) -> int:
             x = parent[x]
         return x
 
-    for rel in db.query(ProductRelation).filter(ProductRelation.relation.in_(STRONG_RELATIONS)):
-        if rel.user_confirmed is False:
-            continue
+    for a, b in db.query(ProductRelation.a_id, ProductRelation.b_id).filter(ProductRelation.user_confirmed.is_(False)):
+        cannot[a].add(b)
+        cannot[b].add(a)
+    strong = db.query(ProductRelation).filter(
+        ProductRelation.relation.in_(STRONG_RELATIONS), ProductRelation.user_confirmed.isnot(False)
+    )
+    for rel in sorted(strong, key=lambda r: (-RANK.index(r.relation), -(r.score or 0), r.a_id, r.b_id)):
         ra, rb = find(rel.a_id), find(rel.b_id)
-        if ra != rb:
-            parent[max(ra, rb)] = min(ra, rb)
+        if ra == rb:
+            continue
+        ma, mb = members.setdefault(ra, {ra}), members.setdefault(rb, {rb})
+        small, big = (ma, mb) if len(ma) <= len(mb) else (mb, ma)
+        if any(cannot[x] & big for x in small if x in cannot):
+            continue  # would put two listings you separated in one group
+        root, child = min(ra, rb), max(ra, rb)
+        parent[child] = root
+        members[root] = ma | mb
+        members.pop(child, None)
     want = {pid: find(pid) for pid in parent}
     have = dict(db.query(Product.id, Product.group_id).filter(Product.group_id.isnot(None)))
     changes = [{"id": pid, "group_id": g} for pid, g in want.items() if have.get(pid) != g]
