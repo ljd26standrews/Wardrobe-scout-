@@ -72,7 +72,8 @@ DEFAULTS: dict[str, Any] = {
         "Favourite: plain white Vince T-shirt with a substantial cotton hand.",
     },
     "ranking_weights": {
-        "rules": 1.0,  # written preferences (fades as feedback grows)
+        "taste": 3.0,  # Bayesian taste model (default engine); includes your written profile as its prior
+        "rules": 1.0,  # legacy engine only: written preferences (fades as feedback grows)
         "learned_attributes": 1.2,
         "visual": 1.3,
         "semantic": 0.8,
@@ -82,6 +83,7 @@ DEFAULTS: dict[str, Any] = {
         "seller": 0.3,
     },
     "recommender": {
+        "engine": "bayes",  # "bayes" (default) or "legacy" (pre-audit hand-weighted score)
         "exploration_rate": 0.18,
         "cold_start_k": 15,  # decisions needed before learned signals carry ~50% weight
         "skip_resurface_days": 10,

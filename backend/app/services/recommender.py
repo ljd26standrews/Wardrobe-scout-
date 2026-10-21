@@ -384,6 +384,8 @@ class Ranked:
     explore: bool = False
     suppressed: bool = False
     strength: float = 0.0
+    sample_score: float | None = None  # score under a posterior sample (Thompson exploration)
+    taste_sd: float | None = None  # uncertainty of the learned taste estimate (logit s.d.)
 
 
 def rank_products(
@@ -434,6 +436,19 @@ def rank_products(
         for j, i in enumerate(txt_idx):
             semantic[i] = comp[j]
 
+    bayes = rcfg.get("engine", "bayes") == "bayes"
+    if bayes:
+        from . import preference_model as pm
+
+        space = pm.build_feature_space(db, taste, backend)
+        post = pm.fit(db, space)
+        known = [p.id for p in products if p.id in space.row]
+        zmean, zsd = post.z(known) if known else (np.zeros(0), np.zeros(0))
+        rng = np.random.default_rng(int(utcnow().strftime("%Y%m%d")) * 1000 + post.n_obs)
+        zsamp = post.sample_z(known, rng) if known else np.zeros(0)
+        model_by_id = {pid: (float(zmean[j]), float(zsd[j]), float(zsamp[j])) for j, pid in enumerate(known)}
+        s = post.n_obs / (post.n_obs + rcfg.get("cold_start_k", 15)) if post.n_obs else 0.0
+
     gates = {
         "rules": 1 - 0.6 * s,
         "learned_attributes": s,
@@ -444,6 +459,9 @@ def rank_products(
         "wardrobe": 1.0,
         "seller": 1.0,
     }
+    if bayes:
+        gates = {"taste": 1.0, "quality": gates["quality"], "value": 1.0, "wardrobe": 1.0, "seller": 1.0}
+        weights = {**weights, "taste": weights.get("taste", 3.0)}
     denom = sum(abs(weights.get(c, 0)) * g for c, g in gates.items()) or 1.0
 
     out: list[Ranked] = []
@@ -480,6 +498,29 @@ def rank_products(
         prio = 0.5 + (3 - (sl.priority if sl else 3)) * 0.06
         seller_c = 0.5 * rep + 0.5 * prio
 
+        if bayes:
+            out.append(
+                _bayes_ranked(
+                    p,
+                    post,
+                    model_by_id.get(p.id),
+                    rules_why,
+                    quality_c,
+                    value_c,
+                    wardrobe_c,
+                    seller_c,
+                    weights,
+                    gates,
+                    denom,
+                    reasons,
+                    cautions,
+                    prof,
+                    vis_best[i],
+                    p.id in prof.suppressed_ids or bool(near_dup[i]),
+                    s,
+                )
+            )
+            continue
         comps = {
             "rules": rules,
             "learned_attributes": learned,
@@ -557,6 +598,105 @@ def rank_products(
     return out
 
 
+GROUP_WORD = {"colour": "colour", "category": "", "fibre": "", "fit": "fit", "logo": "branding", "brand": ""}
+
+
+def _feature_phrase(group: str, label: str) -> str:
+    if group == "logo":
+        return {"none": "no visible branding", "subtle": "subtle branding", "visible": "visible logos"}.get(
+            label, label
+        )
+    word = GROUP_WORD.get(group, "")
+    return f"{label} {word}".strip()
+
+
+def _certainty(effect: float, sd: float) -> str:
+    ratio = abs(effect) / (sd + 1e-9)
+    return "confident" if ratio > 3 else "fairly sure" if ratio > 1.5 else "tentative"
+
+
+def _bayes_ranked(
+    p,
+    post,
+    model,
+    rules_why,
+    quality_c,
+    value_c,
+    wardrobe_c,
+    seller_c,
+    weights,
+    gates,
+    denom,
+    reasons,
+    cautions,
+    prof,
+    vis_best_i,
+    suppressed,
+    strength,
+) -> Ranked:
+    """Score and explain one product with the Bayesian taste model (see preference_model)."""
+    zm, zsd, zs = model if model else (0.0, 1.0, 0.0)
+    taste_c = float(1 / (1 + math.exp(-zm)))
+    comps = {"taste": taste_c, "quality": quality_c, "value": value_c, "wardrobe": wardrobe_c, "seller": seller_c}
+    contrib = {c: weights.get(c, 0) * gates[c] * (v - 0.5) for c, v in comps.items()}
+    score = 0.5 + sum(contrib.values()) / denom
+    sampled_taste = float(1 / (1 + math.exp(-zs)))
+    sample_score = score + weights.get("taste", 0) * (sampled_taste - taste_c) / denom
+    if suppressed:
+        score -= 0.5
+        sample_score -= 0.5
+
+    model_reasons: list[str] = []
+    if post.n_obs == 0:
+        model_reasons.append("Cold start: ranked on your written preferences until you make some decisions")
+    if model:
+        pos, neg = post.explain(p.id)
+        for f in pos:
+            if f["group"] == "prior":
+                model_reasons.extend(r[0].upper() + r[1:] for r in rules_why[:2])
+            elif f["group"] == "img":
+                continue  # covered by the nearest-example sentence below
+            else:
+                model_reasons.append(
+                    f"You tend to like {_feature_phrase(f['group'], f['label'])} ({_certainty(f['effect'], f['sd'])})"
+                )
+        for f in neg:
+            if f["group"] == "prior":
+                cautions.append("Doesn't match your written preferences")
+            elif f["group"] != "img":
+                cautions.append(
+                    f"You tend to avoid {_feature_phrase(f['group'], f['label'])} ({_certainty(f['effect'], f['sd'])})"
+                )
+        if any(f["group"] == "img" for f in pos) and vis_best_i >= 0 and prof.pos_visual:
+            pr = prof.pos_visual[int(vis_best_i)]
+            model_reasons.insert(0, f"Looks like pieces you liked, e.g. “{pr.label}”")
+    if not model_reasons and rules_why:
+        model_reasons.extend(r[0].upper() + r[1:] for r in rules_why[:2])
+    nearest = None
+    if vis_best_i >= 0 and prof.pos_visual:
+        pr = prof.pos_visual[int(vis_best_i)]
+        nearest = {"label": pr.label, "product_id": pr.product_id, "kind": pr.kind}
+    if p.logo_level == "visible":
+        cautions.append("Listing mentions visible logo/print")
+    if suppressed:
+        cautions.append("Near-identical to something you rejected")
+    all_reasons = list(dict.fromkeys(model_reasons + reasons))
+    return Ranked(
+        p,
+        float(score),
+        comps,
+        contrib,
+        taste_c,
+        all_reasons[:5],
+        list(dict.fromkeys(cautions))[:4],
+        nearest,
+        suppressed=suppressed,
+        strength=strength,
+        sample_score=float(sample_score),
+        taste_sd=zsd,
+    )
+
+
 def explore_novelty(p: Product, prof: Profile) -> float:
     keys = []
     if p.category:
@@ -581,7 +721,15 @@ def build_feed(
     chosen = {r.product.id for r in exploit}
     rest = [r for r in pool if r.product.id not in chosen and r.components["quality"] >= 0.3]
     explore: list[Ranked] = []
-    if n_explore and rest:
+    if n_explore and rest and all(r.sample_score is not None for r in rest):
+        # Bayesian engine: explore where the model is uncertain but plausibly right (Thompson sampling)
+        for r in sorted(rest, key=lambda r: -r.sample_score)[:n_explore]:
+            r.explore = True
+            r.reasons.insert(
+                0, "Exploration pick: the model isn't sure about this one yet — your reaction will teach it the most"
+            )
+            explore.append(r)
+    elif n_explore and rest:
         weights = [explore_novelty(r.product, prof) ** 2 + 0.05 for r in rest]
         while rest and len(explore) < n_explore:
             j = rng.choices(range(len(rest)), weights=weights)[0]

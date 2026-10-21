@@ -11,6 +11,7 @@ pillow>=10.3
 imagehash>=4.3
 numpy>=1.26
 scikit-learn>=1.5
+scipy>=1.11
 rapidfuzz>=3.9
 apscheduler>=3.10,<4
 python-multipart>=0.0.9

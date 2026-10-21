@@ -23,7 +23,9 @@ cd wardrobe-scout
 ./scripts/start.sh          # backend on :8000, app on :3000
 ```
 
-Open **http://localhost:3000**. `start.sh` also prints an address such as `http://192.168.1.20:3000` for your **iPhone on the same Wi-Fi**. In Safari choose *Share → Add to Home Screen* to get an app-like, full-screen experience.
+Open **http://localhost:3000**. By default the app is reachable **only from this computer**.
+
+**On your iPhone:** add `WS_LAN=1` and `WS_ACCESS_CODE=<a long passphrase>` to `.env`, then restart. `start.sh` prints an address such as `http://192.168.1.20:3000`; open it on the same Wi-Fi and enter the access code once. In Safari choose *Share → Add to Home Screen* to get an app-like, full-screen experience.
 
 Optional extras during setup:
 
@@ -73,10 +75,22 @@ Everything lives in `.env` at the repo root (copied from `.env.example`) and in 
 | `WS_EMBEDDING_BACKEND` | `auto` | `auto` / `clip` / `lite` |
 | `WS_ENABLE_PLAYWRIGHT` | `false` | Render JS-only pages (Weidian) in headless Chromium |
 | `ANTHROPIC_API_KEY` | – | Optional AI features (also enable them in Settings → AI) |
+| `WS_LAN` | `0` | `1` makes the app reachable from other devices on your network (requires `WS_ACCESS_CODE`) |
+| `WS_ACCESS_CODE` | – | Passphrase other devices enter once (stored as a cookie) |
+| `WS_API_TOKEN` | generated | Per-install API key. Leave unset: it is generated in `<data dir>/api_token` (mode 600) |
+| `WS_ALLOW_PRIVATE_URLS` | `false` | Allow fetching LAN/localhost addresses (only for local test servers) |
+| `WS_MAX_DOWNLOAD_BYTES` | 25 MB | Size cap for any downloaded page or image |
 | `BACKEND_URL` | `http://127.0.0.1:8000` | Where the Next.js server proxies `/api` (read at runtime) |
 | `NEXT_PUBLIC_BACKEND_PUBLIC_URL` | `http://localhost:8000` | Backend address the bookmarklet posts to (rebuild the UI after changing it) |
 
 API keys are only read from the environment and are never stored in the database or in backups.
+
+### Security model
+
+- **Every `/api` call needs a per-install key.** Without one, any website open in your browser could read or change your data through the localhost API. The key is generated on first start, the app's own server adds it to requests, and you never handle it except inside the bookmarklet.
+- **Both servers listen on `127.0.0.1` only.** Sharing on your network is opt-in (`WS_LAN=1`) and always requires an access code.
+- **Server-side fetches refuse private, loopback and cloud-metadata addresses**, including via redirects. Downloads are size-capped.
+- **The bookmarklet contains your key.** Treat it like a password and don't share it. It only works against your own computer's backend.
 
 ---
 
@@ -134,7 +148,17 @@ A transparent hybrid score:
 
 ## Cross-seller comparison
 
-Matches are found by purchase-link identity, perceptual image hashes (with a colour check so other colourways don't collide), embeddings and title similarity. Products are grouped only on strong signals. You can confirm or reject any suggestion, and your decision is never overridden.
+Matches are tiered, and the UI never blurs the tiers:
+
+| Tier | Evidence | Affects value & grouping? |
+|---|---|---|
+| Confirmed identical | your confirmation | yes |
+| Same purchase link | both listings point at the same Weidian/Taobao item | yes |
+| Several identical photographs | at least **two** distinct photos match (perceptual hash ≤ 10 bits and embedding cosine ≥ 0.97) | yes. Labelled "likely the same source photos — not proof of the same batch" |
+| One similar photograph | a single photo matches | no (hint only) |
+| Visually similar | embedding + title similarity | no |
+
+The per-photo rule was chosen on a synthetic benchmark (crop / resize / watermark / recompression of re-posted photos versus different products). It cut false photo matches by about 85% while finding more genuine re-posts than the previous rule. Re-tune it on real labelled pairs. You can confirm or reject any suggestion, and your decision is never overridden.
 
 ## Optional AI (Anthropic Claude)
 
@@ -196,7 +220,7 @@ scripts/   setup.sh · start.sh · dev.sh · e2e.sh · start-windows.ps1
 - **Without CLIP**, visual similarity is approximate (colour, tone and shape). Install CLIP for real garment understanding.
 - The **landed-cost** figure is an estimate from editable assumptions (shipping rates, agent fee, VAT 20%, 12% duty above £135). Check current UK rules and your agent's prices.
 - **Outfit suggestions** use colour-harmony and layering rules, not a learned fashion model.
-- Duplicate grouping by **shared photos** is a strong hint but not proof of the same batch. The UI says so, and only your confirmation (or a shared purchase link) makes a match "confirmed".
+- Duplicate grouping by **shared photos** is a strong hint but not proof of the same batch. The UI says so, and only your confirmation (or a shared purchase link) makes a match "confirmed". The photo-matching thresholds were tuned on synthetic images and still need checking on real seller photos.
 - Some catalogues may contain replicas of branded goods. Check your local rules on importing them; UK Border Force can seize counterfeit goods.
 
 ## Troubleshooting
@@ -204,4 +228,6 @@ scripts/   setup.sh · start.sh · dev.sh · e2e.sh · start-windows.ps1
 - **"Backend not reachable"** — start the backend (`./scripts/start.sh`) or check `BACKEND_URL`.
 - **A seller shows "Blocked"** — the site restricted automated access. Use the bookmarklet or imports, and don't raise request rates.
 - **Images missing** — some image hosts reject direct fetches. The product page offers "Re-check listing", and photos you upload always work.
-- **iPhone can't connect** — both devices must be on the same network, and your computer's firewall must allow ports 3000 (app) and 8000 (bookmarklet only).
+- **iPhone can't connect** — set `WS_LAN=1` and `WS_ACCESS_CODE` in `.env` and restart. Both devices must be on the same network, and your computer's firewall must allow port 3000.
+- **"missing or invalid API token"** — you called the backend directly. Use the app (port 3000), or send the key from `backend/data/api_token` as the `X-WS-Token` header.
+- **Bookmarklet says 401** — re-copy it from Sellers → Import → Bookmarklet; the key changes if the data folder is recreated.

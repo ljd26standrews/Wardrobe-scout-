@@ -118,19 +118,33 @@ def insights(db: Session = Depends(get_db)):
     prof = build_profile(db)
     out = describe_profile(db, prof)
     weights = get_setting(db, "ranking_weights")
-    s = prof.strength
-    out["effective_weights"] = {
-        k: round(w * g, 3)
-        for k, w in weights.items()
-        for g in [
-            {
-                "rules": 1 - 0.6 * s,
-                "learned_attributes": s,
-                "visual": s if prof.pos_visual else 0,
-                "semantic": s if prof.pos_text else 0,
-            }.get(k, 1.0)
-        ]
-    }
+    rcfg = get_setting(db, "recommender")
+    engine = rcfg.get("engine", "bayes")
+    out["engine"] = engine
+    if engine == "bayes":
+        from ..services import preference_model as pm
+
+        post = pm.fit(db, pm.build_feature_space(db, get_setting(db, "taste_profile"), emb.get_image_backend().name))
+        out["model"] = post.summary()
+        k = rcfg.get("cold_start_k", 15)
+        out["learning_strength"] = round(post.n_obs / (post.n_obs + k), 3) if post.n_obs else 0.0
+        used = ("taste", "quality", "value", "wardrobe", "seller")
+        out["effective_weights"] = {key: round(weights.get(key, 0), 3) for key in used}
+    else:
+        s = prof.strength
+        out["effective_weights"] = {
+            k: round(w * g, 3)
+            for k, w in weights.items()
+            if k != "taste"
+            for g in [
+                {
+                    "rules": 1 - 0.6 * s,
+                    "learned_attributes": s,
+                    "visual": s if prof.pos_visual else 0,
+                    "semantic": s if prof.pos_text else 0,
+                }.get(k, 1.0)
+            ]
+        }
     out["weights"] = weights
     out["embedding"] = emb.backend_info()
     # Top recommendations with explanations (sample of the current catalogue)

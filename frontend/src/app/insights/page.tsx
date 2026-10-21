@@ -21,6 +21,12 @@ type InsightsResponse = {
   construction_concerns: number;
   palette_neutral_share: number | null;
   effective_weights: Record<string, number>;
+  engine?: "bayes" | "legacy";
+  model?: {
+    observations: number;
+    prior_trust: { mean: number; sd: number };
+    features: { group: string; label: string; mean: number; sd: number }[];
+  };
   weights: Record<string, number>;
   embedding: { image_backend: string; is_clip: boolean; note: string | null };
   top_explained: { id: number; title: string; score: number; contributions: Record<string, number>; reasons: string[]; cautions: string[]; image: string | null }[];
@@ -29,6 +35,7 @@ type FeedbackRow = { id: number; product_id: number | null; action: string; reas
 
 const GROUP_LABEL: Record<string, string> = { colour: "Colours", category: "Garment types", fibre: "Materials", brand: "Brands / styles", seller: "Sellers", fit: "Fit & silhouette", logo: "Branding visibility" };
 const COMPONENT_LABEL: Record<string, string> = {
+  taste: "Learned taste (Bayesian)",
   rules: "Written preferences",
   learned_attributes: "Learned attributes",
   visual: "Visual similarity",
@@ -71,6 +78,38 @@ function DivergingBar({ a }: { a: Attr }) {
   );
 }
 
+/** Learned weight with a ~90% credible interval (mean ± 1.64 s.d.). Blue = drawn to, clay = steer away. */
+function IntervalBar({ f }: { f: { label: string; mean: number; sd: number } }) {
+  const R = 1.5; // weights beyond ±1.5 logit units are clipped visually
+  const pos = (v: number) => 50 + (Math.max(-R, Math.min(R, v)) / R) * 50;
+  const lo = pos(f.mean - 1.64 * f.sd);
+  const hi = pos(f.mean + 1.64 * f.sd);
+  const m = pos(f.mean);
+  const sure = Math.abs(f.mean) > 1.64 * f.sd;
+  return (
+    <div
+      className="grid grid-cols-[minmax(0,8rem)_1fr_5.5rem] items-center gap-3 py-1.5"
+      title={`${f.label}: ${f.mean >= 0 ? "+" : ""}${f.mean.toFixed(2)} (90% interval ${(f.mean - 1.64 * f.sd).toFixed(2)} to ${(f.mean + 1.64 * f.sd).toFixed(2)})`}
+    >
+      <span className="truncate text-[13px]">{titleCase(f.label)}</span>
+      <div className="relative h-3">
+        <div className="absolute inset-y-[-3px] left-1/2 w-px bg-border" />
+        <div className="absolute top-1/2 h-px -translate-y-1/2 bg-muted-foreground/50" style={{ left: `${lo}%`, width: `${Math.max(hi - lo, 0.5)}%` }} />
+        <div
+          className={cn("absolute top-0 h-full", f.mean >= 0 ? "rounded-r-[4px] bg-divpos" : "rounded-l-[4px] bg-divneg", !sure && "opacity-45")}
+          style={f.mean >= 0 ? { left: "50%", width: `${Math.max(m - 50, 0.5)}%` } : { left: `${m}%`, width: `${Math.max(50 - m, 0.5)}%` }}
+        />
+      </div>
+      <span className="text-right text-xs tabular-nums text-muted-foreground">
+        {f.mean >= 0 ? "+" : "−"}
+        {Math.abs(f.mean).toFixed(2)} <span className="opacity-60">±{(1.64 * f.sd).toFixed(2)}</span>
+      </span>
+    </div>
+  );
+}
+
+const MODEL_GROUP_LABEL: Record<string, string> = { colour: "Colours", category: "Garment types", fibre: "Materials", fit: "Fit & silhouette", logo: "Branding", brand: "Brands / styles" };
+
 export default function InsightsPage() {
   const { data, error, isLoading, mutate } = useSWR<InsightsResponse>("/api/insights");
   const { data: history, mutate: mutateHistory } = useSWR<FeedbackRow[]>("/api/feedback?limit=60");
@@ -94,31 +133,78 @@ export default function InsightsPage() {
       {!data.embedding.is_clip && data.embedding.note && <p className="mt-4 rounded-xl bg-muted/70 p-3 text-xs leading-relaxed text-muted-foreground">Image model: {data.embedding.image_backend}. {data.embedding.note}</p>}
 
       <h2 className="mt-14 text-3xl">Learned preferences</h2>
-      <div className="mt-2 flex items-center gap-4 text-xs text-muted-foreground">
-        <span className="inline-flex items-center gap-1.5"><span className="inline-block h-2.5 w-4 rounded-sm bg-divpos" /> drawn to</span>
-        <span className="inline-flex items-center gap-1.5"><span className="inline-block h-2.5 w-4 rounded-sm bg-divneg" /> steer away</span>
-        <span>Values shrink towards zero until there is enough evidence.</span>
-      </div>
-      {groups.length === 0 ? (
-        <p className="mt-6 text-sm text-muted-foreground">No learned attributes yet — make some decisions in Discover.</p>
-      ) : (
-        <div className="mt-6 grid gap-4 md:grid-cols-2">
-          {groups.map(([k, attrs]) => (
-            <Card key={k} className="p-5">
-              <p className="label mb-3">{GROUP_LABEL[k] ?? k}</p>
-              {attrs.slice(0, 10).map((a) => (
-                <DivergingBar key={a.key} a={a} />
+      {data.engine === "bayes" && data.model ? (
+        <>
+          <p className="mt-2 max-w-2xl text-sm leading-relaxed text-muted-foreground">
+            What the taste model currently believes, learned from {data.model.observations} observation{data.model.observations === 1 ? "" : "s"} (decisions, inspiration photos and rated wardrobe pieces). Whiskers show a 90% credible interval; faded bars are not yet distinguishable from zero.
+          </p>
+          <Card className="mt-5 p-5">
+            <p className="label mb-1">Trust in your written preferences</p>
+            <p className="text-sm">
+              Weight <span className="font-medium tabular-nums">{data.model.prior_trust.mean.toFixed(2)}</span>
+              <span className="text-muted-foreground"> ± {(1.64 * data.model.prior_trust.sd).toFixed(2)} (started at 1.00)</span>
+              {" — "}
+              {data.model.prior_trust.mean > 1.15
+                ? "your choices are confirming what you wrote."
+                : data.model.prior_trust.mean < 0.6
+                  ? "your choices are departing from what you wrote, so the model now leans on your behaviour."
+                  : "no strong evidence either way yet."}
+            </p>
+          </Card>
+          <div className="mt-2 flex items-center gap-4 text-xs text-muted-foreground">
+            <span className="inline-flex items-center gap-1.5"><span className="inline-block h-2.5 w-4 rounded-sm bg-divpos" /> drawn to</span>
+            <span className="inline-flex items-center gap-1.5"><span className="inline-block h-2.5 w-4 rounded-sm bg-divneg" /> steer away</span>
+          </div>
+          {data.model.features.length === 0 ? (
+            <p className="mt-6 text-sm text-muted-foreground">Nothing learned beyond your written preferences yet — make some decisions in Discover.</p>
+          ) : (
+            <div className="mt-4 grid gap-4 md:grid-cols-2">
+              {Object.entries(
+                data.model.features.reduce<Record<string, typeof data.model.features>>((acc, f) => ((acc[f.group] ??= []).push(f), acc), {}),
+              ).map(([g, feats]) => (
+                <Card key={g} className="p-5">
+                  <p className="label mb-3">{MODEL_GROUP_LABEL[g] ?? g}</p>
+                  {feats.slice(0, 10).map((f) => (
+                    <IntervalBar key={f.label} f={f} />
+                  ))}
+                </Card>
               ))}
-            </Card>
-          ))}
-        </div>
+            </div>
+          )}
+        </>
+      ) : (
+        <>
+          <div className="mt-2 flex items-center gap-4 text-xs text-muted-foreground">
+            <span className="inline-flex items-center gap-1.5"><span className="inline-block h-2.5 w-4 rounded-sm bg-divpos" /> drawn to</span>
+            <span className="inline-flex items-center gap-1.5"><span className="inline-block h-2.5 w-4 rounded-sm bg-divneg" /> steer away</span>
+            <span>Values shrink towards zero until there is enough evidence.</span>
+          </div>
+          {groups.length === 0 ? (
+            <p className="mt-6 text-sm text-muted-foreground">No learned attributes yet — make some decisions in Discover.</p>
+          ) : (
+            <div className="mt-6 grid gap-4 md:grid-cols-2">
+              {groups.map(([k, attrs]) => (
+                <Card key={k} className="p-5">
+                  <p className="label mb-3">{GROUP_LABEL[k] ?? k}</p>
+                  {attrs.slice(0, 10).map((a) => (
+                    <DivergingBar key={a.key} a={a} />
+                  ))}
+                </Card>
+              ))}
+            </div>
+          )}
+        </>
       )}
 
       <div className="mt-14 grid gap-6 lg:grid-cols-2">
         <Card className="p-5">
           <p className="label mb-1">How the ranking is weighted now</p>
           <p className="mb-4 text-xs text-muted-foreground">
-            Base weights from <Link href="/settings" className="underline">Settings</Link>, scaled by learning strength.
+            {data.engine === "bayes" ? (
+              <>Weights from <Link href="/settings" className="underline">Settings</Link>. Your written preferences live inside the taste model, where their influence is learned.</>
+            ) : (
+              <>Base weights from <Link href="/settings" className="underline">Settings</Link>, scaled by learning strength (legacy engine).</>
+            )}
           </p>
           {Object.entries(data.effective_weights).map(([k, v]) => (
             <div key={k} className="py-1.5">

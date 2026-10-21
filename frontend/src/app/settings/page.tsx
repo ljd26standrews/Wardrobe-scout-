@@ -87,10 +87,11 @@ function NumberInput({ value, onChange, step = "any" }: { value: number | null; 
 }
 
 const WEIGHT_HELP: Record<string, string> = {
-  rules: "Your written preferences (fades automatically as you give feedback)",
-  learned_attributes: "Colours, materials, fits, brands and sellers learned from decisions",
-  visual: "Image similarity to items you approved vs rejected",
-  semantic: "Description similarity",
+  taste: "The learned taste model (includes your written preferences as its starting point)",
+  rules: "Legacy engine only: your written preferences",
+  learned_attributes: "Legacy engine only: attributes learned from decisions",
+  visual: "Legacy engine only: image similarity to approved vs rejected items",
+  semantic: "Legacy engine only: description similarity",
   quality: "Independent quality evidence",
   value: "Price relative to quality and alternatives",
   wardrobe: "Fills gaps vs adds redundancy",
@@ -168,6 +169,19 @@ export default function SettingsPage() {
             ))}
             {rec.value && (
               <>
+                <div className="md:col-span-2">
+                  <Field label="Recommendation engine" hint="Bayesian learns your taste with uncertainty and was markedly better in evaluation; Legacy is the original hand-weighted score, kept for comparison.">
+                    <select
+                      className="flex h-10 w-full max-w-sm rounded-lg border border-input bg-card px-3 text-sm"
+                      value={rec.value.engine ?? "bayes"}
+                      onChange={(e) => rec.update({ engine: e.target.value })}
+                      aria-label="Recommendation engine"
+                    >
+                      <option value="bayes">Bayesian taste model (recommended)</option>
+                      <option value="legacy">Legacy hand-weighted score</option>
+                    </select>
+                  </Field>
+                </div>
                 <div>
                   <div className="flex justify-between text-sm">
                     <span>Exploration</span>

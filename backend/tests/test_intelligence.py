@@ -96,7 +96,16 @@ def test_colour_reason_lowers_only_colour(db):
     assert prof.affinity("category:hoodie") == 0
 
 
-def test_cold_start_then_learning(db, web):
+def _engine(db, name):
+    from app.services.settings_store import get_setting, set_setting
+
+    cfg = get_setting(db, "recommender")
+    cfg["engine"] = name
+    set_setting(db, "recommender", cfg)
+
+
+def test_cold_start_then_learning_legacy_engine(db, web):
+    _engine(db, "legacy")
     s = _seller(db)
     loved, _ = _product(db, s, "a", "羊绒连帽卫衣 黑色", colour=(20, 20, 20), web=web)
     similar, _ = _product(db, s, "b", "羊绒连帽卫衣 炭灰", colour=(40, 40, 42), web=web, img_seed=1)
@@ -112,6 +121,105 @@ def test_cold_start_then_learning(db, web):
     assert ranked[0].product.id == similar.id
     assert ranked[0].components["visual"] > ranked[1].components["visual"]
     assert any("Visually close" in r for r in ranked[0].reasons)
+
+
+def _catalogue(db, web, n=40):
+    """A small varied catalogue with images (enough for the image PCA features)."""
+    s = _seller(db)
+    cols = {
+        "黑色": (20, 20, 20),
+        "藏青": (30, 40, 70),
+        "红色": (170, 35, 35),
+        "黄色": (225, 185, 50),
+        "米色": (215, 200, 170),
+    }
+    cats = [("羊绒连帽卫衣", "hoodie"), ("初剪羊毛休闲裤", "trousers"), ("纯棉T恤", "tee"), ("美利奴开衫", "hoodie")]
+    out = []
+    for i in range(n):
+        cname, rgb = list(cols.items())[i % len(cols)]
+        title, shape = cats[(i // len(cols)) % len(cats)]
+        p, _ = _product(db, s, f"p{i}", f"{title} {cname}", colour=rgb, shape=shape, web=web, img_seed=i)
+        out.append(p)
+    return out
+
+
+def test_bayes_cold_start_uses_written_profile(db, web):
+    ps = _catalogue(db, web, 25)
+    ranked = rank_products(db, ps, build_profile(db))
+    assert "Cold start" in " ".join(ranked[0].reasons)
+    top = ranked[0].product
+    assert {"black", "navy", "beige"} & set(top.colours)  # a core-palette colour wins at cold start
+    assert ranked[0].taste_sd is not None and ranked[0].sample_score is not None
+
+
+def test_bayes_learns_from_feedback(db, web):
+    ps = _catalogue(db, web, 40)
+    reds = [p for p in ps if "red" in p.colours]
+    navy = [p for p in ps if "navy" in p.colours]
+    for p in navy[:4]:
+        _fb(db, p, "love")
+    for p in reds[:3]:
+        _fb(db, p, "dislike", ["colour"])
+    remaining = [p for p in ps if p not in navy[:4] + reds[:3]]
+    ranked = rank_products(db, remaining, build_profile(db))
+    order = [r.product for r in ranked]
+    first_navy = min(i for i, p in enumerate(order) if "navy" in p.colours)
+    first_red = min(i for i, p in enumerate(order) if "red" in p.colours)
+    assert first_navy < first_red
+
+
+def test_bayes_explains_learning_that_departs_from_profile(db, web):
+    ps = _catalogue(db, web, 40)
+    yellows = [p for p in ps if "yellow" in p.colours]
+    for p in yellows[:5]:
+        _fb(db, p, "love")  # yellow is not in the written palette: a surprise worth learning
+    remaining = [p for p in ps if p not in yellows[:5]]
+    ranked = rank_products(db, remaining, build_profile(db))
+    top_yellow = next(r for r in ranked if "yellow" in r.product.colours)
+    assert any("You tend to like yellow" in r for r in top_yellow.reasons), top_yellow.reasons
+    assert ranked.index(top_yellow) < len(ranked) // 3
+
+
+def test_bayes_reason_masking_and_value_rejections(db, web):
+    from app.services import preference_model as pm
+    from app.services.settings_store import get_setting
+
+    ps = _catalogue(db, web, 30)
+    tee_white = next(p for p in ps if p.category == "t-shirt")
+    _fb(db, tee_white, "dislike", ["too_expensive"])
+    space = pm.build_feature_space(db, get_setting(db, "taste_profile"), "lite-v1")
+    assert pm.fit(db, space).n_obs == 0  # value judgement: not a taste observation
+    hoodie = next(p for p in ps if p.category == "hoodie" and "red" in p.colours)
+    _fb(db, hoodie, "dislike", ["colour"])
+    taste = get_setting(db, "taste_profile")
+
+    def weights():
+        post = pm.fit(db, pm.build_feature_space(db, taste, "lite-v1"))
+        return {post.space.feature_name(j): post.mean[j] for j in range(1, post.space.img_slice.start)}
+
+    with_reason = weights()
+    db.query(Feedback).filter(Feedback.product_id == hoodie.id).update({Feedback.reasons: []})
+    db.commit()
+    without_reason = weights()
+    assert with_reason[("colour", "red")] < -0.05
+    # The colour reason protects the garment type; an unexplained dislike does not.
+    assert without_reason[("category", "hoodie")] < with_reason[("category", "hoodie")] - 0.02
+
+
+def test_bayes_behaviour_can_override_written_profile(db, web):
+    """If you keep rejecting what your written profile predicts, its weight goes down."""
+    from app.services import preference_model as pm
+    from app.services.settings_store import get_setting
+
+    ps = _catalogue(db, web, 40)
+    space = pm.build_feature_space(db, get_setting(db, "taste_profile"), "lite-v1")
+    liked = sorted(ps, key=lambda p: space.X[space.row[p.id], 0])  # lowest prior first
+    for p in liked[:8]:
+        _fb(db, p, "love")
+    for p in liked[-8:]:
+        _fb(db, p, "dislike")
+    post = pm.fit(db, space)
+    assert post.mean[0] < pm.PRIOR_MEAN_TRUST - 0.3
 
 
 def test_near_duplicate_of_rejected_item_is_suppressed(db, web):
