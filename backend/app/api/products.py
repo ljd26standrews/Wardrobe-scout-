@@ -107,8 +107,7 @@ NO_FILTERS = {k: None for k in ("q", "brand", "seller_id", "category", "material
 def ranked_candidates(db: Session, prof, ctx: Context, flt: dict) -> tuple[list, dict, int, dict]:
     """Undecided pieces matching the filters, ranked, one per garment: (ranked, offers, n candidates, quality)."""
     rcfg = get_setting(db, "recommender")
-    ids = {p.id for p in feed_candidates(db, prof, include_skipped_after_days=rcfg.get("skip_resurface_days", 10))}
-    candidates = [p for p in _load(db).filter(Product.id.in_(ids)).all()] if ids else []
+    candidates = feed_candidates(db, prof, include_skipped_after_days=rcfg.get("skip_resurface_days", 10))
     if not flt.get("include_seed"):
         candidates = [p for p in candidates if p.data_origin != "seed"]
     filters = {k: v for k, v in flt.items() if k != "include_seed"}

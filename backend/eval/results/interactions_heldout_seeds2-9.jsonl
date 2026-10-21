@@ -1,0 +1,128 @@
+[2m2026-10-21T19:59:26.882261Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "combo", "method": "bayes", "seed": 2, "rel": 12, "prec": [0.1, 0.2, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0]}
+[2m2026-10-21T19:59:44.756933Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "combo", "method": "bayes", "seed": 3, "rel": 18, "prec": [0.2, 0.3, 0.1, 0.0, 0.0, 0.0, 0.1, 0.1]}
+[2m2026-10-21T20:00:02.870574Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "combo", "method": "bayes", "seed": 4, "rel": 20, "prec": [0.2, 0.2, 0.2, 0.0, 0.0, 0.0, 0.0, 0.1]}
+[2m2026-10-21T20:00:20.146393Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "combo", "method": "bayes", "seed": 5, "rel": 15, "prec": [0.0, 0.2, 0.1, 0.1, 0.1, 0.1, 0.0, 0.0]}
+[2m2026-10-21T20:00:37.813443Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "combo", "method": "bayes", "seed": 6, "rel": 17, "prec": [0.0, 0.2, 0.1, 0.0, 0.0, 0.1, 0.3, 0.2]}
+[2m2026-10-21T20:00:54.795743Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "combo", "method": "bayes", "seed": 7, "rel": 14, "prec": [0.1, 0.1, 0.1, 0.0, 0.0, 0.2, 0.0, 0.0]}
+[2m2026-10-21T20:01:12.056612Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "combo", "method": "bayes", "seed": 8, "rel": 19, "prec": [0.2, 0.1, 0.1, 0.2, 0.0, 0.2, 0.1, 0.0]}
+[2m2026-10-21T20:01:31.118752Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "combo", "method": "bayes", "seed": 9, "rel": 19, "prec": [0.1, 0.2, 0.0, 0.0, 0.2, 0.0, 0.0, 0.1]}
+[2m2026-10-21T20:01:48.652423Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "combo", "method": "bayes-interact", "seed": 2, "rel": 12, "prec": [0.0, 0.1, 0.0, 0.0, 0.0, 0.1, 0.0, 0.3]}
+[2m2026-10-21T20:02:06.476398Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "combo", "method": "bayes-interact", "seed": 3, "rel": 18, "prec": [0.1, 0.3, 0.0, 0.1, 0.0, 0.2, 0.0, 0.0]}
+[2m2026-10-21T20:02:24.642199Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "combo", "method": "bayes-interact", "seed": 4, "rel": 20, "prec": [0.2, 0.4, 0.1, 0.0, 0.2, 0.0, 0.0, 0.2]}
+[2m2026-10-21T20:02:41.377539Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "combo", "method": "bayes-interact", "seed": 5, "rel": 15, "prec": [0.0, 0.1, 0.1, 0.0, 0.0, 0.1, 0.2, 0.2]}
+[2m2026-10-21T20:02:59.581590Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "combo", "method": "bayes-interact", "seed": 6, "rel": 17, "prec": [0.0, 0.2, 0.0, 0.0, 0.1, 0.1, 0.2, 0.3]}
+[2m2026-10-21T20:03:16.856766Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "combo", "method": "bayes-interact", "seed": 7, "rel": 14, "prec": [0.1, 0.0, 0.2, 0.1, 0.0, 0.0, 0.0, 0.1]}
+[2m2026-10-21T20:03:35.413773Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "combo", "method": "bayes-interact", "seed": 8, "rel": 19, "prec": [0.1, 0.2, 0.2, 0.2, 0.1, 0.2, 0.0, 0.0]}
+[2m2026-10-21T20:03:52.483872Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "combo", "method": "bayes-interact", "seed": 9, "rel": 19, "prec": [0.1, 0.1, 0.0, 0.1, 0.1, 0.1, 0.0, 0.2]}
+[2m2026-10-21T19:59:27.028433Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "contrarian", "method": "bayes", "seed": 2, "rel": 31, "prec": [0.0, 0.0, 0.0, 0.1, 0.2, 0.3, 0.5, 0.3]}
+[2m2026-10-21T19:59:44.679516Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "contrarian", "method": "bayes", "seed": 3, "rel": 35, "prec": [0.1, 0.0, 0.1, 0.1, 0.5, 0.4, 0.1, 0.1]}
+[2m2026-10-21T20:00:02.452886Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "contrarian", "method": "bayes", "seed": 4, "rel": 28, "prec": [0.0, 0.0, 0.0, 0.0, 0.2, 0.0, 0.0, 0.2]}
+[2m2026-10-21T20:00:19.559759Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "contrarian", "method": "bayes", "seed": 5, "rel": 29, "prec": [0.0, 0.0, 0.0, 0.0, 0.3, 0.3, 0.2, 0.4]}
+[2m2026-10-21T20:00:36.085152Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "contrarian", "method": "bayes", "seed": 6, "rel": 28, "prec": [0.0, 0.0, 0.1, 0.1, 0.1, 0.1, 0.0, 0.0]}
+[2m2026-10-21T20:00:53.379319Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "contrarian", "method": "bayes", "seed": 7, "rel": 26, "prec": [0.0, 0.0, 0.1, 0.2, 0.3, 0.0, 0.5, 0.0]}
+[2m2026-10-21T20:01:10.177733Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "contrarian", "method": "bayes", "seed": 8, "rel": 62, "prec": [0.0, 0.1, 0.3, 0.6, 0.4, 0.5, 0.2, 0.2]}
+[2m2026-10-21T20:01:29.352990Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "contrarian", "method": "bayes", "seed": 9, "rel": 29, "prec": [0.0, 0.1, 0.4, 0.3, 0.3, 0.2, 0.1, 0.0]}
+[2m2026-10-21T20:01:47.707718Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "contrarian", "method": "bayes-interact", "seed": 2, "rel": 31, "prec": [0.1, 0.0, 0.1, 0.4, 0.3, 0.4, 0.2, 0.4]}
+[2m2026-10-21T20:02:05.747932Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "contrarian", "method": "bayes-interact", "seed": 3, "rel": 35, "prec": [0.0, 0.1, 0.1, 0.1, 0.1, 0.5, 0.4, 0.1]}
+[2m2026-10-21T20:02:23.258557Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "contrarian", "method": "bayes-interact", "seed": 4, "rel": 28, "prec": [0.0, 0.0, 0.0, 0.1, 0.1, 0.0, 0.1, 0.2]}
+[2m2026-10-21T20:02:40.240734Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "contrarian", "method": "bayes-interact", "seed": 5, "rel": 29, "prec": [0.1, 0.1, 0.2, 0.1, 0.0, 0.1, 0.3, 0.2]}
+[2m2026-10-21T20:02:58.130539Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "contrarian", "method": "bayes-interact", "seed": 6, "rel": 28, "prec": [0.0, 0.0, 0.0, 0.2, 0.2, 0.0, 0.1, 0.0]}
+[2m2026-10-21T20:03:15.605849Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "contrarian", "method": "bayes-interact", "seed": 7, "rel": 26, "prec": [0.1, 0.0, 0.1, 0.3, 0.2, 0.1, 0.2, 0.4]}
+[2m2026-10-21T20:03:34.727695Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "contrarian", "method": "bayes-interact", "seed": 8, "rel": 62, "prec": [0.0, 0.1, 0.1, 0.5, 0.3, 0.3, 0.3, 0.4]}
+[2m2026-10-21T20:03:52.555746Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "contrarian", "method": "bayes-interact", "seed": 9, "rel": 29, "prec": [0.0, 0.1, 0.3, 0.4, 0.5, 0.2, 0.3, 0.2]}
+[2m2026-10-21T19:59:26.942165Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "hidden", "method": "bayes", "seed": 2, "rel": 67, "prec": [0.1, 0.6, 0.8, 0.6, 0.8, 0.4, 0.7, 0.4]}
+[2m2026-10-21T19:59:44.735331Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "hidden", "method": "bayes", "seed": 3, "rel": 73, "prec": [0.0, 0.6, 0.5, 0.6, 1.0, 0.6, 0.5, 0.6]}
+[2m2026-10-21T20:00:02.451697Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "hidden", "method": "bayes", "seed": 4, "rel": 70, "prec": [0.2, 0.6, 0.5, 0.7, 0.3, 0.8, 0.6, 0.6]}
+[2m2026-10-21T20:00:19.093333Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "hidden", "method": "bayes", "seed": 5, "rel": 60, "prec": [0.1, 0.5, 0.7, 0.2, 0.7, 0.8, 0.2, 0.1]}
+[2m2026-10-21T20:00:35.742688Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "hidden", "method": "bayes", "seed": 6, "rel": 77, "prec": [0.2, 0.5, 0.8, 0.5, 0.5, 0.3, 0.2, 0.4]}
+[2m2026-10-21T20:00:53.308803Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "hidden", "method": "bayes", "seed": 7, "rel": 43, "prec": [0.1, 0.7, 0.5, 0.4, 0.3, 0.5, 0.1, 0.2]}
+[2m2026-10-21T20:01:11.531320Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "hidden", "method": "bayes", "seed": 8, "rel": 65, "prec": [0.2, 0.6, 0.6, 0.5, 0.5, 0.8, 0.4, 0.5]}
+[2m2026-10-21T20:01:31.027064Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "hidden", "method": "bayes", "seed": 9, "rel": 69, "prec": [0.6, 0.5, 0.8, 0.6, 0.6, 0.5, 0.5, 0.5]}
+[2m2026-10-21T20:01:48.925245Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "hidden", "method": "bayes-interact", "seed": 2, "rel": 67, "prec": [0.1, 0.5, 0.9, 1.0, 0.5, 0.4, 0.3, 0.3]}
+[2m2026-10-21T20:02:07.034854Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "hidden", "method": "bayes-interact", "seed": 3, "rel": 73, "prec": [0.1, 1.0, 0.6, 0.8, 0.9, 0.5, 0.7, 0.4]}
+[2m2026-10-21T20:02:24.622762Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "hidden", "method": "bayes-interact", "seed": 4, "rel": 70, "prec": [0.2, 0.7, 0.6, 0.7, 0.5, 0.7, 0.2, 0.6]}
+[2m2026-10-21T20:02:41.742290Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "hidden", "method": "bayes-interact", "seed": 5, "rel": 60, "prec": [0.1, 0.6, 0.7, 0.6, 0.3, 0.6, 0.1, 0.4]}
+[2m2026-10-21T20:02:59.710116Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "hidden", "method": "bayes-interact", "seed": 6, "rel": 77, "prec": [0.4, 0.6, 0.5, 0.7, 0.1, 0.8, 0.7, 0.8]}
+[2m2026-10-21T20:03:16.777041Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "hidden", "method": "bayes-interact", "seed": 7, "rel": 43, "prec": [0.1, 0.8, 0.5, 0.2, 0.3, 0.6, 0.2, 0.3]}
+[2m2026-10-21T20:03:35.058622Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "hidden", "method": "bayes-interact", "seed": 8, "rel": 65, "prec": [0.2, 0.5, 0.4, 0.7, 0.4, 0.8, 0.6, 0.2]}
+[2m2026-10-21T20:03:53.316922Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "hidden", "method": "bayes-interact", "seed": 9, "rel": 69, "prec": [0.4, 0.7, 0.6, 0.8, 0.5, 0.3, 0.7, 0.7]}
+[2m2026-10-21T19:59:26.827884Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "stated", "method": "bayes", "seed": 2, "rel": 145, "prec": [0.9, 0.8, 1.0, 1.0, 1.0, 1.0, 0.9, 0.9]}
+[2m2026-10-21T19:59:44.475580Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "stated", "method": "bayes", "seed": 3, "rel": 144, "prec": [1.0, 1.0, 0.9, 1.0, 0.9, 1.0, 1.0, 0.8]}
+[2m2026-10-21T20:00:02.515829Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "stated", "method": "bayes", "seed": 4, "rel": 145, "prec": [1.0, 1.0, 0.9, 1.0, 0.9, 1.0, 1.0, 0.8]}
+[2m2026-10-21T20:00:18.736291Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "stated", "method": "bayes", "seed": 5, "rel": 154, "prec": [0.8, 0.9, 1.0, 1.0, 0.8, 0.9, 0.8, 1.0]}
+[2m2026-10-21T20:00:35.462399Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "stated", "method": "bayes", "seed": 6, "rel": 132, "prec": [0.9, 0.8, 1.0, 1.0, 0.9, 0.8, 0.8, 0.9]}
+[2m2026-10-21T20:00:52.454235Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "stated", "method": "bayes", "seed": 7, "rel": 147, "prec": [1.0, 1.0, 1.0, 0.9, 0.9, 1.0, 0.9, 0.7]}
+[2m2026-10-21T20:01:10.017910Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "stated", "method": "bayes", "seed": 8, "rel": 142, "prec": [0.9, 1.0, 1.0, 1.0, 0.9, 0.9, 1.0, 0.8]}
+[2m2026-10-21T20:01:29.336198Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "stated", "method": "bayes", "seed": 9, "rel": 144, "prec": [1.0, 1.0, 1.0, 1.0, 0.9, 1.0, 1.0, 1.0]}
+[2m2026-10-21T20:01:47.340849Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "stated", "method": "bayes-interact", "seed": 2, "rel": 145, "prec": [0.9, 1.0, 1.0, 1.0, 0.9, 1.0, 1.0, 1.0]}
+[2m2026-10-21T20:02:05.578639Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "stated", "method": "bayes-interact", "seed": 3, "rel": 144, "prec": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.6]}
+[2m2026-10-21T20:02:23.286498Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "stated", "method": "bayes-interact", "seed": 4, "rel": 145, "prec": [0.9, 0.9, 0.9, 1.0, 1.0, 0.9, 0.9, 0.8]}
+[2m2026-10-21T20:02:40.470108Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "stated", "method": "bayes-interact", "seed": 5, "rel": 154, "prec": [0.9, 1.0, 1.0, 1.0, 0.8, 1.0, 1.0, 0.8]}
+[2m2026-10-21T20:02:57.929452Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "stated", "method": "bayes-interact", "seed": 6, "rel": 132, "prec": [0.9, 0.9, 1.0, 0.9, 0.9, 0.8, 1.0, 0.7]}
+[2m2026-10-21T20:03:15.252461Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "stated", "method": "bayes-interact", "seed": 7, "rel": 147, "prec": [0.9, 0.9, 1.0, 0.9, 1.0, 1.0, 0.8, 0.9]}
+[2m2026-10-21T20:03:34.437133Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "stated", "method": "bayes-interact", "seed": 8, "rel": 142, "prec": [1.0, 1.0, 0.8, 1.0, 0.9, 0.9, 1.0, 0.9]}
+[2m2026-10-21T20:03:51.938402Z[0m [[32m[1minfo     [0m] [1mseeded                        [0m [36mproducts_created[0m=[35m5[0m [36msellers_created[0m=[35m5[0m
+{"persona": "stated", "method": "bayes-interact", "seed": 9, "rel": 144, "prec": [0.9, 0.9, 0.9, 1.0, 1.0, 1.0, 1.0, 0.9]}

@@ -7,7 +7,7 @@ precision, and the mode targets stay unvalidated until real outcomes confirm the
 
 Usage (from backend/):
     .venv/bin/python -m eval.simulate_selective [personas] [policies] [seeds] [rounds] > selective.log
-    .venv/bin/python -m eval.simulate_selective --report selective.log [more.log ...]
+    .venv/bin/python -m eval.simulate_selective --report selective.log [more.log ...]   # summary, then like for like
 
 Policies:
     ranked                  the earlier feed: top 10 by score, with exploration slots (selective off)
@@ -71,12 +71,20 @@ def run(persona: str, policy: str, seed: int, rounds: int = 15, k: int = K) -> d
                                                   "context": ctx})  # fmt: skip
                     row[kind].append({"wanted": util[it["id"]] >= RELEVANT, "action": action,
                                       "estimate": (x.get("confidence") or {}).get("estimate")})  # fmt: skip
-            out.append(row)
+            out.append({**row, "main": tally(row["main"]), "learning": tally(row["learning"])})
     if policy == "high-nocal":
         from app.services import calibration
 
         calibration.MIN_BRIER_GAIN = 0.001
     return {"persona": persona, "policy": policy, "seed": seed, "rounds": out}
+
+
+def tally(pieces: list[dict]) -> list:
+    """[shown, wanted, rated, approved, sum of estimates over rated, rated with an estimate]: a skip is not rated."""
+    rated = [p for p in pieces if p["action"] != "skip"]
+    est = [p["estimate"] for p in rated if p["estimate"] is not None]
+    approved = sum(p["action"] in ("love", "like") for p in rated)
+    return [len(pieces), sum(p["wanted"] for p in pieces), len(rated), approved, round(sum(est), 4), len(est)]
 
 
 # ----------------------------------------------------------------- report
@@ -89,10 +97,30 @@ def _cp(k: int, n: int) -> str:
     return f"{k / n:.0%} [{lo:.0%}, {hi:.0%}]"
 
 
-def summarise(paths: list[str]) -> str:
+def _load(paths: list[str]) -> list[dict]:
     rows = [json.loads(line) for path in paths for line in open(path) if line.startswith("{")]
+    for r in rows:  # older logs kept every piece; tally them the same way
+        for rnd in r["rounds"]:
+            for kind in ("main", "learning"):
+                if rnd[kind] and isinstance(rnd[kind][0], dict):
+                    rnd[kind] = tally(rnd[kind])
+                elif not rnd[kind]:
+                    rnd[kind] = tally([])
+    return rows
+
+
+def _sum(tallies) -> list:
+    tallies = list(tallies)  # summed column by column: a generator would be spent after the first
+    return [sum(t[i] for t in tallies) for i in range(6)]
+
+
+def _rate(t: list, num: int, den: int) -> str:
+    return _cp(t[num], t[den])
+
+
+def summarise(paths: list[str]) -> str:
     groups: dict[tuple[str, str], list[dict]] = defaultdict(list)
-    for r in rows:
+    for r in _load(paths):
         groups[(r["persona"], r["policy"])].append(r)
     lines = [
         "SYNTHETIC simulation (eval/simulate_selective.py): gate behaviour in a toy world, not real-world precision.",
@@ -102,29 +130,48 @@ def summarise(paths: list[str]) -> str:
         "|---|---|---|---|---|---|---|---|",
     ]
     for (persona, policy), rs in sorted(groups.items()):
-        main = [p for r in rs for rnd in r["rounds"] for p in rnd["main"]]
-        learn = [p for r in rs for rnd in r["rounds"] for p in rnd["learning"]]
-        rated = [p for p in main if p["action"] != "skip"]
-        lrated = [p for p in learn if p["action"] != "skip"]
-        firsts = [next((rnd["round"] for rnd in r["rounds"] if rnd["main"]), None) for r in rs]
-        shown_per_round = st.mean(len(rnd["main"]) for r in rs for rnd in r["rounds"])
+        main = _sum(rnd["main"] for r in rs for rnd in r["rounds"])
+        learn = _sum(rnd["learning"] for r in rs for rnd in r["rounds"])
+        firsts = [next((rnd["round"] for rnd in r["rounds"] if rnd["main"][0]), None) for r in rs]
+        shown_per_round = st.mean(rnd["main"][0] for r in rs for rnd in r["rounds"])
         first = "never" if all(f is None for f in firsts) else (
             f"{st.median(f for f in firsts if f is not None):.0f}" + ("" if all(firsts) else " (some never)")
         )  # fmt: skip
-        lines.append(
-            f"| {persona} | {policy} | {len(rs)} | {shown_per_round:.1f} | "
-            f"{_cp(sum(p['wanted'] for p in main), len(main))} | "
-            f"{_cp(sum(p['action'] in ('love', 'like') for p in rated), len(rated))} | {first} | "
-            f"{_cp(sum(p['action'] in ('love', 'like') for p in lrated), len(lrated))} |"
-        )
+        lines.append(f"| {persona} | {policy} | {len(rs)} | {shown_per_round:.1f} | {_rate(main, 1, 0)} | "
+                     f"{_rate(main, 3, 2)} | {first} | {_rate(learn, 3, 2)} |")  # fmt: skip
     lines += ["", "Intervals: 95% Clopper-Pearson over pooled pieces (pieces within a run are not independent, so they "
               "are optimistic). A skip is not a rating."]  # fmt: skip
+    return "\n".join(lines)
+
+
+def phases(paths: list[str], policy: str = "balanced") -> str:
+    """Like for like: ``policy``'s main feed against the earlier ranked feed in the same rounds of the same seed,
+    split by whether ``policy`` had a calibration in that round."""
+    rows = _load(paths)
+    ranked = {(r["persona"], r["seed"]): r for r in rows if r["policy"] == "ranked"}
+    acc: dict[tuple[str, str], list[list]] = defaultdict(lambda: [[], []])
+    for r in rows:
+        if r["policy"] != policy or (r["persona"], r["seed"]) not in ranked:
+            continue
+        for rnd, base in zip(r["rounds"], ranked[(r["persona"], r["seed"])]["rounds"], strict=False):
+            phase = "calibrated" if rnd["state"] == "calibrated" else "not yet calibrated"
+            acc[(r["persona"], phase)][0].append(rnd["main"])
+            acc[(r["persona"], phase)][1].append(base["main"])
+    lines = [f"| Persona | Rounds | {policy}: approved / rated | Mean estimate | Earlier ranked feed, same rounds |",
+             "|---|---|---|---|---|"]  # fmt: skip
+    for (persona, phase), (mine, base) in sorted(acc.items()):
+        m, b = _sum(mine), _sum(base)
+        est = f"{m[4] / m[5]:.2f}" if m[5] else "–"
+        shown = _rate(m, 3, 2) if m[2] else "nothing shown"
+        lines.append(f"| {persona} | {phase} ({len(mine)}) | {shown} | {est} | {_rate(b, 3, 2)} |")
     return "\n".join(lines)
 
 
 def main(argv: list[str]) -> None:
     if argv and argv[0] == "--report":
         print(summarise(argv[1:]))
+        print()
+        print(phases(argv[1:]))
         return
     personas = argv[0].split(",") if argv else list(PERSONAS)
     policies = argv[1].split(",") if len(argv) > 1 else ["ranked", "balanced", "high", "extreme"]

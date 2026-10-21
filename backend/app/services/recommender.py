@@ -28,11 +28,12 @@ from __future__ import annotations
 import math
 import random
 from collections import Counter, defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 import numpy as np
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from ..ingestion.vocab import CATEGORY_GROUP, NEUTRAL_COLOURS, PREMIUM_FIBRES, QUIET_LUXURY_BRANDS
 from ..models import Feedback, InspirationImage, Product, Seller, WardrobeItem, utcnow
@@ -395,14 +396,31 @@ class Ranked:
     components: dict[str, float]
     contributions: dict[str, float]
     design_score: float
-    reasons: list[str]
-    cautions: list[str]
+    _reasons: list[str]
+    _cautions: list[str]
     nearest_positive: dict | None
     explore: bool = False
     suppressed: bool = False
     strength: float = 0.0
     sample_score: float | None = None  # score under a posterior sample (Thompson exploration)
     taste_sd: float | None = None  # uncertainty of the learned taste estimate (logit s.d.)
+    # Builds (reasons, cautions) on first use: a feed ranks thousands of pieces but shows a few dozen.
+    explainer: Callable[[], tuple[list[str], list[str]]] | None = field(default=None, repr=False)
+
+    def _explain(self) -> None:
+        if self.explainer is not None:
+            self._reasons, self._cautions = self.explainer()
+            self.explainer = None
+
+    @property
+    def reasons(self) -> list[str]:
+        self._explain()
+        return self._reasons
+
+    @property
+    def cautions(self) -> list[str]:
+        self._explain()
+        return self._cautions
 
 
 UNCERTAINTY_TOP = 1000
@@ -662,7 +680,8 @@ def _bayes_ranked(
     suppressed,
     strength,
 ) -> Ranked:
-    """Score and explain one product with the Bayesian taste model (see preference_model)."""
+    """Score one product with the Bayesian taste model (see preference_model). Its explanation is built only if
+    it is read (the feed shows a few dozen of the pieces it ranks)."""
     zm, zsd, zs = model if model else (0.0, None, 0.0)
     taste_c = float(1 / (1 + math.exp(-zm)))
     comps = {"taste": taste_c, "quality": quality_c, "value": value_c, "wardrobe": wardrobe_c, "seller": seller_c}
@@ -673,55 +692,59 @@ def _bayes_ranked(
     if suppressed:
         score -= 0.5
         sample_score -= 0.5
-
-    model_reasons: list[str] = []
-    if post.n_obs == 0:
-        model_reasons.append("Cold start: ranked on your written preferences until you make some decisions")
-    if model:
-        pos, neg = post.explain(p.id)
-        for f in pos:
-            if f["group"] == "prior":
-                model_reasons.extend(r[0].upper() + r[1:] for r in rules_why[:2])
-            elif f["group"] == "img":
-                continue  # covered by the nearest-example sentence below
-            else:
-                model_reasons.append(
-                    f"You tend to like {_feature_phrase(f['group'], f['label'])} ({_certainty(f['effect'], f['sd'])})"
-                )
-        for f in neg:
-            if f["group"] == "prior":
-                cautions.append("Doesn't match your written preferences")
-            elif f["group"] != "img":
-                cautions.append(
-                    f"You tend to avoid {_feature_phrase(f['group'], f['label'])} ({_certainty(f['effect'], f['sd'])})"
-                )
-        if any(f["group"] == "img" for f in pos) and vis_best_i >= 0 and prof.pos_visual:
-            pr = prof.pos_visual[int(vis_best_i)]
-            model_reasons.insert(0, f"Looks like pieces you liked, e.g. “{pr.label}”")
-    if not model_reasons and rules_why:
-        model_reasons.extend(r[0].upper() + r[1:] for r in rules_why[:2])
     nearest = None
     if vis_best_i >= 0 and prof.pos_visual:
         pr = prof.pos_visual[int(vis_best_i)]
         nearest = {"label": pr.label, "product_id": pr.product_id, "kind": pr.kind}
-    if p.logo_level == "visible":
-        cautions.append("Listing mentions visible logo/print")
-    if suppressed:
-        cautions.append("Near-identical to something you rejected")
-    all_reasons = list(dict.fromkeys(model_reasons + reasons))
+
+    def explain() -> tuple[list[str], list[str]]:
+        model_reasons: list[str] = []
+        warn = list(cautions)
+        if post.n_obs == 0:
+            model_reasons.append("Cold start: ranked on your written preferences until you make some decisions")
+        if model:
+            pos, neg = post.explain(p.id)
+            for f in pos:
+                if f["group"] == "prior":
+                    model_reasons.extend(r[0].upper() + r[1:] for r in rules_why[:2])
+                elif f["group"] == "img":
+                    continue  # covered by the nearest-example sentence below
+                else:
+                    model_reasons.append(
+                        f"You tend to like {_feature_phrase(f['group'], f['label'])} ({_certainty(f['effect'], f['sd'])})"
+                    )
+            for f in neg:
+                if f["group"] == "prior":
+                    warn.append("Doesn't match your written preferences")
+                elif f["group"] != "img":
+                    warn.append(
+                        f"You tend to avoid {_feature_phrase(f['group'], f['label'])} ({_certainty(f['effect'], f['sd'])})"
+                    )
+            if any(f["group"] == "img" for f in pos) and vis_best_i >= 0 and prof.pos_visual:
+                pr = prof.pos_visual[int(vis_best_i)]
+                model_reasons.insert(0, f"Looks like pieces you liked, e.g. “{pr.label}”")
+        if not model_reasons and rules_why:
+            model_reasons.extend(r[0].upper() + r[1:] for r in rules_why[:2])
+        if p.logo_level == "visible":
+            warn.append("Listing mentions visible logo/print")
+        if suppressed:
+            warn.append("Near-identical to something you rejected")
+        return list(dict.fromkeys(model_reasons + reasons))[:5], list(dict.fromkeys(warn))[:4]
+
     return Ranked(
         p,
         float(score),
         comps,
         contrib,
         taste_c,
-        all_reasons[:5],
-        list(dict.fromkeys(cautions))[:4],
+        [],
+        [],
         nearest,
         suppressed=suppressed,
         strength=strength,
         sample_score=float(sample_score),
         taste_sd=zsd,
+        explainer=explain,
     )
 
 
@@ -794,7 +817,8 @@ def feed_candidates(db: Session, prof: Profile, *, include_skipped_after_days: i
         blocked |= {
             g for (g,) in db.query(Product.group_id).filter(Product.id.in_(skipped), Product.group_id.isnot(None))
         }
-    q = db.query(Product).filter(Product.status == "active")
+    # Evidence is read for every candidate's quality; photos are loaded only for the cards actually shown.
+    q = db.query(Product).options(selectinload(Product.evidence)).filter(Product.status == "active")
     out = []
     for p in q:
         if p.id in prof.decided_ids or p.id in skipped:
