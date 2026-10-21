@@ -61,7 +61,14 @@ class Context:
         best = None
         for other_id in self._strong_neighbours(p.id):
             o = self.db.get(Product, other_id)
-            if o and o.price and o.status == "active" and o.currency == p.currency and o.price < p.price * 0.9:
+            if (
+                o
+                and o.price
+                and o.status == "active"
+                and p.currency
+                and o.currency == p.currency
+                and o.price < p.price * 0.9
+            ):
                 if best is None or o.price < best.price:
                     best = o
         if best is None:
@@ -115,7 +122,7 @@ def product_card(ctx: Context, p: Product, ranked: Ranked | None = None, detail:
     q = ctx.quality(p, design, None if ranked is None else max(0.15, ranked.strength))
     price_gbp = (
         round(p.price * ctx.rate, 2)
-        if p.price and p.currency in ("CNY", "")
+        if p.price and p.currency in ("CNY", "RMB")
         else (p.price if p.currency == "GBP" else None)
     )
     landed = estimate_landed_cost(p.price, p.currency, p.category, ctx.rate, ctx.landed_cfg)

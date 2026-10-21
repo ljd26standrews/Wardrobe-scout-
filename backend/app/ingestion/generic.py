@@ -61,7 +61,7 @@ def parse_generic_product(html: str, url: str) -> RawListing:
     description = None
     images: list[str] = []
     price = None
-    currency = "CNY"
+    currency = ""  # unknown unless the page states it
     available = None
     external_id = None
 
@@ -129,7 +129,7 @@ def parse_generic_product(html: str, url: str) -> RawListing:
         image_urls=images,
         image_referer=url,
         price=price,
-        currency=currency.upper() if currency else "CNY",
+        currency=currency.upper() if currency else "",
         available=available,
         links={"seller": url},
         fetched_at=_now(),
@@ -188,7 +188,7 @@ def shopify_product_to_listing(p: dict, base_url: str) -> RawListing:
         image_thumbs=[shopify_thumb(i["src"]) for i in p.get("images") or [] if i.get("src")],
         image_referer=url,
         price=min(prices) if prices else None,
-        currency="",  # Shopify feed has no currency; caller sets from seller config
+        currency="",  # the products.json feed does not state a currency: unknown, never assumed
         sizes=sizes,
         available=any(v.get("available") for v in variants) if variants else None,
         links={"seller": url},

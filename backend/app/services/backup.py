@@ -303,7 +303,7 @@ def import_all(db: Session, data: dict) -> dict:
             fit_tags=p.get("fit_tags") or [],
             logo_level=p.get("logo_level") or "unknown",
             price=p.get("price"),
-            currency=p.get("currency") or "CNY",
+            currency=(p["currency"] if "currency" in p else "CNY") or "",  # "" = not stated, kept as unknown
             source_url=p["source_url"],
             links=p.get("links") or {},
             status=p.get("status") or "active",

@@ -71,7 +71,7 @@ def score_dimension(items: list[Evidence]) -> dict:
 def category_price_stats(db: Session) -> dict[str, float]:
     by_cat: dict[str, list[float]] = {}
     for cat, price in db.query(Product.category, Product.price).filter(
-        Product.price.isnot(None), Product.status == "active", Product.currency.in_(["CNY", ""])
+        Product.price.isnot(None), Product.status == "active", Product.currency.in_(["CNY", "RMB"])
     ):
         by_cat.setdefault(cat or "other", []).append(price)
     return {k: median(v) for k, v in by_cat.items() if len(v) >= 3}

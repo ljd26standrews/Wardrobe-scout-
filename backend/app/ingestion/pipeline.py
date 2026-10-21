@@ -52,11 +52,13 @@ class UpsertResult:
 
 
 def content_hash(raw: RawListing) -> str:
+    """Fingerprint of everything a listing states. A different fingerprint means the page is re-applied."""
     payload = json.dumps(
-        [raw.title, raw.description, raw.price, sorted(raw.image_urls), raw.sizes, raw.available],
+        [raw.title, raw.description, raw.price, sorted(raw.image_urls), raw.sizes, raw.available, raw.currency,
+         sorted(raw.links.items())],
         ensure_ascii=False,
         default=str,
-    )
+    )  # fmt: skip
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
@@ -86,7 +88,7 @@ def _apply_attributes(p: Product, raw: RawListing, use_ai: bool) -> None:
     p.logo_level = attrs.logo_level
     p.seasons = attrs.seasons
     p.price = raw.price if raw.price is not None else attrs.price
-    p.currency = raw.currency or "CNY"
+    p.currency = (raw.currency or "").upper()  # "" = not stated: never assumed
     links = dict(attrs.links)
     links.update(raw.links)
     p.links = links
@@ -181,13 +183,20 @@ def upsert_listing(
         )
         db.add(p)
     else:
-        if p.status != "active":
-            changes.append(f"status {p.status} → active")
+        observed = "unavailable" if raw.available is False else "active"
+        if p.status != observed:
+            changes.append(f"status {p.status} → {observed}")
         old_price, old_sizes = p.price, list(p.sizes or [])
+        old_currency, old_links = p.currency, dict(p.links or {})
         if p.content_hash == h and p.completeness != "seed_unverified":
+            # Unchanged page: only freshness moves. Stock state follows what the page says (a sold-out
+            # listing seen again is still sold out).
             p.last_seen_at = now
-            p.status = "active"
+            p.status = observed
             p.detail_fetched_at = now
+            if changes:
+                db.add(ProductObservation(product=p, observed_at=now, price=p.price, sizes=p.sizes, status=p.status,
+                                          source_url=raw.source_url, change="; ".join(changes)))  # fmt: skip
             update_state(p)
             db.flush()
             return UpsertResult(p, False, changes)
@@ -208,6 +217,13 @@ def upsert_listing(
             changes.append(f"price {old_price:g} → {p.price:g}")
         if sorted(old_sizes) != sorted(p.sizes or []):
             changes.append(f"sizes {old_sizes} → {p.sizes}")
+        if (old_currency or "") != (p.currency or ""):
+            changes.append(f"currency {old_currency or 'unknown'} → {p.currency or 'unknown'}")
+        changed_links = sorted(
+            k for k in set(old_links) | set(p.links or {}) if old_links.get(k) != (p.links or {}).get(k)
+        )
+        if changed_links:
+            changes.append(f"links changed: {', '.join(changed_links)}")
         if raw.available is False:
             changes.append("marked unavailable")
 

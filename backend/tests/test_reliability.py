@@ -254,3 +254,46 @@ def test_snapshot_restore_rejects_paths_outside_the_folder(tmp_path):
     with pytest.raises(ValueError):
         restore_full_snapshot(bad, tmp_path / "t")
     assert not (tmp_path / "escape.txt").exists()
+
+
+# ------------------------------------------------------------------ 1e: truthful ingestion
+def test_sold_out_listing_seen_again_unchanged_stays_unavailable(db):
+    from app.ingestion.base import RawListing
+    from app.ingestion.pipeline import upsert_listing
+
+    s = _seller(db)
+    for _ in range(2):
+        p = upsert_listing(db, s, RawListing("u1", "https://shop.example/u1", "coat ¥500", available=False)).product
+    assert p.status == "unavailable"
+    # ...and back in stock is recorded as a change, even though nothing else on the page changed
+    p = upsert_listing(db, s, RawListing("u1", "https://shop.example/u1", "coat ¥500", available=True)).product
+    assert p.status == "active" and any("unavailable → active" in (o.change or "") for o in p.observations)
+
+
+def test_currency_and_purchase_link_changes_are_applied_and_recorded(db):
+    from app.ingestion.base import RawListing
+    from app.ingestion.pipeline import upsert_listing
+
+    s = _seller(db)
+    a = {"weidian": "https://weidian.com/item.html?itemID=1"}
+    b = {"weidian": "https://weidian.com/item.html?itemID=2"}
+    upsert_listing(db, s, RawListing("v1", "https://shop.example/v1", "coat", price=500, currency="CNY", links=a))
+    res = upsert_listing(db, s, RawListing("v1", "https://shop.example/v1", "coat", price=500, currency="USD", links=b))
+    p = res.product
+    assert p.currency == "USD" and p.links["weidian"].endswith("itemID=2")
+    assert any("currency CNY → USD" in c for c in res.changes) and any("links changed" in c for c in res.changes)
+
+
+def test_unstated_currency_is_unknown_not_cny(db):
+    from app.ingestion.generic import parse_generic_product, shopify_product_to_listing
+    from app.ingestion.pipeline import upsert_listing
+    from app.services.landed_cost import estimate_landed_cost
+
+    s = _seller(db)
+    raw = shopify_product_to_listing({"id": 1, "handle": "coat", "title": "Coat", "variants": [{"price": "120.00"}]},
+                                     "https://shop.example")  # fmt: skip
+    p = upsert_listing(db, s, raw).product
+    assert p.currency == "" and p.price == 120
+    html = '<script type="application/ld+json">{"@type":"Product","name":"Knit","offers":{"price":"90"}}</script>'
+    assert parse_generic_product(html, "https://shop.example/p/knit").currency == ""
+    assert estimate_landed_cost(120, "", "overcoat", 0.1, {}) is None

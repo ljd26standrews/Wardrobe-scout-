@@ -18,7 +18,9 @@ def estimate_landed_cost(
 ) -> dict | None:
     if price is None or price <= 0:
         return None
-    if currency and currency.upper() not in ("CNY", "RMB", ""):
+    if not currency:
+        return None  # currency not stated: better to show nothing than a wrong number
+    if currency.upper() not in ("CNY", "RMB"):
         if currency.upper() == "GBP":
             goods_gbp = price
         else:
