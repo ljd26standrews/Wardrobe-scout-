@@ -30,6 +30,7 @@ import os
 import random
 import sys
 import tempfile
+from contextlib import contextmanager
 
 import numpy as np
 from PIL import Image, ImageDraw
@@ -51,6 +52,7 @@ RELEVANT = 0.7
 ABLATIONS = {
     "bayes-nobg": {"BACKGROUND_WEIGHT": 0.0},
     "bayes-fullbg": {"BACKGROUND_SCALES_WITH_POSITIVES": False},
+    "bayes-interact": {"INTERACTIONS": True},  # colour × garment-type combinations (selective M7)
 }
 
 
@@ -134,7 +136,19 @@ def u_contra(it: dict) -> float:
     return s + {"no logo": 0.05, "small logo": 0, "large logo print": -0.2}[it["logo"]]
 
 
-PERSONAS = {"stated": u_stated, "hidden": u_hidden, "contrarian": u_contra}
+COMBOS = {("black", "hoodie"), ("navy", "overcoat"), ("camel", "knitwear"), ("cream", "trousers"),
+          ("grey", "zip jacket"), ("olive", "cardigan"), ("white", "shirt")}  # fmt: skip
+
+
+def u_combo(it: dict) -> float:
+    """Taste in combinations: each colour is wanted in one garment type only (black hoodies, but not black
+    trousers), which no sum of a colour weight and a garment-type weight can express."""
+    s = 0.6 if (it["col"], it["cat"]) in COMBOS else -0.1
+    s += {"cashmere": 0.15, "wool": 0.15, "cotton": 0.05, "linen": 0, "polyester": -0.2}[it["mat"]]
+    return s + {"no logo": 0.1, "small logo": 0, "large logo print": -0.3}[it["logo"]]
+
+
+PERSONAS = {"stated": u_stated, "hidden": u_hidden, "contrarian": u_contra, "combo": u_combo}
 
 
 def normalise(us: dict[str, float]) -> dict[str, float]:
@@ -166,9 +180,11 @@ def decide(it: dict, u: float, fn) -> tuple[str, list[str]]:
 
 
 # --------------------------------------------------------------- harness
-def run(persona: str, method: str, seed: int, rounds: int = 8, k: int = 10, policy: str = "ranked") -> dict:
-    """``policy``: "ranked" is the feed these engine comparisons were made with (selective recommendation off,
-    exploration slots in the main feed), so RESULTS.md stays reproducible; "selective" serves the gated feed."""
+@contextmanager
+def world(seed: int, *, engine: str = "bayes", cold_start_k: int | None = None, selective: bool = False):
+    """A throwaway installation holding the synthetic catalogue for ``seed``, served through the real app.
+
+    Yields (client, ext_of): a TestClient and product id -> catalogue id."""
     tmp = tempfile.mkdtemp(prefix="wseval")
     os.environ.update(
         WS_DATA_DIR=tmp, WS_DATABASE_URL=f"sqlite:///{tmp}/e.db", WS_ENABLE_SCHEDULER="false",
@@ -190,16 +206,10 @@ def run(persona: str, method: str, seed: int, rounds: int = 8, k: int = 10, poli
     from app.services.images import phash_of, store_image_bytes
     from app.services.settings_store import get_setting, set_setting
 
-    items = catalogue(seed)
-    fn = PERSONAS[persona]
-    util = normalise({it["id"]: fn(it) for it in items})
-    relevant = {i for i, u in util.items() if u >= RELEVANT}
-    by_ext = {it["id"]: it for it in items}
-    results = []
     with TestClient(create_app(), headers={"X-WS-Token": "eval"}) as c:
         db = SessionLocal()
         sellers: dict[str, Seller] = {}
-        for it in items:
+        for it in catalogue(seed):
             if it["seller"] not in sellers:
                 sellers[it["seller"]] = Seller(name=it["seller"], slug=it["seller"], platform="manual")
                 db.add(sellers[it["seller"]])
@@ -217,15 +227,30 @@ def run(persona: str, method: str, seed: int, rounds: int = 8, k: int = 10, poli
             process_images(db, p, None)
         db.commit()
         cfg = get_setting(db, "recommender")
-        cfg["engine"] = "bayes" if method.startswith("bayes") else "legacy"
-        if method == "rules_only":
-            cfg["cold_start_k"] = 10**9
+        cfg["engine"] = engine
+        if cold_start_k is not None:
+            cfg["cold_start_k"] = cold_start_k
         set_setting(db, "recommender", cfg)
         sel = get_setting(db, "selective")
-        sel["enabled"] = policy == "selective"
+        sel["enabled"] = selective
         set_setting(db, "selective", sel)
         ext_of = {p.id: p.external_id for p in db.query(Product)}
         db.close()
+        yield c, ext_of
+
+
+def run(persona: str, method: str, seed: int, rounds: int = 8, k: int = 10, policy: str = "ranked") -> dict:
+    """``policy``: "ranked" is the feed these engine comparisons were made with (selective recommendation off,
+    exploration slots in the main feed), so RESULTS.md stays reproducible; "selective" serves the gated feed."""
+    items = catalogue(seed)
+    fn = PERSONAS[persona]
+    util = normalise({it["id"]: fn(it) for it in items})
+    relevant = {i for i, u in util.items() if u >= RELEVANT}
+    by_ext = {it["id"]: it for it in items}
+    results = []
+    engine = "bayes" if method.startswith("bayes") else "legacy"
+    with world(seed, engine=engine, cold_start_k=10**9 if method == "rules_only" else None,
+               selective=policy == "selective") as (c, ext_of):  # fmt: skip
         rng = random.Random(seed + 99)
         decided: set[int] = set()
         found = 0

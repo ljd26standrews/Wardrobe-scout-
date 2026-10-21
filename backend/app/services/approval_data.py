@@ -48,10 +48,13 @@ def family_of(product: Product | None, snapshot: dict | None, product_id: int | 
     return f"d{(snapshot or {}).get('source_url') or ''}"
 
 
-def rated_outcomes(db: Session) -> list[RatedOutcome]:
-    """The latest explicit decision per garment family, oldest first."""
+def rated_outcomes(db: Session, before: datetime | None = None) -> list[RatedOutcome]:
+    """The latest explicit decision per garment family, oldest first (``before``: as known at that time)."""
     latest: dict[int | str, Feedback] = {}
-    for fb in db.query(Feedback).order_by(Feedback.created_at, Feedback.id):
+    query = db.query(Feedback)
+    if before is not None:
+        query = query.filter(Feedback.created_at < before)
+    for fb in query.order_by(Feedback.created_at, Feedback.id):
         if (fb.context or {}).get("seed"):
             continue
         key: int | str = fb.product_id if fb.product_id is not None else f"d{(fb.snapshot or {}).get('source_url')}"

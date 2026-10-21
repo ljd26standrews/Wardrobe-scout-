@@ -169,3 +169,24 @@ def test_posterior_is_cached_until_the_evidence_changes(env, db):
     _feedback(db, ps[1], "dislike")
     _, c = _fit(db)
     assert c is not a and c.n_obs == 2
+
+
+# ----------------------------------------------------------------- interaction features (selective M7)
+def test_combinations_exist_only_when_switched_on_and_are_shrunk(env, db, monkeypatch):
+    from app.services import preference_model as pm
+
+    s = _seller(db, "cb")
+    ps = [_product(db, s, f"k{i}", f"{c} wool {cat} {i}") for i, (c, cat) in
+          enumerate([("black", "hoodie"), ("black", "trousers"), ("navy", "hoodie")] * 3)]  # fmt: skip
+    assert not any(g == pm.COMBO for g, _ in _space(db).vocab)
+    monkeypatch.setattr(pm, "INTERACTIONS", True)
+    space = _space(db)
+    combos = {label for g, label in space.vocab if g == pm.COMBO}
+    assert combos == {"black|hoodie", "black|trousers", "navy|hoodie"}
+    _, q0 = pm.prior(space)
+    j = 1 + space.vocab[(pm.COMBO, "black|hoodie")]
+    assert q0[j] == 1 / pm.PRIOR_VAR_COMBO > q0[1 + space.vocab[("colour", "black")]]
+    _feedback(db, ps[1], "dislike", ["colour"])  # a colour-only rejection
+    post = pm.fit(db, space)
+    assert abs(post.mean[1 + space.vocab[(pm.COMBO, "black|trousers")]]) < 1e-6  # teaches no combination
+    assert post.mean[1 + space.vocab[("colour", "black")]] < -0.05

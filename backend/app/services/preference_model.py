@@ -48,6 +48,7 @@ import math
 import threading
 from collections import Counter, OrderedDict
 from dataclasses import dataclass
+from datetime import datetime
 
 import numpy as np
 from scipy import sparse
@@ -73,6 +74,12 @@ BACKGROUND_WEIGHT = 2.0  # total weight of the background sample (≈ two weak "
 BACKGROUND_SAMPLE = 300
 MIN_PCA_PRODUCTS = 3  # photographed products needed before image components exist (was 18)
 BACKGROUND_SCALES_WITH_POSITIVES = True  # ablation switch (eval/simulate.py): False = full weight always
+# Colour × garment-type combinations ("black hoodies" but not "black trousers"), selective M7. Off unless the
+# simulation shows they help someone and harm no one (eval/RESULTS.md). Their prior is much tighter than a single
+# attribute's, so a combination moves only with repeated evidence; no rejection reason teaches one on its own.
+INTERACTIONS = False
+PRIOR_VAR_COMBO = 0.05
+COMBO = "combo"
 PRIOR_SCALE = 2.0  # written-profile score (0..1) -> logit units: (score - 0.5) * PRIOR_SCALE. Calibrated on seed 1:
 # 2.0 vs 4.0 gave up a little when the profile is right (0.95→0.89) but gained when it is partly or
 # wholly wrong (0.46→0.54, 0.16→0.23), the best average. Held-out seeds are reported in eval/RESULTS.md.
@@ -101,6 +108,7 @@ GROUP_LABEL = {
     "fit": "fit",
     "logo": "branding",
     "brand": "brand/style",
+    COMBO: "colour and garment type together",
 }
 
 
@@ -116,6 +124,8 @@ def attr_keys(obj) -> list[tuple[str, str]]:
     logo = g("logo_level")
     if logo and logo != "unknown":
         keys.append(("logo", logo))
+    if INTERACTIONS and g("category"):
+        keys += [(COMBO, f"{c}|{g('category')}") for c in (g("colours") or [])]
     return keys
 
 
@@ -197,7 +207,9 @@ def build_feature_space(db: Session, taste: dict, backend: str) -> FeatureSpace:
     history_keys = sorted({k for fb in _orphaned_feedback(db) for k in attr_keys(fb.snapshot)})
     key = hashlib.sha1(
         json.dumps(
-            [n, str(last), backend, taste, PRIOR_SCALE, wardrobe_keys, history_keys], sort_keys=True, default=str
+            [n, str(last), backend, taste, PRIOR_SCALE, INTERACTIONS, wardrobe_keys, history_keys],
+            sort_keys=True,
+            default=str,
         ).encode()
     ).hexdigest()
     with _cache_lock:
@@ -327,9 +339,11 @@ class Posterior:
         feats = []
         for j in range(1, self.space.img_slice.start):  # attribute features only
             sd = float(msd[j])
-            if abs(self.mean[j]) < 0.02 and sd > 0.95 * math.sqrt(PRIOR_VAR_ATTR):
-                continue  # nothing learned about this feature yet
             group, label = self.space.feature_name(j)
+            if abs(self.mean[j]) < 0.02 and sd > 0.95 * math.sqrt(
+                PRIOR_VAR_COMBO if group == COMBO else PRIOR_VAR_ATTR
+            ):
+                continue  # nothing learned about this feature yet
             feats.append({"group": group, "label": label, "mean": round(float(self.mean[j]), 3), "sd": round(sd, 3)})
         feats.sort(key=lambda f: -abs(f["mean"]))
         return {
@@ -354,6 +368,13 @@ def observations(db: Session, space: FeatureSpace) -> tuple[list[np.ndarray], li
     return rows, ys, ws, n_real
 
 
+def _family_of_key(key: int | tuple, group_of: dict[int, int]) -> str:
+    """The approval-label family of a decision key (a product id, or ("deleted", source url))."""
+    if isinstance(key, tuple):
+        return f"d{key[1]}"
+    return f"g{group_of[key]}" if key in group_of else f"p{key}"
+
+
 def family_key(family: tuple) -> str:
     """The garment-family key used by approval labels ("g<group>", "p<product>", "d<url>")."""
     kind, value = family
@@ -364,11 +385,22 @@ def family_key(family: tuple) -> str:
     return f"p{value}"
 
 
-def observations_with_families(db: Session, space: FeatureSpace) -> tuple[list, list, list, int, list]:
+def observations_with_families(
+    db: Session, space: FeatureSpace, *, exclude: frozenset[str] = frozenset(), before: datetime | None = None
+) -> tuple[list, list, list, int, list]:
     """``observations`` plus, for each row, the garment family of the decision it came from (None for
-    inspiration, wardrobe and background rows), so an out-of-fold fit can leave a fold's decisions out."""
+    inspiration, wardrobe and background rows).
+
+    ``exclude``: garment families (approval-label keys "g…", "p…", "d…") left out entirely, as if never decided:
+    their pieces become undecided, exactly like candidates being served. ``before``: only what was known before
+    that time. Either way the background sample and its weight are built from what remains, so a left-out label
+    cannot leak back in through them (out-of-fold calibration, rolling-origin evaluation)."""
+    group_of = dict(db.query(Product.id, Product.group_id).filter(Product.group_id.isnot(None)))
+    query = db.query(Feedback)
+    if before is not None:
+        query = query.filter(Feedback.created_at < before)
     latest: dict[int | tuple, Feedback] = {}
-    for fb in db.query(Feedback).order_by(Feedback.created_at):
+    for fb in query.order_by(Feedback.created_at):
         if fb.action == "skip":
             continue
         if fb.product_id is not None:
@@ -377,11 +409,12 @@ def observations_with_families(db: Session, space: FeatureSpace) -> tuple[list, 
             key = ("deleted", fb.snapshot.get("source_url") or fb.id)
         else:
             continue
+        if exclude and _family_of_key(key, group_of) in exclude:
+            continue
         if fb.action == "unsave":
             latest.pop(key, None)
             continue
         latest[key] = fb
-    group_of = dict(db.query(Product.id, Product.group_id).filter(Product.group_id.isnot(None)))
     decisions = []  # (family, x, y, w)
     for pid, fb in latest.items():
         if fb.action not in LABEL or (isinstance(pid, int) and pid not in space.row):
@@ -406,14 +439,14 @@ def observations_with_families(db: Session, space: FeatureSpace) -> tuple[list, 
         families.append(family_key(family))
     n_real = len(family_size)
     for img in db.query(InspirationImage).filter(InspirationImage.embedding.isnot(None)):
-        if img.embedding_backend == space.backend:
+        if img.embedding_backend == space.backend and (before is None or img.added_at < before):
             rows.append(space.vector([], image=emb.from_bytes(img.embedding)))
             ys.append(1 if img.polarity > 0 else 0)
             ws.append(1.0)
             n_real += 1
     for item in db.query(WardrobeItem):
         rating = item.rating or 3
-        if rating == 3:
+        if rating == 3 or (before is not None and item.added_at >= before):
             continue
         image = emb.from_bytes(item.embedding) if item.embedding_backend == space.backend else None
         rows.append(space.vector(attr_keys(item), image=image))
@@ -464,6 +497,9 @@ def prior(space: FeatureSpace) -> tuple[np.ndarray, np.ndarray]:
     m0[0] = PRIOR_MEAN_TRUST
     q0 = np.full(space.d, 1 / PRIOR_VAR_ATTR)
     q0[space.img_slice] = 1 / PRIOR_VAR_IMG
+    for (group, _), i in space.vocab.items():
+        if group == COMBO:
+            q0[1 + i] = 1 / PRIOR_VAR_COMBO
     q0[0] = 1 / PRIOR_VAR_TRUST
     q0[space.bias] = 1 / PRIOR_VAR_BIAS
     return m0, q0

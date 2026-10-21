@@ -101,21 +101,32 @@ def fold_of(family: str, k: int) -> int:
     return int(hashlib.sha1(family.encode()).hexdigest(), 16) % k
 
 
-def out_of_fold(db: Session, space: pm.FeatureSpace, outcomes: list[RatedOutcome], folds: int = FOLDS):
-    """(m, s, y, fold) for every rated piece, each scored by a taste model fitted without its fold's decisions."""
-    rows, ys, ws, n_real, row_fams = pm.observations_with_families(db, space)
+def out_of_fold(
+    db: Session,
+    space: pm.FeatureSpace,
+    outcomes: list[RatedOutcome],
+    folds: int = FOLDS,
+    *,
+    exclude: frozenset[str] = frozenset(),
+    before: datetime | None = None,
+):
+    """(m, s, y, fold) for every rated piece, each scored by a taste model fitted without its fold's decisions.
+
+    A held-out family is left out of training entirely (also from the background sample and its weight), so its
+    pieces are scored exactly as an undecided candidate would be. ``exclude``/``before`` restrict the training
+    data further (rolling-origin evaluation)."""
     X, y, fams = label_matrix(space, outcomes)
     k = max(2, min(folds, len(set(fams))))
     fold = np.array([fold_of(f, k) for f in fams], dtype=int)
     m, s = np.zeros(len(y)), np.zeros(len(y))
     for i in range(k):
-        held = {f for f, fi in zip(fams, fold, strict=True) if fi == i}
-        keep = [j for j, f in enumerate(row_fams) if f is None or f not in held]
-        post = pm.fit_rows(space, [rows[j] for j in keep], [ys[j] for j in keep], [ws[j] for j in keep], n_real)
         idx = np.flatnonzero(fold == i)
-        if len(idx):
-            m[idx] = X[idx] @ post.mean
-            s[idx] = post.logit_sd(X[idx])
+        if not len(idx):
+            continue
+        held = exclude | {fams[j] for j in idx}
+        post = pm.fit_rows(space, *pm.observations_with_families(db, space, exclude=held, before=before)[:4])
+        m[idx] = X[idx] @ post.mean
+        s[idx] = post.logit_sd(X[idx])
     return m, s, y, fold
 
 
@@ -186,6 +197,29 @@ def diagnostics(m: np.ndarray, y: np.ndarray, fold: np.ndarray) -> dict:
     }  # fmt: skip
 
 
+def fit_map(
+    db: Session,
+    space: pm.FeatureSpace,
+    outcomes: list[RatedOutcome],
+    *,
+    exclude: frozenset[str] = frozenset(),
+    before: datetime | None = None,
+) -> tuple[float, float, np.ndarray, dict, np.ndarray, np.ndarray]:
+    """The whole calibration procedure on these labels, storing nothing: out-of-fold logits, Bayesian Platt,
+    nested diagnostics, and the identity map unless Platt beats it out of fold. (a, b, cov, diagnostics, y, fold)"""
+    m, _, y, fold = out_of_fold(db, space, outcomes, exclude=exclude, before=before)
+    a, b, cov = fit_platt(m, y)
+    diag = diagnostics(m, y, fold)
+    use_platt = diag["brier_calibrated"] < diag["brier_raw"] - MIN_BRIER_GAIN
+    if not use_platt:  # the model's own probabilities did as well: keep them (the uncertainty in cov stays)
+        a, b = 1.0, 0.0
+    diag["map"] = "platt" if use_platt else "identity"
+    diag["brier_chosen"] = diag["brier_calibrated"] if use_platt else diag["brier_raw"]
+    diag["ece_chosen"] = diag["ece_calibrated"] if use_platt else diag["ece_raw"]
+    diag["reliability_chosen"] = diag["reliability"] if use_platt else diag["reliability_raw"]
+    return a, b, cov, diag, y, fold
+
+
 # ----------------------------------------------------------------- lifecycle
 def _label_keys(outcomes: list[RatedOutcome]) -> list[str]:
     return sorted(f"{o.family}:{o.y}:{o.feedback_id}" for o in outcomes)
@@ -236,17 +270,7 @@ def recalibrate(db: Session, *, force: bool = False) -> dict:
     cur = active(db)
     if cur is not None and not force and cur.label_hash == label_hash and not _catalogue_grew(cur, n_products):
         return {"status": "unchanged", "calibration_id": cur.id, **suff}
-    space = _space(db)
-    m, s, y, fold = out_of_fold(db, space, outcomes)
-    a, b, cov = fit_platt(m, y)
-    diag = diagnostics(m, y, fold)
-    use_platt = diag["brier_calibrated"] < diag["brier_raw"] - MIN_BRIER_GAIN
-    if not use_platt:  # the model's own probabilities did as well: keep them (the uncertainty in cov stays)
-        a, b = 1.0, 0.0
-    diag["map"] = "platt" if use_platt else "identity"
-    diag["brier_chosen"] = diag["brier_calibrated"] if use_platt else diag["brier_raw"]
-    diag["ece_chosen"] = diag["ece_calibrated"] if use_platt else diag["ece_raw"]
-    diag["reliability_chosen"] = diag["reliability"] if use_platt else diag["reliability_raw"]
+    a, b, cov, diag, y, fold = fit_map(db, _space(db), outcomes)
     db.query(Calibration).filter(Calibration.active.is_(True)).update({Calibration.active: False})
     cal = Calibration(engine_version=pm.ENGINE_VERSION, method=METHOD, n_labels=len(y), n_positive=int(y.sum()),
                       label_hash=label_hash, active=True,

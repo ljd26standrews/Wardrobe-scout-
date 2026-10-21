@@ -628,6 +628,8 @@ GROUP_WORD = {"colour": "colour", "category": "", "fibre": "", "fit": "fit", "lo
 
 
 def _feature_phrase(group: str, label: str) -> str:
+    if group == "combo":  # "black|hoodie"
+        return label.replace("|", " ")
     if group == "logo":
         return {"none": "no visible branding", "subtle": "subtle branding", "visible": "visible logos"}.get(
             label, label

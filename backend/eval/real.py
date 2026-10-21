@@ -31,9 +31,7 @@ import argparse
 import hashlib
 import json
 import math
-import os
 import random
-import sqlite3
 import statistics as st
 import sys
 import tempfile
@@ -230,28 +228,20 @@ def main(argv: list[str] | None = None) -> int:
 
     from app.config import get_settings
 
-    s = get_settings()
-    src = Path(args.db) if args.db else Path(s.database_url.removeprefix("sqlite:///"))
+    from .dbcopy import open_copy, source_database
+
+    src = source_database(args.db)
     if not src.is_file():
         print(f"database not found: {src}", file=sys.stderr)
         return 2
-    out_dir = Path(args.data_dir) if args.data_dir else s.data_dir
+    out_dir = Path(args.data_dir) if args.data_dir else get_settings().data_dir
     eval_dir = out_dir / "evaluation"
     frozen_path = eval_dir / "frozen_test_set.json"
 
     with tempfile.TemporaryDirectory(prefix="ws-eval-") as tmp:
-        copy = Path(tmp) / "eval.db"
-        with sqlite3.connect(src.resolve().as_uri() + "?mode=ro", uri=True) as a, sqlite3.connect(copy) as b:
-            a.backup(b)
-        os.environ["WS_DATABASE_URL"] = f"sqlite:///{copy}"
-        get_settings.cache_clear()
-        from app.db import SessionLocal, init_engine, migrate
-
-        init_engine(f"sqlite:///{copy}")
-        migrate()  # the copy only
+        db = open_copy(src, Path(tmp))
         from app.models import Judgement
 
-        db = SessionLocal()
         try:
             if args.freeze:
                 ids = [j.id for j in db.query(Judgement).order_by(Judgement.id)]

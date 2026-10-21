@@ -156,3 +156,37 @@ def test_a_failed_recalibration_is_retried_only_after_a_pause(env, db, monkeypat
     db.commit()
     calibration.maybe_schedule(db)
     assert queued == ["recalibrate"]
+
+
+def test_a_held_out_label_cannot_leak_through_the_background(env, db):
+    """With little approval evidence the background sample's weight scales with the approvals in the training
+    data. A held-out piece's own label must not count towards it, or its out-of-fold score would depend on it."""
+    from app.models import Feedback
+    from app.services import calibration
+    from app.services import preference_model as pm
+    from app.services.approval_data import rated_outcomes
+
+    ps = [p for p, _ in _world(db, n=30, rated=0)]
+    target = ps[0]
+    db.add(Feedback(product_id=ps[1].id, action="like"))  # one approval: the background weight is not capped
+    db.add_all(Feedback(product_id=p.id, action="dislike") for p in ps[2:10])
+    fb = Feedback(product_id=target.id, action="dislike")
+    db.add(fb)
+    db.commit()
+    space = calibration._space(db)
+    held = frozenset({f"p{target.id}"})
+
+    def background():
+        _, ys, ws, _, fams = pm.observations_with_families(db, space, exclude=held)
+        return [w for w, y, f in zip(ws, ys, fams, strict=True) if f is None and y == 0]
+
+    def own_score():
+        outcomes = rated_outcomes(db)
+        m, *_ = calibration.out_of_fold(db, space, outcomes)
+        return m[[o.product_id for o in outcomes].index(target.id)]
+
+    bg, m = background(), own_score()
+    fb.action = "love"  # the held-out label flips from rejection to the strongest approval
+    db.commit()
+    assert background() == bg and len(bg) > 0
+    assert own_score() == pytest.approx(m)
