@@ -207,8 +207,10 @@ function ImportPanel({ sellers, onDone }: { sellers: Seller[]; onDone: () => voi
   const watch = useJobWatcher();
   const [url, setUrl] = useState("");
   const [busy, setBusy] = useState(false);
-  const backend = process.env.NEXT_PUBLIC_BACKEND_PUBLIC_URL || (typeof window !== "undefined" ? `${window.location.protocol}//${window.location.hostname}:8000` : "http://localhost:8000");
-  const bookmarklet = `javascript:(()=>{fetch('${backend}/api/import/bookmarklet',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:location.href,html:document.documentElement.outerHTML})}).then(r=>r.json()).then(j=>alert(j.ok?'Wardrobe Scout: saved '+(j.created?'new':'updated')+' product':'Wardrobe Scout: '+(j.error||j.detail))).catch(e=>alert('Wardrobe Scout is not reachable: '+e))})()`;
+  const backend = process.env.NEXT_PUBLIC_BACKEND_PUBLIC_URL || "http://localhost:8000";
+  const { data: bm } = useSWR<{ token: string }>("/api/bookmarklet-config");
+  const token = bm?.token ?? "";
+  const bookmarklet = `javascript:(()=>{fetch('${backend}/api/import/bookmarklet',{method:'POST',headers:{'Content-Type':'application/json','X-WS-Token':'${token}'},body:JSON.stringify({url:location.href,html:document.documentElement.outerHTML})}).then(r=>r.json()).then(j=>alert(j.ok?'Wardrobe Scout: saved '+(j.created?'new':'updated')+' product':'Wardrobe Scout: '+(j.error||j.detail))).catch(e=>alert('Wardrobe Scout is not reachable: '+e))})()`;
   const bookmarkletRef = (el: HTMLAnchorElement | null) => {
     if (el) el.setAttribute("href", bookmarklet);
   };
@@ -360,7 +362,7 @@ function ImportPanel({ sellers, onDone }: { sellers: Seller[]; onDone: () => voi
               <Plus className="size-4" /> Save to Wardrobe Scout
             </a>
             <p className="text-muted-foreground">
-              It sends the page you are viewing (as your browser sees it) to your local backend at <code className="rounded bg-muted px-1">{backend}</code>. It never logs in, solves CAPTCHAs or reads other tabs. Safari on iPhone: add any bookmark, then edit its address and paste the code below.
+              It sends the page you are viewing (as your browser sees it) to your local backend at <code className="rounded bg-muted px-1">{backend}</code>. It never logs in, solves CAPTCHAs or reads other tabs. It contains your private API key — don&apos;t share it; it only works on this computer. Safari on iPhone: add any bookmark, then edit its address and paste the code below.
             </p>
             <Textarea readOnly value={bookmarklet} rows={3} className="font-mono text-xs" onFocus={(e) => e.currentTarget.select()} />
           </div>

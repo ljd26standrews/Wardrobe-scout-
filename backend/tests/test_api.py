@@ -6,7 +6,7 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
-from .conftest import make_image
+from .conftest import AUTH, make_image
 
 
 @pytest.fixture()
@@ -21,7 +21,7 @@ def client(env, monkeypatch):
     get_settings.cache_clear()
     from app.main import create_app
 
-    with TestClient(create_app()) as c:
+    with TestClient(create_app(), headers=AUTH) as c:
         yield c
 
 

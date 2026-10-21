@@ -9,6 +9,9 @@
 
 from __future__ import annotations
 
+import ipaddress
+import re
+import socket
 import threading
 import time
 from urllib.parse import urlparse
@@ -43,6 +46,50 @@ class BlockedError(FetchError):
     """Access is restricted (robots.txt, auth, rate limiting or anti-bot)."""
 
 
+class UnsafeURLError(FetchError):
+    """The URL points at a private, loopback or metadata address (SSRF protection)."""
+
+
+_resolve_cache: dict[str, tuple[float, list[str]]] = {}
+
+
+def _resolve(host: str) -> list[str]:
+    hit = _resolve_cache.get(host)
+    if hit and time.monotonic() - hit[0] < 300:
+        return hit[1]
+    try:
+        addrs = sorted({info[4][0] for info in socket.getaddrinfo(host, None)})
+    except (socket.gaierror, UnicodeError):
+        addrs = []  # unresolvable hosts simply fail later; nothing to protect
+    _resolve_cache[host] = (time.monotonic(), addrs)
+    return addrs
+
+
+def is_public_url(url: str) -> bool:
+    """True if the URL is http(s) and its host resolves only to public internet addresses."""
+    p = urlparse(url)
+    if p.scheme not in ("http", "https") or not p.hostname:
+        return False
+    host = p.hostname.strip("[]")
+    try:
+        candidates = [ipaddress.ip_address(host)]
+    except ValueError:
+        if host == "localhost" or host.endswith(".localhost") or host.endswith(".local"):
+            return False
+        candidates = [ipaddress.ip_address(a.split("%")[0]) for a in _resolve(host)]
+    return all(ip.is_global and not ip.is_multicast for ip in candidates)
+
+
+def assert_public_url(url: str) -> None:
+    if get_settings().allow_private_urls:
+        return
+    if not is_public_url(url):
+        raise UnsafeURLError(f"refusing to fetch non-public address: {url}")
+
+
+_SCRIPT = re.compile(r"<(script|style)\b.*?</\1>", re.S | re.I)
+
+
 class PoliteClient:
     def __init__(
         self,
@@ -56,10 +103,13 @@ class PoliteClient:
         self.delay = s.request_delay_seconds if delay is None else delay
         self.respect_robots = s.respect_robots_txt if respect_robots is None else respect_robots
         self.user_agent = user_agent or s.user_agent
+        self.max_bytes = s.max_download_bytes
         self._client = httpx.Client(
             timeout=s.request_timeout_seconds,
             follow_redirects=True,
             transport=transport,
+            # Checked for every request, including each redirect hop.
+            event_hooks={"request": [lambda req: assert_public_url(str(req.url))]},
             headers={
                 "User-Agent": self.user_agent,
                 "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
@@ -121,7 +171,7 @@ class PoliteClient:
         while True:
             self._throttle(host)
             try:
-                r = self._client.get(url, headers=headers)
+                r = self._bounded_get(url, headers)
                 self.requests_made += 1
             except (httpx.TimeoutException, httpx.TransportError) as e:
                 if attempt >= retries:
@@ -140,10 +190,29 @@ class PoliteClient:
             if r.status_code >= 400:
                 raise FetchError(f"HTTP {r.status_code} for {url}")
             if not binary:
-                head = r.text[:20000].lower()
-                if any(m in head for m in BLOCK_MARKERS) and len(r.text) < 60000:
+                # Only visible text counts: a page that merely loads a captcha script is not a block page.
+                visible = _SCRIPT.sub(" ", r.text[:60000]).lower()
+                if any(m in visible[:20000] for m in BLOCK_MARKERS) and len(r.text) < 60000:
                     raise BlockedError(f"verification / anti-bot page returned for {url}")
             return r
+
+    def _bounded_get(self, url: str, headers: dict) -> httpx.Response:
+        """GET with a hard cap on response size (protects memory from huge or hostile responses)."""
+        with self._client.stream("GET", url, headers=headers) as r:
+            declared = r.headers.get("content-length")
+            if declared and declared.isdigit() and int(declared) > self.max_bytes:
+                raise FetchError(f"response too large ({int(declared)} bytes) for {url}")
+            body = bytearray()
+            for chunk in r.iter_bytes():
+                body.extend(chunk)
+                if len(body) > self.max_bytes:
+                    raise FetchError(f"response exceeded {self.max_bytes} bytes for {url}")
+            headers_out = {
+                k: v
+                for k, v in r.headers.items()
+                if k.lower() not in ("content-encoding", "content-length", "transfer-encoding")
+            }
+            return httpx.Response(r.status_code, headers=headers_out, content=bytes(body), request=r.request)
 
     def close(self) -> None:
         self._client.close()

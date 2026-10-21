@@ -31,6 +31,14 @@ def health():
     return {"ok": True}
 
 
+@router.get("/bookmarklet-config")
+def bookmarklet_config():
+    """Token for the bookmarklet. Only reachable by an already-authorised client (the app's own proxy)."""
+    from ..config import get_api_token
+
+    return {"token": get_api_token()}
+
+
 @router.get("/status")
 def status(db: Session = Depends(get_db)):
     counts = dict(db.query(Product.data_origin, func.count()).group_by(Product.data_origin).all())
@@ -174,7 +182,7 @@ def files(rel_path: str):
     base = get_settings().data_dir.resolve()
     path = (base / rel_path).resolve()
     if (
-        not str(path).startswith(str(base))
+        not path.is_relative_to(base)
         or not path.is_file()
         or path.suffix.lower() not in (".jpg", ".jpeg", ".png", ".webp")
     ):

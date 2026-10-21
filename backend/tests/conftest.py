@@ -15,6 +15,8 @@ import pytest
 from PIL import Image, ImageDraw
 
 FIXTURES = Path(__file__).parent / "fixtures"
+API_TOKEN = "test-token"
+AUTH = {"X-WS-Token": API_TOKEN}
 
 
 @pytest.fixture()
@@ -24,6 +26,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("WS_ENABLE_SCHEDULER", "false")
     monkeypatch.setenv("WS_REQUEST_DELAY_SECONDS", "0")
     monkeypatch.setenv("WS_EMBEDDING_BACKEND", "lite")
+    monkeypatch.setenv("WS_API_TOKEN", API_TOKEN)
     from app.config import get_settings
     from app.services import embeddings
 

@@ -65,6 +65,12 @@ class EvidenceIn(BaseModel):
 class SellerIn(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     base_url: HttpUrl | None = None
+
+    @field_validator("base_url")
+    @classmethod
+    def _public(cls, v: HttpUrl | None) -> HttpUrl | None:
+        return _public_url(v) if v else v
+
     platform: Literal["yupoo", "weidian", "shopify", "website", "manual"] = "yupoo"
     priority: int = Field(default=3, ge=1, le=5)
     notes: str | None = None
@@ -81,15 +87,35 @@ class SellerPatch(BaseModel):
     scan_interval_hours: int | None = Field(default=None, ge=1, le=24 * 30)
     reputation_status: Literal["unassessed", "insufficient evidence", "trusted", "mixed", "concerns"] | None = None
 
+    @field_validator("base_url")
+    @classmethod
+    def _public(cls, v: HttpUrl | None) -> HttpUrl | None:
+        return _public_url(v) if v else v
+
 
 class ScanIn(BaseModel):
     mode: Literal["incremental", "full"] = "incremental"
+
+
+def _public_url(v: HttpUrl) -> HttpUrl:
+    from .ingestion.http import UnsafeURLError, assert_public_url
+
+    try:
+        assert_public_url(str(v))
+    except UnsafeURLError as e:
+        raise ValueError(str(e)) from e
+    return v
 
 
 class UrlImportIn(BaseModel):
     url: HttpUrl
     seller_id: int | None = None
     watch: bool = True
+
+    @field_validator("url")
+    @classmethod
+    def _public(cls, v: HttpUrl) -> HttpUrl:
+        return _public_url(v)
 
 
 class BookmarkletIn(BaseModel):

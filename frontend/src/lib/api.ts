@@ -193,6 +193,13 @@ export class ApiError extends Error {
 }
 
 async function handle<T>(res: Response): Promise<T> {
+  if (res.status === 401 && typeof window !== "undefined" && !window.location.pathname.startsWith("/unlock")) {
+    const body = await res.clone().json().catch(() => ({}));
+    if (body.locked) {
+      window.location.href = "/unlock";
+      throw new ApiError(401, "Locked");
+    }
+  }
   if (!res.ok) {
     let msg = `${res.status} ${res.statusText}`;
     try {

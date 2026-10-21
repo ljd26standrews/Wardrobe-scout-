@@ -46,6 +46,13 @@ class Settings(BaseSettings):
     # Optional AI provider. Key comes from env only, never stored in the DB.
     anthropic_api_key: str | None = Field(default=None, alias="ANTHROPIC_API_KEY")
 
+    # Security. Every /api request must carry this token (X-WS-Token). If unset, a random token is
+    # generated on first start and stored in <data_dir>/api_token; the Next.js proxy reads the same file.
+    api_token: str | None = None
+    # Allow fetching private/LAN/loopback addresses (only needed for local test servers).
+    allow_private_urls: bool = False
+    max_download_bytes: int = 25 * 1024 * 1024
+    # The API token is the access control; CORS stays open so the bookmarklet works from seller pages.
     cors_origins: list[str] = ["*"]
     log_level: str = "INFO"
     log_json: bool = False
@@ -61,6 +68,21 @@ class Settings(BaseSettings):
     @property
     def backups_dir(self) -> Path:
         return self.data_dir / "backups"
+
+
+def get_api_token() -> str:
+    """The per-install API token (env WS_API_TOKEN, else generated once and stored with mode 0600)."""
+    s = get_settings()
+    if s.api_token:
+        return s.api_token
+    path = s.data_dir / "api_token"
+    if not path.exists():
+        import os
+        import secrets
+
+        path.write_text(secrets.token_urlsafe(32))
+        os.chmod(path, 0o600)
+    return path.read_text().strip()
 
 
 @lru_cache
