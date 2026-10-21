@@ -142,3 +142,70 @@ def test_price_verdict_compares_like_for_like_only():
     assert price_verdict(base, [_row(100, "RMB")])["recommendation"] == "cheaper_equivalent_available"
     unknown = {**base, "currency": ""}
     assert price_verdict(unknown, [_row(100, "")])["recommendation"] == "insufficient_data"
+
+
+# ------------------------------------------------------------------ taste model
+def _space(db):
+    from app.services import embeddings as emb
+    from app.services.preference_model import build_feature_space
+    from app.services.settings_store import get_setting
+
+    return build_feature_space(db, get_setting(db, "taste_profile"), emb.get_image_backend().name)
+
+
+def test_wardrobe_change_refreshes_the_model_vocabulary(env, db):
+    from app.models import WardrobeItem
+
+    _product(db, _seller(db), "w1", title="cotton tee ¥100")
+    before = _space(db)
+    db.add(WardrobeItem(name="overcoat", category="overcoat", rating=5))
+    db.commit()
+    after = _space(db)
+    assert ("category", "overcoat") in after.vocab and after is not before
+
+
+def test_decisions_about_deleted_products_still_teach(env, db):
+    from app.models import Feedback
+    from app.services import preference_model as pm
+    from app.services.recommender import snapshot
+
+    s = _seller(db)
+    p = _product(db, s, "d1", title="olive wool overcoat ¥500")
+    for i in range(5):
+        _product(db, s, f"o{i}", title=f"navy cotton trousers {i} ¥300")
+    db.add(Feedback(product_id=p.id, action="love", reasons=[], snapshot=snapshot(p)))
+    db.commit()
+    before = pm.fit(db, _space(db))
+    db.query(Feedback).update({Feedback.product_id: None})  # what deleting the product does (SET NULL)
+    db.delete(p)
+    db.commit()
+    space = _space(db)
+    after = pm.fit(db, space)
+    assert after.n_obs == before.n_obs == 1
+    assert after.mean[1 + space.vocab[("category", "overcoat")]] > 0.05  # the overcoat preference survives
+
+
+# ------------------------------------------------------------------ jobs
+def test_jobs_that_return_an_error_are_not_reported_as_succeeded(env):
+    from app.db import SessionLocal, create_all
+    from app.models import Job
+    from app.services import jobs
+
+    create_all()
+    with SessionLocal() as s:
+        job = Job(kind="ai_assess", params={"product_id": 999999}, status="queued")
+        s.add(job)
+        s.commit()
+        job_id = job.id
+    jobs._run(job_id)  # the assessment returns {"error": "product not found"}
+    with SessionLocal() as s:
+        job = s.get(Job, job_id)
+        assert job.status == "failed" and job.message == "product not found"
+
+    assert jobs.outcome("succeeded", {"found": 3, "new": 1, "errors": ["r/x: HTTP 429"]}) == "partial"
+    assert jobs.outcome("succeeded", {"found": 0, "new": 0, "errors": ["HTTP 403"]}) == "failed"
+    assert jobs.outcome("succeeded", {"checked": 4, "ok": 3, "failed": 1}) == "partial"
+    assert jobs.outcome("succeeded", {"checked": 2, "ok": 0, "failed": 2}) == "failed"
+    assert jobs.outcome("succeeded", {"ok": False, "blocked": True, "error": "blocked"}) == "failed"
+    assert jobs.outcome("succeeded", {"checked": 0, "ok": 0, "failed": 0}) == "succeeded"
+    assert jobs.outcome("cancelled", {"error": "x"}) == "cancelled"

@@ -137,6 +137,7 @@ def _run(job_id: int) -> None:
             result = ai_visual_assess(db, params["product_id"])
         else:
             raise ValueError(f"unknown job kind {kind}")
+        status = outcome(status, result)
     except Exception as e:  # job failures are recorded, never crash the worker
         log.exception("job_failed", job_id=job_id, kind=kind)
         db.rollback()
@@ -148,6 +149,19 @@ def _run(job_id: int) -> None:
         job.status, job.result, job.finished_at, job.progress = status, result, utcnow(), 1.0
         job.message = result.get("message") or result.get("error") or job.message
         job.control = None
+
+
+def outcome(status: str, result: dict) -> str:
+    """A job that returned an error is not a success: failed if nothing was done, partial if some was."""
+    if status != "succeeded":
+        return status
+    if result.get("error") or result.get("ok") is False:
+        return "failed"
+    failed = result.get("errors") or result.get("failed")
+    if failed:
+        done = result.get("found") or result.get("ok") or 0
+        return "partial" if done else "failed"
+    return status
 
 
 def deep_product(db, product_id: int) -> dict:

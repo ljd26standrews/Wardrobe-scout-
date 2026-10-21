@@ -166,20 +166,25 @@ _space_cache: dict[str, FeatureSpace] = {}
 
 
 def build_feature_space(db: Session, taste: dict, backend: str) -> FeatureSpace:
-    """Feature matrix for every product. Cached until products, taste profile or image model change."""
+    """Feature matrix for every product. Cached until products, wardrobe, taste profile or image model change."""
     from .recommender import rules_component
 
     n, last = db.query(func.count(Product.id), func.max(Product.updated_at)).one()
+    wardrobe_keys = sorted({k for w in db.query(WardrobeItem) for k in attr_keys(w)})
+    history_keys = sorted({k for fb in _orphaned_feedback(db) for k in attr_keys(fb.snapshot)})
     key = hashlib.sha1(
-        json.dumps([n, str(last), backend, taste, PRIOR_SCALE], sort_keys=True, default=str).encode()
+        json.dumps(
+            [n, str(last), backend, taste, PRIOR_SCALE, wardrobe_keys, history_keys], sort_keys=True, default=str
+        ).encode()
     ).hexdigest()
     with _cache_lock:
         if key in _space_cache:
             return _space_cache[key]
     products = db.query(Product).all()
-    vocab_keys = sorted({k for p in products for k in attr_keys(p)})
-    # Wardrobe attributes extend the vocabulary so owned pieces can inform taste.
-    vocab_keys = sorted(set(vocab_keys) | {k for w in db.query(WardrobeItem) for k in attr_keys(w)})
+    vocab_keys = {k for p in products for k in attr_keys(p)}
+    # Wardrobe attributes, and those of decided products since deleted, extend the vocabulary so owned
+    # pieces and past decisions can inform taste.
+    vocab_keys = sorted(vocab_keys | set(wardrobe_keys) | set(history_keys))
     vocab = {k: i for i, k in enumerate(vocab_keys)}
     d = 1 + len(vocab) + PCA_DIM + 1  # prior, attributes, image PCs, bias
 
@@ -265,25 +270,40 @@ class Posterior:
         }
 
 
-def observations(db: Session, space: FeatureSpace) -> tuple[list[np.ndarray], list[int], list[float]]:
-    """Training data from feedback (latest decision per product), inspiration photos and the wardrobe."""
-    latest: dict[int, Feedback] = {}
+def _orphaned_feedback(db: Session) -> list[Feedback]:
+    """Decisions about products since deleted, which kept a snapshot of the product's attributes."""
+    return [fb for fb in db.query(Feedback).filter(Feedback.product_id.is_(None)) if fb.snapshot]
+
+
+def observations(db: Session, space: FeatureSpace) -> tuple[list[np.ndarray], list[int], list[float], int]:
+    """Training data from feedback (latest decision per product), inspiration photos and the wardrobe.
+
+    A decision about a product that has since been deleted still counts, learned from the attributes
+    recorded with it (its photo is gone, so it teaches nothing visual). Also returns how many observations
+    are real (decisions, inspiration, rated wardrobe pieces) rather than background."""
+    latest: dict[int | tuple, Feedback] = {}
     for fb in db.query(Feedback).order_by(Feedback.created_at):
-        if fb.product_id is None or fb.action == "skip":
+        if fb.action == "skip":
+            continue
+        if fb.product_id is not None:
+            key: int | tuple = fb.product_id
+        elif fb.snapshot:
+            key = ("deleted", fb.snapshot.get("source_url") or fb.id)
+        else:
             continue
         if fb.action == "unsave":
-            latest.pop(fb.product_id, None)
+            latest.pop(key, None)
             continue
-        latest[fb.product_id] = fb
+        latest[key] = fb
     rows, ys, ws = [], [], []
     for pid, fb in latest.items():
-        if fb.action not in LABEL or pid not in space.row:
+        if fb.action not in LABEL or (isinstance(pid, int) and pid not in space.row):
             continue
         reasons = set(fb.reasons or [])
         if fb.action == "dislike" and reasons and reasons <= NON_TASTE_REASONS:
             continue  # value/redundancy/construction judgements are not taste
         y, w = LABEL[fb.action]
-        x = space.X[space.row[pid]].copy()
+        x = space.X[space.row[pid]].copy() if isinstance(pid, int) else space.vector(attr_keys(fb.snapshot))
         if fb.action == "dislike" and reasons - NON_TASTE_REASONS:
             groups = set().union(*(REASON_GROUPS.get(r, set()) for r in reasons))
             x *= space.group_mask(groups)  # learn only about what the reason names
@@ -303,6 +323,7 @@ def observations(db: Session, space: FeatureSpace) -> tuple[list[np.ndarray], li
         rows.append(space.vector(attr_keys(item), image=image))
         ys.append(1 if rating > 3 else 0)
         ws.append(0.5)
+    n_real = sum(1 for w in ws if w >= 0.3)
     # Positive-unlabelled background: weak "typical, not chosen" observations from undecided items.
     if rows:
         undecided = [pid for pid in space.row if pid not in latest]
@@ -313,7 +334,7 @@ def observations(db: Session, space: FeatureSpace) -> tuple[list[np.ndarray], li
                 rows.append(space.X[space.row[undecided[j]]])
                 ys.append(0)
                 ws.append(BACKGROUND_WEIGHT / len(pick))
-    return rows, ys, ws
+    return rows, ys, ws, n_real
 
 
 def fit(db: Session, space: FeatureSpace) -> Posterior:
@@ -323,10 +344,9 @@ def fit(db: Session, space: FeatureSpace) -> Posterior:
     q0[space.img_slice] = 1 / PRIOR_VAR_IMG
     q0[0] = 1 / PRIOR_VAR_TRUST
     q0[space.bias] = 1 / PRIOR_VAR_BIAS
-    rows, ys, ws = observations(db, space)
+    rows, ys, ws, n_real = observations(db, space)
     if not rows:
         return Posterior(space, m0, q0, 0)
-    n_real = sum(1 for w in ws if w >= 0.3)
     A, y, c = np.vstack(rows), np.array(ys, float), np.array(ws)
 
     def loss(w):
