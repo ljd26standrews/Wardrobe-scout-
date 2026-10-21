@@ -17,7 +17,7 @@ from ..services import embeddings as emb
 from ..services import image_select as sel
 from ..services.images import ImageError, fetch_image_bytes, phash_of, resolve_path, store_image_bytes
 from .base import AlbumRef, RawListing
-from .http import PoliteClient
+from .http import BlockedError, PoliteClient
 from .parsing import materials_to_text, parse_listing_text
 from .translate import translate
 
@@ -502,6 +502,10 @@ def process_images(
                 a = fetch_and_analyse(client, img.thumb_url or img.url, img.referer, fallback=img.url)
             apply_analysis(img, a)
             done += 1
+        except BlockedError as e:
+            img.fetch_status, img.fetch_error = "failed", f"blocked: {e}"[:500]
+            log.info("image_host_blocked", product=p.id, url=img.url, error=str(e)[:200])
+            break  # the image host restricted access: stop, never work around it
         except (ImageError, OSError) as e:
             img.fetch_status = "failed"
             img.fetch_error = str(e)[:500]

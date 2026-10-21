@@ -335,3 +335,53 @@ def test_wrapped_and_direct_links_to_the_same_item_match(db):
     dedup.match_product(db, a)
     db.commit()
     assert {r.relation for r, other in dedup.relations_for(db, a.id) if other == b.id} == {"same_purchase_link"}
+
+
+def test_blocked_thumbnail_is_not_retried_through_the_original(env, web):
+    import pytest
+
+    from app.ingestion.http import BlockedError
+    from app.ingestion.pipeline import fetch_and_analyse
+
+    web.add("https://photo.yupoo.com/s/a/medium.jpg", "forbidden", status=403)
+    web.add("https://photo.yupoo.com/s/a/big.jpg", make_image(), ctype="image/jpeg")
+    with web.client() as c, pytest.raises(BlockedError):
+        fetch_and_analyse(c, "https://photo.yupoo.com/s/a/medium.jpg", None, fallback="https://photo.yupoo.com/s/a/big.jpg")
+    assert not any(str(r.url).endswith("big.jpg") for r in web.requests)
+    # A merely missing thumbnail still falls back to the original.
+    web.add("https://photo.yupoo.com/s/b/big.jpg", make_image(), ctype="image/jpeg")
+    with web.client() as c:
+        fetch_and_analyse(c, "https://photo.yupoo.com/s/b/medium.jpg", None, fallback="https://photo.yupoo.com/s/b/big.jpg")
+
+
+def test_import_stops_at_a_blocked_image_host(db, web):
+    from app.ingestion.pipeline import process_images
+
+    s = _seller(db)
+    urls = [f"https://img.example/x{i}.jpg" for i in range(4)]
+    for u in urls:
+        web.add(u, "no", status=403)
+    p = _product(db, s, "blk", image_urls=urls)
+    with web.client() as c:
+        process_images(db, p, c)
+    assert len([r for r in web.requests if r.url.host == "img.example"]) == 1
+    assert p.images[0].fetch_error.startswith("blocked")
+
+
+def test_scanner_downloads_no_photos_when_downloads_are_off(db, web, monkeypatch):
+    from app.config import get_settings
+    from app.ingestion.scan import scan_seller
+    from app.models import Product, Seller
+    from tests.test_scanner import BASE, _catalogue, serve
+
+    monkeypatch.setattr(get_settings(), "download_images", False)
+    albums, images = _catalogue(2)
+    serve(web, albums, images)
+    s = Seller(name="Shop", slug="shop1", platform="yupoo", base_url=BASE)
+    db.add(s)
+    db.commit()
+    with web.client() as c:
+        run = scan_seller(db, s, client=c)
+    assert run.status == "succeeded"
+    assert not any(r.url.host == "photo.yupoo.com" for r in web.requests)
+    assert db.query(Product).filter_by(seller_id=s.id).count() == 2

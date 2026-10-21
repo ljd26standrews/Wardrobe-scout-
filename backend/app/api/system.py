@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from ..config import get_settings
 from ..db import get_db
-from ..ingestion.http import PoliteClient
+from ..ingestion.http import BlockedError, PoliteClient
 from ..ingestion.pipeline import apply_analysis, fetch_and_analyse
 from ..models import Feedback, Job, Product, ProductImage, SavedItem, Seller, WardrobeItem, utcnow
 from ..services import ai, jobs
@@ -179,6 +179,8 @@ def image(image_id: int, db: Session = Depends(get_db)):
             apply_analysis(img, a)
             img.selected = img.selected or False
             db.commit()
+        except BlockedError as e:
+            raise HTTPException(403, "the image host restricted access; nothing was bypassed") from e
         except ImageError as e:
             img.fetch_status, img.fetch_error = "failed", str(e)[:300]
             db.commit()

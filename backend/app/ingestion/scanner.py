@@ -336,6 +336,8 @@ class Scanner:
             self.db.flush()
         if img.id in self.inflight_images or img.id in self.queued_images:
             return
+        if not img.local_path and not self.s.download_images:
+            return  # photo downloads are switched off; the product finishes from what is stored
         if img.local_path:  # already stored (uploaded / legacy): analyse locally, no request
             try:
                 pipeline.apply_analysis(img, pipeline.analyse_image_file(img.local_path))
@@ -368,6 +370,8 @@ class Scanner:
         k = self.s.deep_images if deep else self.k
         budget = self.s.deep_images if deep else self.s.max_examine_images
         img = pipeline.next_image(p, k, budget, self.backend)
+        if img is not None and not img.local_path and (not self.s.download_images or img.url.startswith("upload:")):
+            img = None  # photo downloads are switched off: analyse what is stored, fetch nothing
         if img is not None and img.id in self.inflight_images | self.queued_images:
             return  # wait for it
         if img is not None and (p.detail_fetched_at is not None or img.position == 0 or deep):

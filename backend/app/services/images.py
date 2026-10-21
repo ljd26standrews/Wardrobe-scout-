@@ -10,7 +10,7 @@ import imagehash
 from PIL import Image, ImageOps, UnidentifiedImageError
 
 from ..config import get_settings
-from ..ingestion.http import FetchError, PoliteClient
+from ..ingestion.http import BlockedError, FetchError, PoliteClient
 from ..logging_setup import get_logger
 
 log = get_logger(__name__)
@@ -78,6 +78,8 @@ def fetch_image_bytes(client: PoliteClient, url: str, referer: str | None) -> by
     # Image CDNs are fetched as page resources (robots.txt governs crawling of pages).
     try:
         r = client.get(url, referer=referer, binary=True, check_robots=False, retries=1)
+    except BlockedError:
+        raise  # an access restriction is not "image missing": callers must stop, not try another URL
     except FetchError as e:
         raise ImageError(str(e)) from e
     ctype = r.headers.get("content-type", "")
