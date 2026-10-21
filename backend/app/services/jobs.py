@@ -125,6 +125,10 @@ def _run(job_id: int) -> None:
             result = recompute_all(db, progress)
         elif kind == "dedup":
             result = dedup.match_all(db)
+        elif kind == "recalibrate":
+            from . import calibration
+
+            result = calibration.recalibrate(db, force=bool(params.get("force")))
         elif kind == "community_search":
             from .community import search_reddit
 

@@ -60,7 +60,7 @@ from ..models import Feedback, InspirationImage, Product, WardrobeItem
 from . import embeddings as emb
 
 # Recorded with every feed served (impression log), so evaluations can tell model versions apart.
-ENGINE_VERSION = "bayes-2026.10-t3"
+ENGINE_VERSION = "bayes-2026.10-s1"  # s1: full-covariance posterior, logo-only logo rejections, new reasons
 GROUPS = ("colour", "category", "fibre", "fit", "logo", "brand")
 PCA_DIM = 16
 IMG_SCALE = 0.5
@@ -350,6 +350,23 @@ def observations(db: Session, space: FeatureSpace) -> tuple[list[np.ndarray], li
     A decision about a product that has since been deleted still counts, learned from the attributes
     recorded with it (its photo is gone, so it teaches nothing visual). Also returns how many observations
     are real (decisions, inspiration, rated wardrobe pieces) rather than background."""
+    rows, ys, ws, n_real, _ = observations_with_families(db, space)
+    return rows, ys, ws, n_real
+
+
+def family_key(family: tuple) -> str:
+    """The garment-family key used by approval labels ("g<group>", "p<product>", "d<url>")."""
+    kind, value = family
+    if kind == "group":
+        return f"g{value}"
+    if isinstance(value, tuple):  # ("deleted", source url)
+        return f"d{value[1]}"
+    return f"p{value}"
+
+
+def observations_with_families(db: Session, space: FeatureSpace) -> tuple[list, list, list, int, list]:
+    """``observations`` plus, for each row, the garment family of the decision it came from (None for
+    inspiration, wardrobe and background rows), so an out-of-fold fit can leave a fold's decisions out."""
     latest: dict[int | tuple, Feedback] = {}
     for fb in db.query(Feedback).order_by(Feedback.created_at):
         if fb.action == "skip":
@@ -381,11 +398,12 @@ def observations(db: Session, space: FeatureSpace) -> tuple[list[np.ndarray], li
         decisions.append((("group", group_of[pid]) if pid in group_of else ("item", pid), x, y, w))
     # One garment listed by several sellers is one piece of evidence: its listings share one decision's weight.
     family_size = Counter(f for f, *_ in decisions)
-    rows, ys, ws = [], [], []
+    rows, ys, ws, families = [], [], [], []
     for family, x, y, w in decisions:
         rows.append(x)
         ys.append(y)
         ws.append(w / family_size[family])
+        families.append(family_key(family))
     n_real = len(family_size)
     for img in db.query(InspirationImage).filter(InspirationImage.embedding.isnot(None)):
         if img.embedding_backend == space.backend:
@@ -402,7 +420,8 @@ def observations(db: Session, space: FeatureSpace) -> tuple[list[np.ndarray], li
         ys.append(1 if rating > 3 else 0)
         ws.append(0.5)
         n_real += 1
-    return _with_background(space, latest, group_of, rows, ys, ws, n_real)
+    rows, ys, ws, n_real = _with_background(space, latest, group_of, rows, ys, ws, n_real)
+    return rows, ys, ws, n_real, families + [None] * (len(rows) - len(families))
 
 
 def _stable_rank(pid: int) -> int:

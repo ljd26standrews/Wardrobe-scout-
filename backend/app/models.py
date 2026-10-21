@@ -294,6 +294,26 @@ class Impression(Base):
     shown_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
 
 
+class Calibration(Base):
+    """A fitted map from raw compatibility to an approval estimate, with how it was obtained.
+
+    Fitted only on your own explicit decisions (out-of-fold, grouped by garment family); kept as a history so
+    any version can be inspected or reactivated (rollback). Only one is active at a time."""
+
+    __tablename__ = "calibrations"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    engine_version: Mapped[str] = mapped_column(String(40))
+    method: Mapped[str] = mapped_column(String(40))
+    n_labels: Mapped[int] = mapped_column(Integer)
+    n_positive: Mapped[int] = mapped_column(Integer)
+    label_hash: Mapped[str] = mapped_column(String(64))
+    active: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    params: Mapped[dict] = mapped_column(JSON, default=dict)  # {"a", "b", "cov": [[...], [...]], "folds"}
+    diagnostics: Mapped[dict] = mapped_column(JSON, default=dict)  # out-of-fold Brier, ECE, reliability bins
+
+
 class Judgement(Base):
     """A taste label you gave in an evaluation session, kept to *measure* the recommender (it never trains it).
 

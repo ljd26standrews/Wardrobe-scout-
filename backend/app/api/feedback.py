@@ -9,7 +9,7 @@ from ..config import get_settings
 from ..db import get_db
 from ..models import Feedback, Product, SavedItem, WardrobeItem
 from ..schemas import FeedbackIn, SavedPatch
-from ..services import jobs
+from ..services import calibration, jobs
 from ..services.presenter import Context, product_card
 from ..services.recommender import REASONS, snapshot
 
@@ -82,6 +82,7 @@ def give_feedback(body: FeedbackIn, db: Session = Depends(get_db)):
     ):
         # You are interested: compare it properly (full gallery, cross-seller photo matching).
         jobs.enqueue("deep_product", {"product_id": p.id})
+    calibration.maybe_schedule(db)  # refit approval estimates once enough new decisions have arrived
     return {
         "ok": True,
         "feedback_id": fb.id,
@@ -142,6 +143,7 @@ def undo_feedback(feedback_id: int, db: Session = Depends(get_db)):
         elif saved is not None and saved.list_name != "wishlist":
             db.delete(saved)
     db.commit()
+    calibration.maybe_schedule(db)  # an undone decision is no longer evidence
     return {"ok": True}
 
 

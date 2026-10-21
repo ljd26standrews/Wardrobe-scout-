@@ -89,6 +89,26 @@ DEFAULTS: dict[str, Any] = {
         "skip_resurface_days": 10,
         "near_duplicate_threshold": 0.96,
     },
+    # Selective recommendation (docs/selective-recommendation): a piece enters the main feed only when you
+    # are `*_confidence` sure its approval probability is at least `*_target`. The targets are aspirations to
+    # validate on your own decisions, not achieved precision.
+    "selective": {
+        "enabled": True,  # feature flag: off = the previous ranked feed everywhere
+        "mode": "balanced",  # balanced | high | extreme
+        "balanced_target": 0.80,
+        "balanced_confidence": 0.50,
+        "high_target": 0.90,
+        "high_confidence": 0.80,
+        "extreme_target": 0.95,
+        "extreme_confidence": 0.90,
+        "min_labels": 30,  # rated garment families needed before approval estimates exist
+        "min_each_class": 5,  # ... including at least this many approvals and this many non-approvals
+        "recalibrate_every": 5,  # new rated families before the calibration is refitted
+        "require_quality_evidence": False,  # strict modes: only garments with independent quality evidence
+        "exclude_seller_concerns": True,  # strict modes: not from sellers with recorded concerns
+        "learning_min_estimate": 0.35,  # Learning picks: plausible enough to be worth your time
+        "trial": False,  # opt-in prospective comparison with the previous ranking (daily switchback)
+    },
     "currency": {
         "cny_to_gbp": 0.105,
         "rate_source": "default assumption - update in Settings or refresh from ECB",
@@ -205,7 +225,21 @@ BOUNDS: dict[str, dict[str, tuple[float, float]]] = {
     },
     "budget": {"monthly_gbp": (0, 1_000_000), "season_gbp": (0, 1_000_000)},
 }
-CHOICES: dict[str, dict[str, set[str]]] = {"recommender": {"engine": {"bayes", "legacy"}}}
+BOUNDS["selective"] = {
+    **{f"{m}_target": (0.5, 0.99) for m in ("balanced", "high", "extreme")},
+    **{f"{m}_confidence": (0.5, 0.99) for m in ("balanced", "high", "extreme")},
+    "min_labels": (20, 1000),
+    "min_each_class": (3, 500),
+    "recalibrate_every": (1, 100),
+    "learning_min_estimate": (0.0, 0.9),
+}
+CHOICES: dict[str, dict[str, set[str]]] = {
+    "recommender": {"engine": {"bayes", "legacy"}},
+    "selective": {"mode": {"balanced", "high", "extreme"}},
+}
+BOOLS: dict[str, set[str]] = {
+    "selective": {"enabled", "require_quality_evidence", "exclude_seller_concerns", "trial"},
+}
 
 
 def _bounds(key: str, value: dict) -> dict[str, tuple[float, float]]:
@@ -236,6 +270,15 @@ def validate_setting(key: str, value: Any) -> list[str]:
     for field, allowed in CHOICES.get(key, {}).items():
         if field in value and value[field] not in allowed:
             errors.append(f"{field} must be one of {', '.join(sorted(allowed))}")
+    for field in BOOLS.get(key, set()):
+        if field in value and not isinstance(value[field], bool):
+            errors.append(f"{field} must be true or false")
+    if key == "selective" and not errors:
+        merged = {**DEFAULTS["selective"], **value}
+        for part in ("target", "confidence"):  # stricter modes must stay at least as strict
+            b, h, e = (merged[f"{m}_{part}"] for m in ("balanced", "high", "extreme"))
+            if not b <= h <= e:
+                errors.append(f"{part}s must not decrease from balanced to high to extreme")
     if key == "landed_cost" and isinstance(value.get("category_weight_kg"), dict):
         for cat, w in value["category_weight_kg"].items():
             if not _is_number(w) or not 0 <= w <= 50:
@@ -258,6 +301,9 @@ def _sanitise(key: str, value: Any) -> Any:
             value[field] = type(v)(min(max(v, lo), hi))
     for field, allowed in CHOICES.get(key, {}).items():
         if value.get(field) not in allowed:
+            value[field] = DEFAULTS[key][field]
+    for field in BOOLS.get(key, set()):
+        if not isinstance(value.get(field), bool):
             value[field] = DEFAULTS[key][field]
     return value
 
