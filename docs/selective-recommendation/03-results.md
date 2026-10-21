@@ -1,7 +1,5 @@
 # Selective recommendation: results, evidence and limits
 
-> **Status: in progress.** Sections 4–6 (simulation, interaction features, computational cost) are still running
-> and land in a later commit on this branch. Everything stated in the other sections has been run.
 
 This document records what was verified, how, and what is still unknown. One fact governs every number in it:
 **no real approval labels exist in this environment.** Every performance figure below comes from synthetic
@@ -13,8 +11,8 @@ it reports nothing until a real installation has enough rated pieces.
 
 | Check | What it covers | Result |
 |---|---|---|
-| Backend test suite (`pytest`) | Labels, calibration, the gate, eligibility, feeds, logging, evaluator machinery, the trial, plus every earlier test | 259 passed (commit `92baa5d` plus the paired-comparison tool) |
-| End-to-end (`scripts/e2e.sh`, Playwright, desktop and iPhone) | Discover modes and tabs, empty states, Undo, Insights and Settings, against the synthetic demo catalogue | 16 passed at `80816a9`; to be re-run on the final commit |
+| Backend test suite (`pytest`) | Labels, calibration, the gate, eligibility, feeds, logging, evaluator machinery, the trial, plus every earlier test | 259 passed at `67e5235` |
+| End-to-end (`scripts/e2e.sh`, Playwright, desktop and iPhone) | Discover modes and tabs, empty states, Undo, Insights and Settings, against the synthetic demo catalogue | 16 passed at `67e5235` |
 | Migrations `e7c1a9d3b2f4`, `f3d2c8a1e6b9` | Up, down and up again on scratch databases with existing rows; `alembic check` reports no model drift | Passed; existing feed rows become policy `ranked` |
 | Visual check | Discover, product page and Insights in the calibrated state (light, dark, mobile), on a throwaway instance seeded with the synthetic fixture | Done; four issues fixed (label collision, clipped axis, wrapped rows, a misleading bound sentence) |
 
@@ -67,15 +65,81 @@ Showing every rated piece would have given 58% [51%, 64%] (the base rate).
 
 ## 4. Simulated users and the modes (`eval/simulate_selective.py`)
 
-_Pending: the run in progress uses the fixes listed in section 2. Results, per persona and policy, split by calibration state, with the ablations (no uncertainty in the gate; no calibration), will be added here._
+**Protocol.** The same 360-item synthetic catalogue as `eval/RESULTS.md`, with four personas:
+
+- three that match, partly contradict, or oppose the written profile;
+- `combo`, whose taste lives in colour × garment-type combinations.
+
+Seeds 2–4, 15 rounds of 10 pieces each.
+
+Each round shows the policy's main feed. When a gated feed shows fewer than 10 pieces, Learning picks fill the round, as Discover invites. The persona approves (love or like) pieces with utility ≥ 0.7, skips 0.5–0.7, and otherwise rejects with a reason. The runs include every fix in section 2. The raw rows are in `backend/eval/results/selective_sim_seeds2-4.jsonl`. The intervals pool the pieces, which are not independent within a run, so they are optimistic.
+
+**Like for like: Balanced against the earlier ranked feed, in the same rounds of the same seed.**
+
+| Persona | Rounds (of 45) | Balanced: approved / rated | Mean estimate | Earlier feed, same rounds |
+|---|---|---|---|---|
+| matches profile | not yet calibrated (36) | 95% [91%, 97%] | – | 100% [98%, 100%] |
+| matches profile | calibrated (9) | 100% [95%, 100%] | 0.98 | 98% [91%, 100%] |
+| partly differs | not yet calibrated (17) | 83% [74%, 90%] | – | 84% [76%, 90%] |
+| partly differs | calibrated (28) | **77% [68%, 85%]** | 0.84 | **61% [52%, 69%]** |
+| opposite | not yet calibrated (16) | 14% [8%, 21%] | – | 11% [6%, 18%] |
+| opposite | calibrated (29) | nothing shown | – | 40% [32%, 47%] |
+| combinations | not yet calibrated (25) | 11% [6%, 17%] | – | 13% [8%, 20%] |
+| combinations | calibrated (20) | nothing shown | – | 10% [6%, 16%] |
+
+- **Before calibration, Balanced behaves like the earlier feed.** That is expected: it is the same ranking with a similar share of exploration. The persona matching the profile approves slightly less (95% vs 100%), because its warm-up Learning picks bring the rejections it needs before it can calibrate. One of its three seeds never collected 5 rejections in 15 rounds, so it never calibrated.
+- **Calibrated Balanced is more selective, and more precise when it does show something.** For the persona whose taste partly differs from the profile, it reached 77% against 61% for the earlier feed. Its mean estimate of 0.84 was optimistic by about 7 points, but within the interval. For the personas it cannot yet read, it abstains. The earlier feed delivered 40% and 10% to them, far below an 80% target.
+- **Calibration took 6–14 rounds (60–140 decisions)** where it happened at all.
+
+**The strict modes and two ablations of the gate (High confidence).**
+
+| Persona | High: first round with a piece | High, no uncertainty (estimate ≥ 0.9) | High, no calibration (identity map) |
+|---|---|---|---|
+| matches profile | never | from round 6: 290 pieces, 100% [99%, 100%] | from round 8: 209 pieces, 100% [98%, 100%] |
+| partly differs | round 15, in one seed (2 pieces) | from round 10: 26 pieces, 100% [86%, 100%] | never |
+| opposite, combinations | never | never | never |
+
+Extremely selective never showed a piece.
+
+- **The conservative bound makes the strict modes very slow to show anything.** Within 150 decisions, High confidence showed 2 pieces in all. Gating on the estimate alone met the 90% target with plenty of coverage for the two learnable personas. So in this toy world the uncertainty term cost coverage without buying measurable precision.
+- **That is not proof the bound is unnecessary.** These personas follow deterministic utility rules, and real tastes are noisier. The defaults are kept, because the brief puts precision first. Settings can lower a mode's confidence (High at 0.6 or 0.7, say), and Insights then shows whether the target still holds.
+- **Learning picks found the opposite taste at 27% [20%, 34%]**, about what the earlier feed managed (28%), without ever entering the main feed.
+
+**Earlier versions of these runs** found the defects listed in section 2: picks drying up, no exploration before calibration, and the plain-estimate floor. Those runs are not reported as results.
 
 ## 5. Interaction features (M7)
 
-_Pending: colour × garment-type features are implemented behind a switch (off). They will be compared with the current engine on held-out seeds 2–9 for every persona, including one whose taste is in combinations, and kept off unless they help without harming anyone._
+Colour × garment-type features have a tighter prior (variance 0.05, against 0.15 for single attributes), fixed beforehand. They were compared with the current engine on held-out seeds 2–9 (8 runs per cell, the `eval/RESULTS.md` protocol, precision@10 over 8 rounds):
+
+| Persona | Current | With combinations | Paired difference [95% CI] | Wins |
+|---|---|---|---|---|
+| matches profile | 0.93 | 0.93 | 0.000 [−0.019, +0.019] | 2/8 |
+| partly differs | 0.49 | 0.51 | +0.022 [−0.017, +0.067] | 5/8 |
+| opposite | 0.15 | 0.17 | +0.019 [−0.005, +0.044] | 5/8 |
+| combinations | 0.08 | 0.10 | +0.011 [−0.000, +0.023] | 5/8 |
+
+**Decision: kept off.** The rule set before the run was "no persona harmed, and the combination persona demonstrably helped". Nobody was harmed, and three personas trended up. But the combination persona's gain is not demonstrated: its interval reaches zero. Eight rounds also give the shrunk combinations little data. A longer protocol would be a new experiment, and it was not run after seeing these results. Raw rows: `backend/eval/results/interactions_heldout_seeds2-9.jsonl`.
 
 ## 6. Computational cost (`bench/selective.py`)
 
-_Pending: latency of each feed and peak memory at 1k, 5k and 20k products, to be measured on an otherwise idle machine._
+Measured on this 4-vCPU cloud container with `bench/selective.py`:
+
+- a synthetic catalogue, with a random photo embedding per piece and no photo files;
+- 400 decisions, then one calibration;
+- the median of 5 requests after a warm-up.
+
+Absolute times depend on the machine; the comparisons are the point.
+
+| Products | Balanced | High | Learning picks | Earlier ranked feed | Product page | Recalibration | Peak memory |
+|---|---|---|---|---|---|---|---|
+| 1,000 | 228 ms | 293 ms | 263 ms | 228 ms | 108 ms | 0.21 s | 217 MB |
+| 5,000 | 1.18 s | 1.17 s | 1.08 s | 1.03 s | 136 ms | 0.64 s | 304 MB |
+| 20,000 | 4.63 s | 5.01 s | 4.87 s | 4.57 s | 247 ms | 2.95 s | 605 MB |
+
+- **The gate's own cost is small:** over the earlier feed it adds 0–29% at 1k (up to 65 ms), 5–15% at 5k and 1–10% at 20k. Its expensive part, each piece's uncertainty, is computed only where a bound could reach a target, or for the Learning-pick pool.
+- **Most of the cost is in the ranking the gate builds on.** Making explanations lazy and loading candidates once cut every feed by a quarter to a third: Balanced went from 300 ms to 228 ms at 1k, 1.66 s to 1.18 s at 5k, and 7.0 s to 4.6 s at 20k (`bench/results/selective_before.jsonl`). This benchmark has no photo rows, so the photo-loading saving does not show here.
+- **Recalibration** refits the model five times. It runs in the background after every 5 new decisions, so the feed never waits for it.
+- **Still slow at 20,000 pieces.** Over 4 s per feed, after every decision, is too slow; section 9 lists it.
 
 ## 7. Reliability and calibration limits
 
@@ -96,3 +160,17 @@ cd backend && .venv/bin/python -m eval.selective          # on a read-only copy 
 - **When it reports.** The rolling-origin protocol starts predicting after 10 rated pieces, gives calibrated figures once 30 rated pieces (with 5 approvals and 5 rejections) precede an origin, and refuses any calibration metric below 50 predictions and any precision below 10 selected pieces. The Evaluate-grade protocol needs 40 grades, including 5 liked.
 - **Output.** Results (aggregates only) are saved under `data/evaluation/`.
 - **What would show it works.** For each mode, the lower end of the precision interval clearing its target, on both protocols, with coverage high enough to be useful.
+
+## 9. Remaining work
+
+- **Real outcomes.**
+  - Run `eval.selective` once a few hundred decisions and 40+ Evaluate grades exist.
+  - Until then, every target and every simulation figure here is unvalidated for a real person.
+- **The strict modes' conservatism.** Decide with real labels whether High and Extremely selective should default to a lower confidence. The synthetic evidence says they are very slow to show anything.
+- **Feed latency at 20,000 pieces** (over 4 s).
+  - The remaining cost is in loading and assessing every candidate on every request.
+  - Caching candidates and quality per data version would remove most of it.
+- **Calibration at the top.** A calibration fitted on pieces you were shown generalises imperfectly to the very highest estimates (section 4: hidden persona, 0.84 estimated vs 77% observed).
+  - A map that emphasises the top of the range could help, or weighting the pieces the gate itself served.
+  - Both need real labels to judge.
+- **Interaction features** stay available behind a switch for a longer, pre-registered experiment.

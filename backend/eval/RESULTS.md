@@ -126,3 +126,23 @@ done
 
 A full run takes about 4 minutes per persona on 4 cores. `tests/test_eval_regression.py` re-runs a short
 version on every `pytest`.
+
+## Interaction features: not adopted (selective recommendation, M7)
+
+Colour × garment-type combination features (prior variance 0.05, fixed beforehand) were run on held-out seeds 2–9 against the current engine. A fourth persona, `combo`, likes each colour in one garment type only: black hoodies, but not black trousers.
+
+| Persona | bayes | bayes-interact | Paired difference [95% CI] | Wins |
+|---|---|---|---|---|
+| stated | 0.93 | 0.93 | 0.000 [−0.019, +0.019] | 2/8 |
+| hidden | 0.49 | 0.51 | +0.022 [−0.017, +0.067] | 5/8 |
+| contrarian | 0.15 | 0.17 | +0.019 [−0.005, +0.044] | 5/8 |
+| combo | 0.08 | 0.10 | +0.011 [−0.000, +0.023] | 5/8 |
+
+- **The rule was set beforehand:** adopt only if no persona is harmed and the combination persona demonstrably gains.
+- **Outcome:** no harm, but the gain is not demonstrated (its interval reaches zero), so the switch stays off.
+- **Raw rows:** `results/interactions_heldout_seeds2-9.jsonl`.
+- **Reproduce:** `.venv/bin/python -m eval.report --paired bayes-interact bayes results/interactions_heldout_seeds2-9.jsonl`.
+
+## Selective recommendation
+
+The gated feeds and their ablations were simulated with `eval/simulate_selective.py`. The results, with like-for-like comparisons against the earlier feed, are in [`docs/selective-recommendation/03-results.md`](../../docs/selective-recommendation/03-results.md).
