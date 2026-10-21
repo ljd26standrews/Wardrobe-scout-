@@ -23,11 +23,16 @@ Features x(item):
 
 Observations: love (y=1, weight 2), like (1, 1), purchased (1, 1.5), maybe (1, 0.3), dislike (0, 1).
 Positive-unlabelled learning: a small *background* sample of undecided catalogue items is added as weak
-label-0 observations (total weight BACKGROUND_WEIGHT). It does not claim you dislike them; it lets the model
-learn what distinguishes the items you choose from a typical item (without it, a run of loves of yellow
-pieces barely moved the yellow weight). Skips are still never used.
+label-0 observations. It does not claim you dislike them; it lets the model learn what distinguishes the
+items you choose from a typical item (without it, a run of loves of yellow pieces barely moved the yellow
+weight). Its total weight equals your positive evidence, capped at BACKGROUND_WEIGHT: with nothing chosen
+yet there is nothing to contrast, and a lone colour rejection used to push trousers and cotton down. The
+sample is a stable hash order of the undecided items. Skips are still never used.
 Rejection reasons mask the observation to the attribute group they name, so "dislike the colour" only
-moves colour weights. "Too expensive", "already own" and "construction" never update taste.
+moves colour weights. "Too expensive", "already own", "construction" and "this specific item" never update
+taste (the specific item and its near-duplicates are hidden by the feed instead).
+One garment listed by several sellers (a product family, ``Product.group_id``) counts as one decision, and
+its other listings are never used as background.
 Inspiration photos, anti-inspiration photos and wardrobe pieces you rate highly are image/attribute
 observations too. Skips teach nothing.
 
@@ -40,6 +45,7 @@ import hashlib
 import json
 import math
 import threading
+from collections import Counter
 from dataclasses import dataclass
 
 import numpy as np
@@ -50,6 +56,8 @@ from sqlalchemy.orm import Session
 from ..models import Feedback, InspirationImage, Product, WardrobeItem
 from . import embeddings as emb
 
+# Recorded with every feed served (impression log), so evaluations can tell model versions apart.
+ENGINE_VERSION = "bayes-2026.10-t3"
 GROUPS = ("colour", "category", "fibre", "fit", "logo", "brand")
 PCA_DIM = 16
 IMG_SCALE = 0.5
@@ -60,6 +68,8 @@ PRIOR_MEAN_TRUST = 1.0
 PRIOR_VAR_BIAS = 1.0
 BACKGROUND_WEIGHT = 2.0  # total weight of the background sample (≈ two weak "typical, not chosen" items)
 BACKGROUND_SAMPLE = 300
+MIN_PCA_PRODUCTS = 3  # photographed products needed before image components exist (was 18)
+BACKGROUND_SCALES_WITH_POSITIVES = True  # ablation switch (eval/simulate.py): False = full weight always
 PRIOR_SCALE = 2.0  # written-profile score (0..1) -> logit units: (score - 0.5) * PRIOR_SCALE. Calibrated on seed 1:
 # 2.0 vs 4.0 gave up a little when the profile is right (0.95→0.89) but gained when it is partly or
 # wholly wrong (0.46→0.54, 0.16→0.23), the best average. Held-out seeds are reported in eval/RESULTS.md.
@@ -70,9 +80,10 @@ REASON_GROUPS = {
     "fabric": {"fibre"},
     "logo": {"logo", "brand"},
     "silhouette": {"fit", "category", "img"},
-    "specific_item": {"img"},
 }
-NON_TASTE_REASONS = {"too_expensive", "already_own", "construction"}
+# Reasons that say nothing about general taste. "This specific item" is about that one piece: the feed hides it
+# and its near-duplicates (recommender suppression), but no colour, shape or style weight learns from it.
+NON_TASTE_REASONS = {"too_expensive", "already_own", "construction", "specific_item"}
 
 GROUP_LABEL = {
     "colour": "colour",
@@ -126,7 +137,9 @@ class FeatureSpace:
         out = np.zeros(PCA_DIM)
         if vec is None or self.pca_components is None or len(vec) != self.pca_components.shape[1]:
             return out
-        return ((vec - self.pca_mean) @ self.pca_components.T / self.pca_scale) * IMG_SCALE
+        k = len(self.pca_components)
+        out[:k] = ((vec - self.pca_mean) @ self.pca_components.T / self.pca_scale) * IMG_SCALE
+        return out
 
     def vector(self, keys: list[tuple[str, str]], prior: float = 0.0, image: np.ndarray | None = None) -> np.ndarray:
         x = np.zeros(self.d)
@@ -195,11 +208,11 @@ def build_feature_space(db: Session, taste: dict, backend: str) -> FeatureSpace:
         if p.image_embedding is not None and p.embedding_backend == backend
     }
     pca_mean = pca_components = pca_scale = None
-    if len(vecs) > PCA_DIM + 1:
+    if len(vecs) >= MIN_PCA_PRODUCTS:  # a small catalogue gets fewer components, not none
         E = np.vstack(list(vecs.values()))
         pca_mean = E.mean(0)
         _, _, vt = np.linalg.svd(E - pca_mean, full_matrices=False)
-        pca_components = vt[:PCA_DIM]
+        pca_components = vt[: min(PCA_DIM, len(vecs) - 1)]
         proj = (E - pca_mean) @ pca_components.T
         pca_scale = proj.std(0) + 1e-6
 
@@ -295,26 +308,34 @@ def observations(db: Session, space: FeatureSpace) -> tuple[list[np.ndarray], li
             latest.pop(key, None)
             continue
         latest[key] = fb
-    rows, ys, ws = [], [], []
+    group_of = dict(db.query(Product.id, Product.group_id).filter(Product.group_id.isnot(None)))
+    decisions = []  # (family, x, y, w)
     for pid, fb in latest.items():
         if fb.action not in LABEL or (isinstance(pid, int) and pid not in space.row):
             continue
         reasons = set(fb.reasons or [])
         if fb.action == "dislike" and reasons and reasons <= NON_TASTE_REASONS:
-            continue  # value/redundancy/construction judgements are not taste
+            continue  # value/redundancy/construction/this-item-only judgements are not taste
         y, w = LABEL[fb.action]
         x = space.X[space.row[pid]].copy() if isinstance(pid, int) else space.vector(attr_keys(fb.snapshot))
         if fb.action == "dislike" and reasons - NON_TASTE_REASONS:
-            groups = set().union(*(REASON_GROUPS.get(r, set()) for r in reasons))
+            groups = set().union(*(REASON_GROUPS.get(r, set()) for r in reasons - NON_TASTE_REASONS))
             x *= space.group_mask(groups)  # learn only about what the reason names
+        decisions.append((("group", group_of[pid]) if pid in group_of else ("item", pid), x, y, w))
+    # One garment listed by several sellers is one piece of evidence: its listings share one decision's weight.
+    family_size = Counter(f for f, *_ in decisions)
+    rows, ys, ws = [], [], []
+    for family, x, y, w in decisions:
         rows.append(x)
         ys.append(y)
-        ws.append(w)
+        ws.append(w / family_size[family])
+    n_real = len(family_size)
     for img in db.query(InspirationImage).filter(InspirationImage.embedding.isnot(None)):
         if img.embedding_backend == space.backend:
             rows.append(space.vector([], image=emb.from_bytes(img.embedding)))
             ys.append(1 if img.polarity > 0 else 0)
             ws.append(1.0)
+            n_real += 1
     for item in db.query(WardrobeItem):
         rating = item.rating or 3
         if rating == 3:
@@ -323,17 +344,37 @@ def observations(db: Session, space: FeatureSpace) -> tuple[list[np.ndarray], li
         rows.append(space.vector(attr_keys(item), image=image))
         ys.append(1 if rating > 3 else 0)
         ws.append(0.5)
-    n_real = sum(1 for w in ws if w >= 0.3)
-    # Positive-unlabelled background: weak "typical, not chosen" observations from undecided items.
-    if rows:
-        undecided = [pid for pid in space.row if pid not in latest]
-        if undecided:
-            rng = np.random.default_rng(len(rows))
-            pick = rng.choice(len(undecided), size=min(BACKGROUND_SAMPLE, len(undecided)), replace=False)
-            for j in pick:
-                rows.append(space.X[space.row[undecided[j]]])
-                ys.append(0)
-                ws.append(BACKGROUND_WEIGHT / len(pick))
+        n_real += 1
+    return _with_background(space, latest, group_of, rows, ys, ws, n_real)
+
+
+def _stable_rank(pid: int) -> int:
+    return int(hashlib.blake2b(str(pid).encode(), digest_size=8).hexdigest(), 16)
+
+
+def _with_background(space, latest, group_of, rows, ys, ws, n_real):
+    """Positive-unlabelled background: weak "typical, not chosen" observations from undecided items.
+
+    It only makes sense against something you chose: with no positive decisions it would just teach that
+    every common attribute is disliked (a single colour rejection moved trousers and cotton). So its total
+    weight grows with your positive evidence, up to BACKGROUND_WEIGHT. The sample is a stable function of
+    the undecided set (a hash order), so one more decision changes it by one item, not entirely. Listings of
+    a garment you decided on are never background: they are the same piece."""
+    positive = sum(w for w, y in zip(ws, ys, strict=True) if y == 1)
+    if BACKGROUND_SCALES_WITH_POSITIVES:
+        total = min(BACKGROUND_WEIGHT, positive)
+    else:  # the earlier rule: full weight as soon as there is any observation
+        total = BACKGROUND_WEIGHT if rows else 0.0
+    decided_groups = {group_of[pid] for pid in latest if isinstance(pid, int) and pid in group_of}
+    undecided = [
+        pid for pid in space.row if pid not in latest and group_of.get(pid, -1) not in decided_groups
+    ]  # fmt: skip
+    pick = sorted(undecided, key=_stable_rank)[:BACKGROUND_SAMPLE]
+    if total > 0 and pick:
+        for pid in pick:
+            rows.append(space.X[space.row[pid]])
+            ys.append(0)
+            ws.append(total / len(pick))
     return rows, ys, ws, n_real
 
 

@@ -6,6 +6,9 @@ Usage (from backend/):
 e.g. .venv/bin/python -m eval.simulate stated,hidden,contrarian random,rules_only,legacy,bayes 2,3,4,5,6,7,8,9
 
 Methods: random | rules_only (legacy engine, learning disabled) | legacy (pre-audit engine) | bayes (default).
+Ablations of the bayes engine (module constants patched in-process for that run only):
+  bayes-nobg       no positive-unlabelled background sample at all
+  bayes-fullbg     background at full weight even before any positive decision (the pre-tranche-3 rule)
 
 Protocol: a synthetic catalogue of 360 items whose attributes (category, colour, material, fit, logo)
 appear in the titles - so the real parser extracts them - and in drawn product images - so the real
@@ -45,6 +48,10 @@ SHAPE = {
     "trousers": "trousers", "jeans": "trousers", "shorts": "shorts", "overcoat": "coat", "zip jacket": "jacket",
 }  # fmt: skip
 RELEVANT = 0.7
+ABLATIONS = {
+    "bayes-nobg": {"BACKGROUND_WEIGHT": 0.0},
+    "bayes-fullbg": {"BACKGROUND_SCALES_WITH_POSITIVES": False},
+}
 
 
 def draw(col: tuple[int, int, int], shape: str, rng: np.random.Generator) -> bytes:
@@ -208,7 +215,7 @@ def run(persona: str, method: str, seed: int, rounds: int = 8, k: int = 10) -> d
             process_images(db, p, None)
         db.commit()
         cfg = get_setting(db, "recommender")
-        cfg["engine"] = "bayes" if method == "bayes" else "legacy"
+        cfg["engine"] = "bayes" if method.startswith("bayes") else "legacy"
         if method == "rules_only":
             cfg["cold_start_k"] = 10**9
         set_setting(db, "recommender", cfg)
@@ -234,6 +241,22 @@ def run(persona: str, method: str, seed: int, rounds: int = 8, k: int = 10) -> d
     return {"persona": persona, "method": method, "seed": seed, "n_relevant": len(relevant), "rounds": results}
 
 
+def run_variant(persona: str, method: str, seed: int) -> dict:
+    """``run`` with an ablation's module constants patched for the duration of the run."""
+    from app.services import preference_model as pm
+
+    patch = ABLATIONS.get(method, {})
+    saved = {k: getattr(pm, k) for k in patch}
+    try:
+        for k, v in patch.items():
+            setattr(pm, k, v)
+        pm._space_cache.clear()
+        return run(persona, method, seed)
+    finally:
+        for k, v in saved.items():
+            setattr(pm, k, v)
+
+
 def main(argv: list[str]) -> None:
     personas = argv[0].split(",") if argv else list(PERSONAS)
     methods = argv[1].split(",") if len(argv) > 1 else ["random", "rules_only", "legacy", "bayes"]
@@ -241,7 +264,7 @@ def main(argv: list[str]) -> None:
     for persona in personas:
         for method in methods:
             for seed in seeds:
-                r = run(persona, method, seed)
+                r = run_variant(persona, method, seed)
                 prec = [x["precision"] for x in r["rounds"]]
                 label = os.environ.get("METHOD_LABEL", method)
                 print(json.dumps({"persona": persona, "method": label, "seed": seed, "rel": r["n_relevant"], "prec": prec}),

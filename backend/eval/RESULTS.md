@@ -28,6 +28,42 @@ the catalogue is synthetic, the images are simple drawings, and taste is a funct
 
 - **Calibration vs. held out.** Hyper-parameters (prior variances, prior scale) were chosen on **seed 1 only**. Seeds 2–9 were not used for any tuning, and all the numbers below come from them.
 
+## Tranche 3 model fixes (October 2026): no measurable change, as intended
+
+These are correctness fixes, each covered by a deterministic test in `tests/test_taste_model.py`:
+
+- **R1.** Image components exist from 3 photographed products (previously 18 were needed).
+- **R2.** A colour-only rejection moves only colour: the background sample now needs something you chose.
+- **R3.** "This specific item" teaches no general style.
+- **Families.** One garment listed by several sellers counts once, and its listings are never background.
+
+They were run side by side on the held-out seeds 2–9 (8 runs per cell) against the **unchanged engine**: commit
+`43977d2`, run from a separate checkout. Two ablations of the background sample ran with them.
+
+| Persona | Unchanged | Fixed | No background sample | Background at full weight from the start |
+|---|---|---|---|---|
+| stated | 0.93 | 0.94 | 0.93 | 0.94 |
+| hidden | 0.47 | 0.48 | 0.49 | 0.48 |
+| contrarian | 0.16 | 0.16 | 0.15 | 0.16 |
+
+The table shows mean precision@10 over 8 rounds. Paired differences per seed, with 95% bootstrap intervals over
+the 8 seeds:
+
+| Persona | Fixed − unchanged | No background − fixed |
+|---|---|---|
+| stated | +0.005 [−0.006, +0.014] | −0.006 [−0.020, +0.008] |
+| hidden | +0.002 [−0.025, +0.028] | +0.013 [−0.011, +0.039] |
+| contrarian | +0.005 [−0.025, +0.034] | −0.011 [−0.037, +0.016] |
+
+- **The fixes cost no learning performance here.** They also show no gain: this simulation never exercises what
+  they fix. It has no "specific item" reasons, no re-listed garments, and 360 photographed products. Its seed
+  examples are positives from the start, so a rejection never arrives with nothing chosen.
+- **The background sample is not demonstrated either way.** Removing it is within noise. It stays, at its
+  current scaled weight, until real labels can test it. "Full weight from the start" gave results identical to
+  "fixed" in every run.
+
+Raw rows: `results/tranche3_heldout_seeds2-9.jsonl`.
+
 ## Held-out results (seeds 2–9, 8 runs per cell)
 
 | Persona | random | rules_only | legacy | **bayes** |

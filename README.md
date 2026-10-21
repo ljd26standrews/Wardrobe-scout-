@@ -209,6 +209,7 @@ It is then combined with quality evidence, value, wardrobe fit and seller credib
   - *Too expensive for the quality* and *Already own something similar* teach **no** taste at all. They only set a value ceiling or signal redundancy.
   - *This specific item* hides near-identical listings only.
   - A dislike without a reason is a mild general negative.
+  - **One garment counts once.** Loving two sellers' listings of the same piece is one decision, not two.
   - **Skip teaches nothing.**
 - **Seed examples.** Your four starting items count as positive style examples, but they do not create seller affinity. The ¥510 Aristide white T-shirt is recorded with *too expensive for the quality*, which sets a T-shirt value ceiling and does **not** teach a dislike of white or heavyweight tees (this is covered by a test).
 - **Exploration.** About 18% of feed slots (adjustable) are chosen by *Thompson sampling*, which favours items the model is uncertain about rather than items that are merely unusual. They are labelled as exploration picks.
