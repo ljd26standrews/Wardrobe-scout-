@@ -181,9 +181,24 @@ def _upsert_relation(db: Session, a: int, b: int, relation: str, score: float, s
         return
     if rel.user_confirmed is not None:  # never override your decision
         return
+    merged = {**(rel.signals or {}), **signals}  # keep every evidence signal for the pair
     if rel.relation in RANK and relation in RANK and RANK.index(relation) < RANK.index(rel.relation):
+        rel.signals = merged
         return
-    rel.relation, rel.score, rel.signals = relation, score, signals
+    rel.relation, rel.score, rel.signals = relation, score, merged
+
+
+def _propose(found: dict, other: int, relation: str, score: float, signals: dict) -> None:
+    """Collect one relation per pair: the strongest relation wins, all signals are kept."""
+    cur = found.get(other)
+    if cur is None:
+        found[other] = (relation, score, dict(signals))
+        return
+    rel, sc, sig = cur
+    sig = {**sig, **signals}
+    if RANK.index(relation) > RANK.index(rel):
+        rel, sc = relation, score
+    found[other] = (rel, sc, sig)
 
 
 def match_product(
@@ -193,8 +208,12 @@ def match_product(
     phash_index: PhashIndex | None = None,
     matrix: tuple[np.ndarray, list[int]] | None = None,
 ) -> int:
-    """Find relations for one product. Returns number of relations written."""
-    written = 0
+    """Find relations for one product. Returns number of relations written.
+
+    Every signal for a pair (shared purchase link, shared photos, visual similarity) is gathered first and
+    written as ONE row: separate writes for the same pair used to insert duplicates and violate the unique
+    constraint when a pair shared both a purchase link and photos."""
+    found: dict[int, tuple[str, float, dict]] = {}
     # Recompute suggestions from scratch; your confirmations/rejections are always kept.
     db.query(ProductRelation).filter(
         or_(ProductRelation.a_id == p.id, ProductRelation.b_id == p.id), ProductRelation.user_confirmed.is_(None)
@@ -217,8 +236,7 @@ def match_product(
         for other in db.query(Product).filter(Product.id != p.id, cast(Product.links, String).contains(raw_id)):
             shared = my_ids & _purchase_ids(other)
             if shared:
-                _upsert_relation(db, p.id, other.id, "same_purchase_link", 1.0, {"purchase_ids": sorted(shared)})
-                written += 1
+                _propose(found, other.id, "same_purchase_link", 1.0, {"purchase_ids": sorted(shared)})
 
     for pid, matches in pairs.items():
         # Count DISTINCT photos on both sides: one photo matching twice is still one photo.
@@ -226,8 +244,7 @@ def match_product(
         best = min(m[0] for m in matches)
         relation = "shared_photos" if distinct >= MIN_PHOTOS_FOR_SHARED else "similar_photo"
         score = min(1.0, 0.5 + 0.15 * distinct - 0.02 * best)
-        _upsert_relation(db, p.id, pid, relation, round(score, 3), {"matching_photos": distinct, "best_hamming": best})
-        written += 1
+        _propose(found, pid, relation, round(score, 3), {"matching_photos": distinct, "best_hamming": best})
 
     # Visual + text similarity
     v = emb.from_bytes(p.image_embedding)
@@ -241,24 +258,24 @@ def match_product(
             my_title = clean_title(p.title_en)
             for i in np.argsort(-sims)[:25]:
                 other_id = ids[i]
-                if other_id == p.id or other_id in pairs or sims[i] < thr:
+                if other_id == p.id or other_id in found or sims[i] < thr:
                     continue
                 other = db.get(Product, other_id)
                 if other is None or (other.category and p.category and other.category != p.category):
                     continue
                 t = fuzz.token_set_ratio(my_title, clean_title(other.title_en)) / 100
                 score = 0.7 * float(sims[i]) + 0.3 * t
-                _upsert_relation(
-                    db,
-                    p.id,
+                _propose(
+                    found,
                     other_id,
                     "visually_similar",
                     round(score, 3),
                     {"visual": round(float(sims[i]), 3), "title": round(t, 2)},
                 )
-                written += 1
+    for other_id, (relation, score, signals) in found.items():
+        _upsert_relation(db, p.id, other_id, relation, score, signals)
     db.flush()
-    return written
+    return len(found)
 
 
 def embedding_matrix(db: Session, backend: str | None) -> tuple[np.ndarray, list[int]]:
