@@ -22,7 +22,7 @@ from ..services.backup import export_all, import_all
 from ..services.images import ImageError
 from ..services.presenter import Context, product_card
 from ..services.recommender import build_profile, describe_profile, rank_products
-from ..services.settings_store import DEFAULTS, all_settings, get_setting, set_setting
+from ..services.settings_store import DEFAULTS, all_settings, get_setting, set_setting, validate_setting
 
 router = APIRouter(prefix="/api", tags=["system"])
 
@@ -77,12 +77,9 @@ def put_setting(key: str, value: dict | list = Body(...), db: Session = Depends(
         raise HTTPException(404, f"unknown setting {key}")
     if isinstance(DEFAULTS[key], dict) and not isinstance(value, dict):
         raise HTTPException(422, "expected an object")
-    if key == "ranking_weights":
-        for k, v in value.items():
-            if not isinstance(v, int | float) or not 0 <= v <= 5:
-                raise HTTPException(422, f"weight {k} must be between 0 and 5")
-    if key == "recommender" and not 0 <= float(value.get("exploration_rate", 0.18)) <= 0.5:
-        raise HTTPException(422, "exploration_rate must be between 0 and 0.5")
+    errors = validate_setting(key, value)
+    if errors:
+        raise HTTPException(422, "; ".join(errors))
     return set_setting(db, key, value)
 
 

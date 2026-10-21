@@ -52,3 +52,45 @@ def test_purchase_link_and_shared_photos_make_one_relation_with_both_signals(db,
     r = rels[0]
     assert r.relation == "same_purchase_link"
     assert r.signals["purchase_ids"] == ["weidian:123456789"] and r.signals["matching_photos"] == 2
+
+
+# ------------------------------------------------------------------ 1c: settings validation
+def test_invalid_settings_are_refused(env, db):
+    from fastapi.testclient import TestClient
+
+    from app.main import create_app
+    from tests.conftest import AUTH
+
+    with TestClient(create_app(), headers=AUTH) as c:
+        rec = c.get("/api/settings").json()["recommender"]
+        for bad in ({"cold_start_k": -1}, {"cold_start_k": 0}, {"cold_start_k": True}, {"engine": "magic"},
+                    {"exploration_rate": 0.9}, {"near_duplicate_threshold": "high"}):  # fmt: skip
+            r = c.put("/api/settings/recommender", json={**rec, **bad})
+            assert r.status_code == 422, (bad, r.status_code)
+        r = c.put("/api/settings/landed_cost", json={**c.get("/api/settings").json()["landed_cost"], "vat_pct": 250})
+        assert r.status_code == 422 and "vat_pct" in r.json()["detail"]
+        assert c.put("/api/settings/recommender", json={**rec, "cold_start_k": 30}).status_code == 200
+        assert c.get("/api/settings").json()["recommender"]["cold_start_k"] == 30
+
+
+def test_bad_values_already_stored_cannot_break_the_feed(env, db):
+    from fastapi.testclient import TestClient
+
+    from app.main import create_app
+    from app.models import AppSetting
+    from app.services.settings_store import DEFAULTS, get_setting
+    from tests.conftest import AUTH
+
+    s = _seller(db)
+    ps = [_product(db, s, f"k{i}") for i in range(4)]
+    with TestClient(create_app(), headers=AUTH, raise_server_exceptions=False) as c:
+        c.post("/api/feedback", json={"product_id": ps[0].id, "action": "love", "reasons": []})
+        for engine in ("bayes", "legacy"):
+            for k in range(-12, 1):
+                row = db.get(AppSetting, "recommender") or AppSetting(key="recommender")
+                row.value = {**DEFAULTS["recommender"], "cold_start_k": k, "engine": engine}
+                db.merge(row)
+                db.commit()
+                assert c.get("/api/feed?limit=5").status_code == 200, (engine, k)
+    db.expire_all()
+    assert get_setting(db, "recommender")["cold_start_k"] == 1
