@@ -16,18 +16,32 @@ from ..logging_setup import get_logger
 log = get_logger(__name__)
 
 MAX_SIDE = 1400
+# Checked from the file header before any pixels are decoded, so a small file that expands into a huge
+# bitmap (a "decompression bomb") is refused cheaply. 40 megapixels is well above any garment photo.
+MAX_PIXELS = 40_000_000
 
 
 class ImageError(Exception):
     pass
 
 
-def load_image(data: bytes) -> Image.Image:
+def _open(data: bytes) -> Image.Image:
     try:
         img = Image.open(io.BytesIO(data))
+    except (UnidentifiedImageError, OSError, Image.DecompressionBombError) as e:
+        raise ImageError(f"not a valid image: {e}") from e
+    w, h = img.size
+    if w * h > MAX_PIXELS:
+        raise ImageError(f"image too large ({w}×{h} pixels; the limit is {MAX_PIXELS // 1_000_000} megapixels)")
+    return img
+
+
+def load_image(data: bytes) -> Image.Image:
+    img = _open(data)
+    try:
         img = ImageOps.exif_transpose(img)
         return img.convert("RGB")
-    except (UnidentifiedImageError, OSError) as e:
+    except (UnidentifiedImageError, OSError, Image.DecompressionBombError) as e:
         raise ImageError(f"not a valid image: {e}") from e
 
 
@@ -45,13 +59,13 @@ def store_image_bytes(data: bytes, subdir: str = "images") -> tuple[str, Image.I
     JPEGs that are already small enough are written byte-for-byte (no decode/re-encode cost, no extra
     quality loss); anything else is normalised to a JPEG of at most MAX_SIDE pixels.
     """
+    img = _open(data)
     try:
-        img = Image.open(io.BytesIO(data))
         fmt = img.format
         if fmt == "JPEG":
             img.draft("RGB", (MAX_SIDE, MAX_SIDE))  # decode at reduced scale when the file is much larger
         img = ImageOps.exif_transpose(img).convert("RGB")
-    except (UnidentifiedImageError, OSError) as e:
+    except (UnidentifiedImageError, OSError, Image.DecompressionBombError) as e:
         raise ImageError(f"not a valid image: {e}") from e
     as_is = fmt == "JPEG" and max(img.size) <= MAX_SIDE
     if max(img.size) > MAX_SIDE:

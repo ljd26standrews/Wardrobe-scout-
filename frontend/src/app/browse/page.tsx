@@ -20,6 +20,14 @@ export default function BrowsePage() {
   const [newOnly, setNewOnly] = useState(false);
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState("");
+  // Links into Browse (e.g. a wardrobe gap's "find") carry their filters in the URL.
+  useEffect(() => {
+    const sp = new URLSearchParams(window.location.search);
+    const category = sp.getAll("category").filter(Boolean);
+    if (category.length) setFilters((f) => ({ ...f, category }));
+    const q = sp.get("q");
+    if (q) setSearch(q);
+  }, []);
   useEffect(() => {
     const t = setTimeout(() => setFilters((f) => ({ ...f, q: search || undefined })), 300);
     return () => clearTimeout(t);

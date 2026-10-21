@@ -35,6 +35,7 @@ from ..services import dedup, jobs
 from ..services.images import ImageError, phash_of, store_image_bytes
 from ..services.quality import evidence_view, seller_reputation_status
 from ..services.research import accept_lead
+from .uploads import MAX_FILE_UPLOAD, max_image_upload, read_capped
 
 router = APIRouter(prefix="/api", tags=["sellers"])
 
@@ -356,7 +357,7 @@ async def import_manual(
     p = res.product
     _post_import(db, p, d)
     for f in images or []:
-        data = await f.read()
+        data = await read_capped(f, max_image_upload())
         if not data:
             continue
         try:
@@ -407,7 +408,7 @@ def _bulk(db: Session, rows: list[dict], origin: str) -> dict:
 
 @router.post("/import/csv")
 async def import_csv(file: UploadFile = File(...), db: Session = Depends(get_db)):
-    text = (await file.read()).decode("utf-8-sig")
+    text = (await read_capped(file, MAX_FILE_UPLOAD)).decode("utf-8-sig")
     rows = [
         {k.strip().lower(): (v or "").strip() for k, v in r.items() if k} for r in csv.DictReader(io.StringIO(text))
     ]
@@ -417,7 +418,7 @@ async def import_csv(file: UploadFile = File(...), db: Session = Depends(get_db)
 @router.post("/import/json")
 async def import_json(file: UploadFile = File(...), db: Session = Depends(get_db)):
     try:
-        data = json.loads(await file.read())
+        data = json.loads(await read_capped(file, MAX_FILE_UPLOAD))
     except json.JSONDecodeError as e:
         raise HTTPException(422, f"invalid JSON: {e}") from e
     rows = data.get("products", data) if isinstance(data, dict) else data

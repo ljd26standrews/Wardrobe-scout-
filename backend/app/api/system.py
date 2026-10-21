@@ -23,6 +23,7 @@ from ..services.images import ImageError
 from ..services.presenter import Context, product_card
 from ..services.recommender import build_profile, describe_profile, rank_products
 from ..services.settings_store import DEFAULTS, all_settings, get_setting, set_setting, validate_setting
+from .uploads import MAX_FILE_UPLOAD, read_capped
 
 router = APIRouter(prefix="/api", tags=["system"])
 
@@ -221,7 +222,7 @@ def export_backup(include_images: bool = True, db: Session = Depends(get_db)):
 @router.post("/backup/import")
 async def import_backup(file: UploadFile = File(...), db: Session = Depends(get_db)):
     try:
-        data = json.loads(await file.read())
+        data = json.loads(await read_capped(file, MAX_FILE_UPLOAD))
         return import_all(db, data)
     except (json.JSONDecodeError, ValueError) as e:
         raise HTTPException(422, str(e)) from e

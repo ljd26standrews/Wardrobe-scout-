@@ -13,6 +13,7 @@ from ..services.images import ImageError, phash_of, store_image_bytes
 from ..services.presenter import Context, product_card
 from ..services.settings_store import get_setting, set_setting
 from ..services.wardrobe import analyse, complement_scores
+from .uploads import max_image_upload, read_capped
 
 router = APIRouter(prefix="/api", tags=["wardrobe"])
 
@@ -84,7 +85,7 @@ async def add_wardrobe_item(
             img = next((i for i in p.images if i.local_path), None)
             item.image_path = img.local_path if img else None
     if image is not None:
-        data = await image.read()
+        data = await read_capped(image, max_image_upload())
         if data:
             try:
                 rel, pil = store_image_bytes(data, "uploads")
@@ -161,7 +162,7 @@ def inspiration(db: Session = Depends(get_db)):
 async def add_inspiration(
     image: UploadFile = File(...), note: str | None = Form(None), polarity: int = Form(1), db: Session = Depends(get_db)
 ):
-    data = await image.read()
+    data = await read_capped(image, max_image_upload())
     try:
         rel, pil = store_image_bytes(data, "uploads")
     except ImageError as e:

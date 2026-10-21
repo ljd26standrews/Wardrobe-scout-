@@ -80,6 +80,16 @@ class EvidenceIn(BaseModel):
     source_title: str | None = Field(default=None, max_length=300)
     is_affiliate: bool = False
 
+    @field_validator("source_url")
+    @classmethod
+    def _web_link(cls, v: str | None) -> str | None:
+        v = (v or "").strip()
+        if not v:
+            return None
+        if not v.lower().startswith(("http://", "https://")):
+            raise ValueError("source link must be a web address (http or https)")
+        return v
+
 
 class SellerIn(BaseModel):
     name: str = Field(min_length=1, max_length=200)
