@@ -123,3 +123,49 @@ def test_one_garment_listed_by_several_sellers_counts_once(env, db):
     assert abs(decision_weight - 2.0) < 1e-9  # one love, not two
     row_c = space.X[space.row[c.id]]
     assert not any(np.array_equal(r, row_c) and y == 0 for r, y in zip(rows, ys, strict=True))
+
+
+# ----------------------------------------------------------------- full-covariance posterior (selective M2)
+def test_item_uncertainty_uses_the_full_posterior_covariance(env, db):
+    from app.services import preference_model as pm
+
+    s = _seller(db, "fc")
+    ps = [_product(db, s, f"c{i}", f"{c} wool coat {i}", vec_seed=i) for i, c in enumerate(["navy", "black"] * 6)]
+    _feedback(db, ps[0], "love")
+    _feedback(db, ps[1], "dislike")
+    _feedback(db, ps[2], "like")
+    space, post = _fit(db)
+    X = space.X[[space.row[p.id] for p in ps]]
+    rows, ys, ws, _ = pm.observations(db, space)
+    A, c = np.vstack(rows), np.array(ws)
+    p = 1 / (1 + np.exp(-(A @ post.mean)))
+    q0 = np.diag(post.chol @ post.chol.T) - (A**2).T @ (c * p * (1 - p))  # the prior precision
+    H = np.diag(q0) + (A.T * (c * p * (1 - p))) @ A
+    exact = np.sqrt(np.einsum("ij,jk,ik->i", X, np.linalg.inv(H), X))
+    assert np.allclose(post.logit_sd(X), exact, rtol=1e-6)
+    assert np.allclose(post.mean_logit([q.id for q in ps]), X @ post.mean)
+    diag_only = np.sqrt((X**2) @ (1 / np.diag(H)))
+    assert not np.allclose(exact, diag_only, rtol=1e-3)  # correlations matter: the old diagonal was off
+
+
+def test_well_evidenced_items_are_more_certain_than_novel_ones(env, db):
+    s = _seller(db, "nv")
+    seen = [_product(db, s, f"s{i}", f"navy wool coat {i}") for i in range(8)]
+    novel = _product(db, s, "new", "yellow linen shorts")
+    for p in seen[:6]:
+        _feedback(db, p, "love" if int(p.external_id[1:]) % 2 else "dislike")
+    space, post = _fit(db)
+    sd = post.logit_sd(space.X[[space.row[seen[7].id], space.row[novel.id]]])
+    assert sd[0] < sd[1]
+
+
+def test_posterior_is_cached_until_the_evidence_changes(env, db):
+    s = _seller(db, "pc")
+    ps = [_product(db, s, f"p{i}", f"grey wool trousers {i}") for i in range(5)]
+    _feedback(db, ps[0], "love")
+    _, a = _fit(db)
+    _, b = _fit(db)
+    assert a is b  # same data: the fitted posterior is reused, not refitted
+    _feedback(db, ps[1], "dislike")
+    _, c = _fit(db)
+    assert c is not a and c.n_obs == 2

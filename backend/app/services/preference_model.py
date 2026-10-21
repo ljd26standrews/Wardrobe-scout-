@@ -41,14 +41,17 @@ Uncertainty is used for exploration (Thompson sampling) and shown in explanation
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import math
 import threading
-from collections import Counter
+from collections import Counter, OrderedDict
 from dataclasses import dataclass
 
 import numpy as np
+from scipy import sparse
+from scipy.linalg import cho_solve, solve_triangular
 from scipy.optimize import minimize
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -130,6 +133,7 @@ class FeatureSpace:
     pca_scale: np.ndarray | None
     backend: str
     d: int
+    key: str = ""  # identifies the data the space was built from (cache key)
 
     @property
     def img_slice(self) -> slice:
@@ -231,6 +235,7 @@ def build_feature_space(db: Session, taste: dict, backend: str) -> FeatureSpace:
         pca_scale,
         backend,
         d,
+        key,
     )
     for r, p in enumerate(products):
         rules, _ = rules_component(p, taste)
@@ -243,25 +248,69 @@ def build_feature_space(db: Session, taste: dict, backend: str) -> FeatureSpace:
 
 @dataclass
 class Posterior:
+    """Laplace posterior N(mean, H⁻¹) over the weights, with the *full* precision matrix H = chol·cholᵀ.
+
+    Correlated features (a colour, a category and the image components that go with them) make the
+    marginal and predictive uncertainty differ from what a diagonal approximation gives, so item-level
+    uncertainty is computed from the full covariance."""
+
     space: FeatureSpace
     mean: np.ndarray
-    precision: np.ndarray
+    precision: np.ndarray  # diagonal of H (kept for compatibility; not the marginal precision)
     n_obs: int
+    chol: np.ndarray | None = None  # lower Cholesky factor of H
+    _cov: np.ndarray | None = None
+
+    @property
+    def cov(self) -> np.ndarray:
+        """Posterior covariance H⁻¹ (computed once)."""
+        if self._cov is None:
+            L = self.chol if self.chol is not None else np.diag(np.sqrt(self.precision))
+            self._cov = cho_solve((L, True), np.eye(self.space.d))
+        return self._cov
+
+    @property
+    def marginal_sd(self) -> np.ndarray:
+        return np.sqrt(np.diag(self.cov))
+
+    def rows(self, pids: list[int]) -> np.ndarray:
+        return self.space.X[[self.space.row[p] for p in pids]]
+
+    def mean_logit(self, pids: list[int]) -> np.ndarray:
+        """Raw compatibility: the posterior mean of the logit (not a probability)."""
+        return self.rows(pids) @ self.mean if pids else np.zeros(0)
+
+    def logit_sd(self, X: np.ndarray, chunk: int = 4096) -> np.ndarray:
+        """Posterior s.d. of x·w for each row: sqrt(xᵀ H⁻¹ x). Rows are mostly one-hot, so the product is
+        computed sparsely, in chunks (fast for tens of thousands of items)."""
+        out = np.empty(len(X))
+        cov = self.cov
+        for i in range(0, len(X), chunk):
+            block = X[i : i + chunk]
+            v = np.asarray((sparse.csr_matrix(block) @ cov) * block).sum(axis=1)
+            out[i : i + chunk] = np.sqrt(np.maximum(v, 0.0))
+        return out
 
     def z(self, pids: list[int]) -> tuple[np.ndarray, np.ndarray]:
         """Posterior mean and s.d. of the logit for each product."""
-        X = self.space.X[[self.space.row[p] for p in pids]]
-        return X @ self.mean, np.sqrt((X**2) @ (1 / self.precision))
+        X = self.rows(pids)
+        return X @ self.mean, self.logit_sd(X)
+
+    def sample_weights(self, rng: np.random.Generator, scale: float = 1.0) -> np.ndarray:
+        """A draw from the posterior (scaled), using the full covariance."""
+        eps = rng.standard_normal(self.space.d)
+        if self.chol is None:
+            return self.mean + scale * eps / np.sqrt(self.precision)
+        return self.mean + scale * solve_triangular(self.chol.T, eps, lower=False)
 
     def sample_z(self, pids: list[int], rng: np.random.Generator, scale: float = 0.5) -> np.ndarray:
-        w = self.mean + scale * rng.standard_normal(self.space.d) / np.sqrt(self.precision)
-        return self.space.X[[self.space.row[p] for p in pids]] @ w
+        return self.rows(pids) @ self.sample_weights(rng, scale)
 
     def explain(self, pid: int, top: int = 3) -> tuple[list[dict], list[dict]]:
         """Largest positive and negative feature contributions to this item's predicted appeal."""
         x = self.space.X[self.space.row[pid]]
         contrib = x * self.mean
-        sd = np.abs(x) / np.sqrt(self.precision)
+        sd = np.abs(x) * self.marginal_sd
         items = []
         for j in np.argsort(-np.abs(contrib)):
             if abs(contrib[j]) < 0.05:
@@ -273,10 +322,11 @@ class Posterior:
         return [i for i in items if i["effect"] > 0][:top], [i for i in items if i["effect"] < 0][:top]
 
     def summary(self, limit: int = 40) -> dict:
-        trust_sd = 1 / math.sqrt(self.precision[0])
+        msd = self.marginal_sd
+        trust_sd = float(msd[0])
         feats = []
         for j in range(1, self.space.img_slice.start):  # attribute features only
-            sd = 1 / math.sqrt(self.precision[j])
+            sd = float(msd[j])
             if abs(self.mean[j]) < 0.02 and sd > 0.95 * math.sqrt(PRIOR_VAR_ATTR):
                 continue  # nothing learned about this feature yet
             group, label = self.space.feature_name(j)
@@ -385,17 +435,51 @@ def _with_background(space, latest, group_of, rows, ys, ws, n_real):
     return rows, ys, ws, n_real
 
 
-def fit(db: Session, space: FeatureSpace) -> Posterior:
+_post_lock = threading.Lock()
+_post_cache: OrderedDict[str, Posterior] = OrderedDict()  # a few recent fits, keyed by their exact inputs
+
+
+def prior(space: FeatureSpace) -> tuple[np.ndarray, np.ndarray]:
+    """Prior mean and (diagonal) prior precision of the weights."""
     m0 = np.zeros(space.d)
     m0[0] = PRIOR_MEAN_TRUST
     q0 = np.full(space.d, 1 / PRIOR_VAR_ATTR)
     q0[space.img_slice] = 1 / PRIOR_VAR_IMG
     q0[0] = 1 / PRIOR_VAR_TRUST
     q0[space.bias] = 1 / PRIOR_VAR_BIAS
-    rows, ys, ws, n_real = observations(db, space)
-    if not rows:
-        return Posterior(space, m0, q0, 0)
-    A, y, c = np.vstack(rows), np.array(ys, float), np.array(ws)
+    return m0, q0
+
+
+def fit(db: Session, space: FeatureSpace) -> Posterior:
+    """Fit the taste model to your current evidence. A fit is reused while its inputs are unchanged."""
+    return fit_rows(space, *observations(db, space))
+
+
+def fit_rows(space: FeatureSpace, rows: list, ys: list, ws: list, n_real: int) -> Posterior:
+    """Fit on given observation rows (also used for out-of-fold fits by the calibration)."""
+    m0, q0 = prior(space)
+    A = np.vstack(rows) if rows else np.zeros((0, space.d))
+    y, c = np.array(ys, float), np.array(ws, float)
+    key = hashlib.sha1(
+        b"".join([space.key.encode(), A.tobytes(), y.tobytes(), c.tobytes(), m0.tobytes(), q0.tobytes()])
+    ).hexdigest()
+    with _post_lock:
+        if key in _post_cache:
+            _post_cache.move_to_end(key)
+            hit = _post_cache[key]
+            # The weights depend only on the inputs hashed above; bind them to the caller's space object.
+            return hit if hit.space is space else dataclasses.replace(hit, space=space)
+    post = _fit(space, m0, q0, A, y, c, n_real)
+    with _post_lock:
+        _post_cache[key] = post
+        while len(_post_cache) > 8:
+            _post_cache.popitem(last=False)
+    return post
+
+
+def _fit(space, m0, q0, A, y, c, n_real) -> Posterior:
+    if not len(A):
+        return Posterior(space, m0, q0, 0, chol=np.diag(np.sqrt(q0)))
 
     def loss(w):
         z = A @ w
@@ -405,4 +489,5 @@ def fit(db: Session, space: FeatureSpace) -> Posterior:
 
     w = minimize(loss, m0.copy(), jac=True, method="L-BFGS-B").x
     p = _sigmoid(A @ w)
-    return Posterior(space, w, q0 + (A**2).T @ (c * p * (1 - p)), n_real)
+    H = np.diag(q0) + (A.T * (c * p * (1 - p))) @ A
+    return Posterior(space, w, np.diag(H).copy(), n_real, chol=np.linalg.cholesky(H))

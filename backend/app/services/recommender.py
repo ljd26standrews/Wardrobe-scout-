@@ -405,6 +405,9 @@ class Ranked:
     taste_sd: float | None = None  # uncertainty of the learned taste estimate (logit s.d.)
 
 
+UNCERTAINTY_TOP = 1000
+
+
 def rank_products(
     db: Session,
     products: list[Product],
@@ -460,10 +463,11 @@ def rank_products(
         space = pm.build_feature_space(db, taste, backend)
         post = pm.fit(db, space)
         known = [p.id for p in products if p.id in space.row]
-        zmean, zsd = post.z(known) if known else (np.zeros(0), np.zeros(0))
+        # Mean logits for all; per-item uncertainty is computed by the selective gate for its shortlist only.
+        zmean = post.mean_logit(known)
         rng = np.random.default_rng(int(utcnow().strftime("%Y%m%d")) * 1000 + post.n_obs)
         zsamp = post.sample_z(known, rng) if known else np.zeros(0)
-        model_by_id = {pid: (float(zmean[j]), float(zsd[j]), float(zsamp[j])) for j, pid in enumerate(known)}
+        model_by_id = {pid: (float(zmean[j]), None, float(zsamp[j])) for j, pid in enumerate(known)}
         s = post.n_obs / (post.n_obs + rcfg.get("cold_start_k", 15)) if post.n_obs else 0.0
 
     gates = {
@@ -612,6 +616,11 @@ def rank_products(
             )
         )
     out.sort(key=lambda r: -r.score)
+    if bayes:  # uncertainty for the part of the ranking anyone will look at (cheap; the gate computes its own)
+        top = [r for r in out[:UNCERTAINTY_TOP] if r.product.id in space.row]
+        if top:
+            for r, sd in zip(top, post.logit_sd(post.rows([r.product.id for r in top])), strict=True):
+                r.taste_sd = float(sd)
     return out
 
 
@@ -652,7 +661,7 @@ def _bayes_ranked(
     strength,
 ) -> Ranked:
     """Score and explain one product with the Bayesian taste model (see preference_model)."""
-    zm, zsd, zs = model if model else (0.0, 1.0, 0.0)
+    zm, zsd, zs = model if model else (0.0, None, 0.0)
     taste_c = float(1 / (1 + math.exp(-zm)))
     comps = {"taste": taste_c, "quality": quality_c, "value": value_c, "wardrobe": wardrobe_c, "seller": seller_c}
     contrib = {c: weights.get(c, 0) * gates[c] * (v - 0.5) for c, v in comps.items()}
