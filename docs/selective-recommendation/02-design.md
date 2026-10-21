@@ -136,7 +136,7 @@ An item passes mode (t, γ) iff `p_low_i(γ) ≥ t`. Under the model, that means
 7. Interaction features (shrunk), kept only if the simulation shows no harm and an interaction persona benefits.
 8. Latency and memory benchmarks at 1k, 5k and 20k products; prospective-trial flag; documentation.
 
-## 6. As built (milestone 4)
+## 6. As built
 
 - **States:**
 
@@ -158,3 +158,14 @@ An item passes mode (t, γ) iff `p_low_i(γ) ≥ t`. Under the model, that means
 - **Logged per served item:** `m`, `s`, `estimate`, `bound`, the modes passed and, for Learning picks, `propensity`.
 - **Logged per feed:** `policy`, `mode`, `calibration_id`, and `gate` (state, thresholds, counts, sampling details). This uses additive migration `f3d2c8a1e6b9`.
 - **Observed performance:** `/api/selective/status` reports approval among served pieces that were then rated, by serving mode and by gate passed, with 95% Clopper–Pearson intervals. Nothing is reported below 10 rated pieces. Pieces shown but not rated are not counted.
+- **Honest display (M5).**
+  - Cards show a calibrated estimate to the nearest 5%; conservative bounds are rounded down.
+  - Without a calibration no percentage appears anywhere, and the old "match 87" number is gone.
+  - Taste left the Quality panel.
+  - The card on screen stays pinned across re-ranking only while the latest server response still includes it.
+- **Leak-free training sets (M6).**
+  - Out-of-fold and rolling-origin fits leave whole families out before the background sample is built, so a held-out label cannot leak through the background weight.
+  - Labels and observations can be cut at any time (`before=`).
+- **Shortfall warning.** A calibrated feed carries the observed approval among rated pieces that passed its mode. Discover warns when that is demonstrably below the target, meaning the upper end of the 95% interval falls under it. Nothing is adjusted silently.
+- **Opt-in trial (M8).** A daily switchback serves the earlier ranked feed on alternate days. Both arms are logged with a `trial` flag and compared on Insights, using main-feed pieces only.
+- **Interaction features (M7).** Colour × garment-type features sit behind a switch, with a tighter prior. A rejection reason never teaches them. They are enabled only on the evidence in `03-results.md`.

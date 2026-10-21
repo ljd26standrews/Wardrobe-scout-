@@ -1,6 +1,7 @@
 """Summarise simulation logs: precision@10 per persona and method.
 
 Usage: .venv/bin/python -m eval.report results.log [more.log ...]
+       .venv/bin/python -m eval.report --paired METHOD_A METHOD_B results.log [more.log ...]
 """
 
 from __future__ import annotations
@@ -32,5 +33,28 @@ def summarise(paths: list[str]) -> str:
     return "\n".join(lines)
 
 
+def paired(paths: list[str], a: str, b: str, boot: int = 5000, seed: int = 0) -> str:
+    """Per persona: mean of (a − b) per-seed precision@10, a 95% bootstrap interval over seeds, and wins."""
+    import random
+
+    rows = [json.loads(line) for path in paths for line in open(path) if line.startswith("{")]
+    by = {(r["persona"], r["method"], r["seed"]): st.mean(r["prec"]) for r in rows}
+    rng = random.Random(seed)
+    lines = [f"| Persona | {a} − {b} [95% CI] | wins |", "|---|---|---|"]
+    for persona in sorted({k[0] for k in by}):
+        seeds = sorted(s for (p, m, s) in by if p == persona and m == a and (p, b, s) in by)
+        if not seeds:
+            continue
+        d = [by[(persona, a, s)] - by[(persona, b, s)] for s in seeds]
+        means = sorted(st.mean(rng.choice(d) for _ in d) for _ in range(boot))
+        lo, hi = means[int(0.025 * boot)], means[int(0.975 * boot) - 1]
+        wins = sum(x > 0 for x in d)
+        lines.append(f"| {persona} | {st.mean(d):+.3f} [{lo:+.3f}, {hi:+.3f}] | {wins}/{len(d)} |")
+    return "\n".join(lines)
+
+
 if __name__ == "__main__":
-    print(summarise(sys.argv[1:]))
+    if sys.argv[1:2] == ["--paired"]:
+        print(paired(sys.argv[4:], sys.argv[2], sys.argv[3]))
+    else:
+        print(summarise(sys.argv[1:]))

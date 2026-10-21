@@ -214,10 +214,10 @@ It is then combined with quality evidence, value, wardrobe fit and seller credib
   - **One garment counts once.** Loving two sellers' listings of the same piece is one decision, not two.
   - **Skip teaches nothing.**
 - **Seed examples.** Your four starting items count as positive style examples, but they do not create seller affinity. The ¥510 Aristide white T-shirt is recorded with *too expensive for the quality*, which sets a T-shirt value ceiling and does **not** teach a dislike of white or heavyweight tees (this is covered by a test).
-- **Exploration.** About 18% of feed slots (adjustable) are chosen by *Thompson sampling*, which favours items the model is uncertain about rather than items that are merely unusual. They are labelled as exploration picks.
+- **Exploration.** With selective recommendation on (the default), exploration lives in **Learning picks**; see the next section. With it off, about 18% of feed slots (adjustable) are chosen by *Thompson sampling*, which favours items the model is uncertain about rather than items that are merely unusual, and they are labelled as exploration picks.
 - **One garment, one card.** Listings that are the same piece (a confirmed match, the same purchase link or several shared photos) share one feed slot, led by the best-ranked offer. A decision on one listing covers the others, except a dislike given only for the price, so a cheaper offer can still appear.
 - **Impression log.** Discover records two things, and each decision links to them:
-  - each feed it served: the ranking, positions, exploration picks and model version;
+  - each feed it served: the ranking, positions, exploration picks and model version, and, for selective feeds, the mode, the calibration used, each piece's estimate and conservative bound, the modes it passed and (Learning picks) its inclusion probability;
   - each card actually displayed.
 
   This is the exposure record a fair evaluation of the recommender needs, because decisions alone don't say what you were shown. It stays on your computer, keeps the latest 10,000 feeds and 200,000 displayed cards, and is included in the full snapshot (not the JSON backup).
@@ -264,6 +264,54 @@ These are synthetic users with synthetic images, so the table shows learning beh
    It reports nothing until there are at least 40 grades across 3 sellers, with 5 liked. Results are saved under `data/evaluation/`.
 
 **Image embeddings.** With CLIP installed (`WITH_CLIP=1`, OpenCLIP ViT-B-32 / LAION-2B) visual similarity understands garments semantically. Without it, a lightweight built-in model captures colour, tone, texture and rough shape. Switching models triggers an automatic re-embed.
+
+## Selective recommendation: show a piece only when it's likely right
+
+Discover's main feed (**For you**) recommends a piece only when the app is sure enough that you will approve of it: love it, save it or buy it.
+
+- **Approval estimates come from your own decisions.** Once you have rated at least 30 pieces, including 5 approvals and 5 rejections (adjustable), the taste model is calibrated on them. Every rated piece is scored by a model fitted without it. A two-parameter map then turns raw compatibility into an approval estimate, and it is kept only if it beats the model's own probabilities out of sample. **Before that, no percentage appears anywhere.**
+- **Three modes**, switchable on Discover:
+
+  | Mode | Shows a piece when | Before calibration |
+  |---|---|---|
+  | Balanced | its approval estimate is at least 80% | your taste ranking, labelled "not yet calibrated", with a few labelled Learning picks |
+  | High confidence | the app is 80% sure its approval chance is at least 90% | nothing, and how many more decisions are needed |
+  | Extremely selective | the app is 90% sure its approval chance is at least 95% | nothing, and how many more decisions are needed |
+
+  "Sure" combines how little the model knows about that piece with the calibration's own uncertainty. The 80%, 90% and 95% figures are **targets, not achievements**. They count as met only when your observed approval confirms them, on Insights.
+- **The bar is never lowered to fill the feed.** If nothing qualifies, Discover says so, shows how many pieces qualify under the other modes, and offers Learning picks.
+- **Eligibility comes first**, and every exclusion keeps its reason:
+  - In every mode, near-identical copies of pieces you rejected never qualify, and neither do pieces with independent evidence of poor quality. Unknown quality is never treated as poor.
+  - High confidence and Extremely selective also need an analysed photo. They leave out sellers with recorded concerns, prices above a ceiling you set for an unproven piece, and categories you've said you already own.
+- **Learning picks** have their own tab. They are plausible pieces the model is unsure about, sampled with known inclusion probabilities, which are logged. They are never mixed into a calibrated feed or a strict mode.
+- **Insights → Selective recommendation** shows:
+  - the observed approval of what each mode served, with 95% intervals (no rate below 10 rated pieces);
+  - a calibration check, as a chart with a table view;
+  - the calibration history, with rollback.
+
+  If your approval of pieces that passed a mode is demonstrably below its target, Discover says so.
+- **Off switch and trial.** Settings → Selective recommendation switches it all off, and the earlier ranked feed returns. It also holds every threshold. An optional trial alternates days between the earlier feed and the selective one, so Insights can compare them.
+
+**Measuring it on your own decisions:**
+
+```bash
+cd backend && .venv/bin/python -m eval.selective
+```
+
+This works on a read-only copy of your database and runs two protocols:
+
+- **Your Discover decisions, in time order.** Each decision is predicted by a model and calibration fitted only on what came before it.
+- **Your Evaluate grades.** These are an unbiased sample of pieces.
+
+It reports:
+
+- calibration error (with its noise floor), Brier score and reliability;
+- per mode: precision with 95% intervals and coverage, against the plain taste ranking at the same coverage;
+- learning progression.
+
+It refuses to report anything below minimum sample sizes, and saves aggregates only.
+
+**What is and isn't known.** The machinery is tested on clearly labelled synthetic data. **How well the modes work for a real person is unmeasured** until you have rated enough pieces. See [`docs/selective-recommendation/03-results.md`](docs/selective-recommendation/03-results.md) for the synthetic results and their limits.
 
 ## Cross-seller comparison
 
@@ -333,6 +381,7 @@ cd backend
 .venv/bin/python -m app.cli restore-full snapshot.zip --data-dir NEW_FOLDER
 .venv/bin/python -m app.cli recompute
 .venv/bin/python -m eval.real               # measure the recommender on your Evaluate grades (see above)
+.venv/bin/python -m eval.selective          # measure approval estimates and the selective modes on your decisions
 ```
 
 ## Tests
@@ -359,7 +408,8 @@ frontend/  Next.js 15 (App Router) · TypeScript · Tailwind · shadcn-style Rad
   src/app/api/[...path]/route.ts   runtime proxy to the backend (single origin, good for iPhone use)
 scripts/   setup.sh · start.sh · dev.sh · e2e.sh · start-windows.ps1
 backend/bench/   reproducible scanning benchmarks against a local catalogue server (see bench/README.md)
-backend/eval/    recommender evaluation with simulated shoppers
+backend/eval/    recommender evaluation: simulated shoppers, and real-label evaluators (eval.real, eval.selective)
+  app/services/approval_data.py · calibration.py · selective.py   approval labels, calibration, the selective gate
 ```
 
 ## Known limitations (please read)
@@ -379,6 +429,7 @@ backend/eval/    recommender evaluation with simulated shoppers
   - **Size-chart detection.** It wrongly excluded 1 of 3,781 real garment photos. It recognised 96% of rendered charts; photographed charts, at 81.5%, are the weakest case (`backend/bench/RESULTS.md`). Real sellers' chart designs may differ, so a chart that slips through is labelled *uncertain* or *garment* rather than causing an error.
   - **Duplicate detection.** Analysing one photo per product finds fewer cross-seller duplicates than downloading every photo did (54 of 83 re-posts against 81 of 83 at 1,000 products, and 132 of 257 against 254 of 257 at 3,000, where the deep-check budget ran out; the original's extra 'matches' were mostly false — see `backend/bench/RESULTS.md`). Duplicate candidates and anything you love or save get a deep check. Set `WS_ANALYSIS_IMAGES=2` for more thorough matching at roughly twice the photo requests. These figures predate a stricter rule that counts one photo posted several times as one photograph. On the 300-product catalogue, that rule moved 2 of 31 re-posts from the strong tier to a hint (25 → 23); the larger runs have not been repeated.
 - **Recommendation quality is unmeasured on real taste** until you grade pieces on the Evaluate page (see "Measuring it on your own taste"). The simulation results are about learning behaviour only.
+- **The selective modes' targets (80%, 90%, 95%) are unvalidated.** Approval estimates are calibrated on your own decisions, but whether each mode meets its target for you is only known once Insights shows enough rated pieces. In synthetic tests, High confidence and Extremely selective still showed nothing after about 290 decisions, and calibrated Balanced was sometimes optimistic about its very top pieces. Discover warns you when that optimism shows in your own outcomes.
 - **Outfit suggestions** use colour-harmony and layering rules, not a learned fashion model.
 - Duplicate grouping by **shared photos** is a strong hint but not proof of the same batch. The UI says so, and only your confirmation (or a shared purchase link) makes a match "confirmed". The photo-matching thresholds were tuned on synthetic images and still need checking on real seller photos.
 - Some catalogues may contain replicas of branded goods. Check your local rules on importing them; UK Border Force can seize counterfeit goods.
