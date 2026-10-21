@@ -78,12 +78,18 @@ LABEL = {"love": (1, 2.0), "like": (1, 1.0), "purchased": (1, 1.5), "maybe": (1,
 REASON_GROUPS = {
     "colour": {"colour"},
     "fabric": {"fibre"},
-    "logo": {"logo", "brand"},
+    "logo": {"logo"},  # a loud logo is not a verdict on the brand
     "silhouette": {"fit", "category", "img"},
 }
 # Reasons that say nothing about general taste. "This specific item" is about that one piece: the feed hides it
 # and its near-duplicates (recommender suppression), but no colour, shape or style weight learns from it.
-NON_TASTE_REASONS = {"too_expensive", "already_own", "construction", "specific_item"}
+NON_TASTE_REASONS = {
+    "too_expensive", "already_own", "construction", "specific_item",
+    "wrong_category",  # a data error (the listing's category was wrong), not taste
+    "too_repetitive",  # a feed problem (too much of the same), not taste
+}  # fmt: skip
+# "Not my style" is a general taste rejection: learned like a dislike given no specific reason.
+GENERAL_REASONS = {"not_my_style"}
 
 GROUP_LABEL = {
     "colour": "colour",
@@ -318,8 +324,9 @@ def observations(db: Session, space: FeatureSpace) -> tuple[list[np.ndarray], li
             continue  # value/redundancy/construction/this-item-only judgements are not taste
         y, w = LABEL[fb.action]
         x = space.X[space.row[pid]].copy() if isinstance(pid, int) else space.vector(attr_keys(fb.snapshot))
-        if fb.action == "dislike" and reasons - NON_TASTE_REASONS:
-            groups = set().union(*(REASON_GROUPS.get(r, set()) for r in reasons - NON_TASTE_REASONS))
+        specific = reasons - NON_TASTE_REASONS - GENERAL_REASONS
+        if fb.action == "dislike" and specific:
+            groups = set().union(*(REASON_GROUPS.get(r, set()) for r in specific))
             x *= space.group_mask(groups)  # learn only about what the reason names
         decisions.append((("group", group_of[pid]) if pid in group_of else ("item", pid), x, y, w))
     # One garment listed by several sellers is one piece of evidence: its listings share one decision's weight.

@@ -325,8 +325,11 @@ export const REASONS: { value: string; label: string; hint: string }[] = [
   { value: "colour", label: "Dislike the colour", hint: "Only this colour is down-weighted" },
   { value: "logo", label: "Dislike the logo", hint: "Learns about branding visibility" },
   { value: "fabric", label: "Fabric doesn't appeal", hint: "Learns about materials" },
-  { value: "construction", label: "Poor apparent construction", hint: "Raises quality strictness" },
+  { value: "not_my_style", label: "Not my style", hint: "A general taste rejection" },
+  { value: "construction", label: "Poor apparent quality", hint: "Raises quality strictness — not a taste dislike" },
   { value: "too_expensive", label: "Too expensive for the quality", hint: "Sets a value ceiling — not a taste dislike" },
   { value: "already_own", label: "Already own something similar", hint: "Avoids redundancy — not a taste dislike" },
+  { value: "too_repetitive", label: "Too repetitive", hint: "Varies the feed — not a taste dislike" },
+  { value: "wrong_category", label: "Wrong category (listing error)", hint: "A data error — nothing is learned" },
   { value: "specific_item", label: "Don't like this specific item", hint: "Hides near-identical listings only" },
 ];

@@ -203,11 +203,13 @@ It is then combined with quality evidence, value, wardrobe fit and seller credib
 - **Reason-aware rejections.** A reason limits what gets learned:
   - *Colour* only updates colour.
   - *Silhouette* updates fit and visual shape.
-  - *Logo* updates branding visibility.
+  - *Logo* updates logo visibility only. It is not a verdict on the brand.
   - *Fabric* updates materials.
-  - *Poor construction* makes quality stricter and lowers that seller.
+  - *Poor apparent quality* makes quality stricter. It teaches no taste, so similar-looking pieces from better sellers are not avoided.
   - *Too expensive for the quality* and *Already own something similar* teach **no** taste at all. They only set a value ceiling or signal redundancy.
   - *This specific item* hides near-identical listings only.
+  - *Not my style* is a general taste rejection.
+  - *Too repetitive* and *Wrong category (listing error)* teach no taste.
   - A dislike without a reason is a mild general negative.
   - **One garment counts once.** Loving two sellers' listings of the same piece is one decision, not two.
   - **Skip teaches nothing.**

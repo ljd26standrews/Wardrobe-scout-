@@ -46,10 +46,13 @@ REASONS = {
     "colour": "Dislike the colour",
     "logo": "Dislike the logo",
     "fabric": "Fabric doesn't appeal to me",
-    "construction": "Poor apparent construction",
+    "construction": "Poor apparent quality",
     "too_expensive": "Too expensive for the quality",
     "already_own": "Already own something similar",
     "specific_item": "Don't like this specific item",
+    "not_my_style": "Not my style",
+    "wrong_category": "Wrong category (listing error)",
+    "too_repetitive": "Too repetitive",
 }
 
 ATTR_TYPE_WEIGHT = {"colour": 1.0, "category": 1.0, "fibre": 1.0, "brand": 0.8, "seller": 0.5, "fit": 1.0, "logo": 1.0}
@@ -68,11 +71,13 @@ class Routing:
 
 def route_feedback(action: str, reasons: list[str] | None) -> Routing:
     """Map a decision (+ optional reasons) to which preference signals it updates."""
-    reasons = [r for r in (reasons or []) if r in REASONS]
+    reasons = [r for r in (reasons or []) if r in REASONS and r != "not_my_style"]
     if action in ("love", "like", "purchased", "maybe"):
         return Routing(attrs={k: 1.0 for k in ATTR_TYPE_WEIGHT}, visual=1.0, text=1.0)
     if action != "dislike":
         return Routing()  # skip / unsave teach nothing
+    if reasons and set(reasons) <= {"wrong_category", "too_repetitive"}:
+        return Routing()  # a listing error or a repetitive feed says nothing about taste
     if not reasons:
         return Routing(attrs={k: 0.5 for k in ATTR_TYPE_WEIGHT}, visual=0.7, text=0.5, suppress=True)
     r = Routing()
@@ -89,8 +94,7 @@ def route_feedback(action: str, reasons: list[str] | None) -> Routing:
         elif reason == "colour":
             bump("colour", 1.0)
         elif reason == "logo":
-            bump("logo", 1.0)
-            bump("brand", 0.2)
+            bump("logo", 1.0)  # not the brand: a loud logo is not a verdict on the label
             r.visual = max(r.visual, 0.2)
         elif reason == "fabric":
             bump("fibre", 1.0)
