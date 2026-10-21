@@ -168,8 +168,17 @@ export function SelectiveInsights() {
         <StatTile label="Mode" value={MODE_LABEL[data.mode]} sub={capitalise(modeRule(current.target, current.confidence))} />
         <StatTile
           label="Calibration"
-          value={cal.state === "calibrated" ? `${cal.calibration?.n_labels} decisions` : `${cal.labels} of ${cal.needed}`}
-          sub={cal.state === "calibrated" ? `${cal.calibration?.map === "identity" ? "Model probabilities kept" : "Platt-scaled"} · ${timeAgo(cal.calibration!.created_at)}` : cal.state === "pending" ? "Calibrating now" : `Rated pieces needed (at least ${cal.needed_each} approvals and ${cal.needed_each} rejections)`}
+          value={cal.calibration ? `${cal.calibration.n_labels} decisions` : `${cal.labels} of ${cal.needed}`}
+          sub={
+            cal.calibration
+              ? `${cal.calibration.map === "identity" ? "Model probabilities kept" : "Platt-scaled"} · ${timeAgo(cal.calibration.created_at)}` +
+                (cal.state === "stale" ? ` · ${cal.since?.new_decisions ?? 0} newer decisions not yet included` : "")
+              : cal.state === "pending"
+                ? "Calibrating now" + (cal.withdrawn ? ` (the last one was withdrawn: ${cal.withdrawn.label})` : "")
+                : cal.state === "failed"
+                  ? "The last attempt failed; it will be retried shortly"
+                  : `Rated pieces needed (at least ${cal.needed_each} approvals and ${cal.needed_each} rejections)` + (cal.withdrawn ? `. The last calibration was withdrawn: ${cal.withdrawn.label}` : "")
+          }
         />
         <StatTile label="Calibration error" value={cal.calibration ? pct(cal.calibration.ece) : "—"} sub="Expected gap between estimate and outcome, out of sample. Lower is better." />
         <StatTile
@@ -228,12 +237,14 @@ export function SelectiveInsights() {
                 </span>
                 {h.active ? (
                   <Badge variant="positive">In use</Badge>
-                ) : h.current_model ? (
+                ) : h.usable ? (
                   <Button size="sm" variant="ghost" onClick={() => activate(h.id)}>
                     Use this one
                   </Button>
                 ) : (
-                  <Badge variant="muted">Earlier model</Badge>
+                  <Tip content={`Can't be used now: ${h.unusable_reason}.`}>
+                    <Badge variant="muted">{h.withdrawn ? "Withdrawn" : "Not usable now"}</Badge>
+                  </Tip>
                 )}
               </li>
             ))}

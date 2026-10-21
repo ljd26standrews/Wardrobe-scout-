@@ -16,7 +16,7 @@ from ..db import get_db
 from ..ingestion.http import BlockedError, PoliteClient
 from ..ingestion.pipeline import apply_analysis, fetch_and_analyse
 from ..models import Feedback, Job, Product, ProductImage, SavedItem, Seller, WardrobeItem, utcnow
-from ..services import ai, jobs, selective
+from ..services import ai, calibration, jobs, selective
 from ..services import embeddings as emb
 from ..services.backup import export_all, import_all
 from ..services.images import ImageError
@@ -81,14 +81,24 @@ def put_setting(key: str, value: dict | list = Body(...), db: Session = Depends(
     errors = validate_setting(key, value)
     if errors:
         raise HTTPException(422, "; ".join(errors))
-    return set_setting(db, key, value)
+    out = set_setting(db, key, value)
+    if key in CALIBRATION_SETTINGS:
+        calibration.maybe_schedule(db)  # e.g. a higher minimum, or a new profile, withdraws estimates at once
+    return out
+
+
+# Settings that change what approval estimates rest on (minimums, the written profile, the taste engine).
+CALIBRATION_SETTINGS = {"selective", "taste_profile", "recommender"}
 
 
 @router.post("/settings/{key}/reset")
 def reset_setting(key: str, db: Session = Depends(get_db)):
     if key not in DEFAULTS:
         raise HTTPException(404, f"unknown setting {key}")
-    return set_setting(db, key, DEFAULTS[key])
+    out = set_setting(db, key, DEFAULTS[key])
+    if key in CALIBRATION_SETTINGS:
+        calibration.maybe_schedule(db)
+    return out
 
 
 @router.post("/settings/currency/refresh")
@@ -233,9 +243,11 @@ def export_backup(include_images: bool = True, db: Session = Depends(get_db)):
 async def import_backup(file: UploadFile = File(...), db: Session = Depends(get_db)):
     try:
         data = json.loads(await read_capped(file, MAX_FILE_UPLOAD))
-        return import_all(db, data)
+        out = import_all(db, data)
     except (json.JSONDecodeError, ValueError) as e:
         raise HTTPException(422, str(e)) from e
+    calibration.maybe_schedule(db)  # imported decisions, settings or profile can change what estimates rest on
+    return out
 
 
 @router.get("/backup/database")

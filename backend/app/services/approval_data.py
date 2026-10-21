@@ -20,6 +20,8 @@ from sqlalchemy.orm import Session
 
 from ..models import Feedback, Product
 
+# How decisions are read as labels. A calibration fitted under one reading is never applied under another.
+LABEL_VERSION = "approval-v1"
 APPROVE = frozenset({"love", "like", "purchased"})
 NOT_APPROVED = frozenset({"dislike", "maybe"})
 

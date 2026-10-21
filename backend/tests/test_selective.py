@@ -304,10 +304,10 @@ def test_a_failing_calibration_degrades_without_claiming_confidence(client, db, 
 
     world(db)
 
-    def broken(_db):
+    def broken(_db, _ev=None):
         raise RuntimeError("calibration store unreadable")
 
-    monkeypatch.setattr(calibration, "active_map", broken)
+    monkeypatch.setattr(calibration, "serving", broken)
     f = client.get("/api/feed", params={"limit": 100}).json()
     assert f["gate"]["state"] == "unavailable" and f["items"]
     assert all("estimate" not in i["confidence"] for i in f["items"])

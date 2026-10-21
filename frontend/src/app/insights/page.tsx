@@ -4,7 +4,7 @@ import useSWR from "swr";
 import { toast } from "sonner";
 import { Undo2 } from "lucide-react";
 import type { Confidence, Gate } from "@/lib/api";
-import { api } from "@/lib/api";
+import { api, hasEstimates } from "@/lib/api";
 import { ConfidenceBadge } from "@/components/product/confidence";
 import { SelectiveInsights } from "@/components/selective-insights";
 import { Card, ErrorState, Meter, Skeleton } from "@/components/ui/misc";
@@ -283,7 +283,7 @@ export default function InsightsPage() {
           <h2 className="mt-14 text-3xl">Why the top picks rank highly</h2>
           {data.top_gate && data.top_gate.state !== "off" && (
             <p className="mt-2 max-w-2xl text-sm text-muted-foreground">
-              What Discover recommends now in {data.top_gate.mode_label} mode{data.top_gate.state === "calibrated" ? "" : " (not yet calibrated: a taste ranking, without approval estimates)"}.
+              What Discover recommends now in {data.top_gate.mode_label} mode{hasEstimates(data.top_gate.state) ? "" : " (not yet calibrated: a taste ranking, without approval estimates)"}.
             </p>
           )}
           <div className="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-3">

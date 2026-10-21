@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from ..db import get_db
 from ..ingestion.parsing import parse_category, parse_colours, parse_materials
 from ..models import InspirationImage, Product, WardrobeItem
+from ..services import calibration
 from ..services import embeddings as emb
 from ..services.images import ImageError, phash_of, store_image_bytes
 from ..services.presenter import Context, product_card
@@ -97,6 +98,7 @@ async def add_wardrobe_item(
             item.embedding_backend = backend.name
     db.add(item)
     db.commit()
+    calibration.maybe_schedule(db)  # a rated piece you own is evidence for the taste model
     return _item_view(item)
 
 
@@ -110,6 +112,7 @@ def patch_wardrobe_item(item_id: int, body: dict, db: Session = Depends(get_db))
         if k in allowed:
             setattr(w, k, v)
     db.commit()
+    calibration.maybe_schedule(db)
     return _item_view(w)
 
 
@@ -119,6 +122,7 @@ def delete_wardrobe_item(item_id: int, db: Session = Depends(get_db)):
     if w:
         db.delete(w)
         db.commit()
+        calibration.maybe_schedule(db)
     return {"ok": True}
 
 
@@ -178,6 +182,7 @@ async def add_inspiration(
     )
     db.add(item)
     db.commit()
+    calibration.maybe_schedule(db)  # an inspiration photo is evidence for the taste model
     return {"id": item.id, "image": f"/api/files/{rel}"}
 
 
@@ -187,4 +192,5 @@ def delete_inspiration(item_id: int, db: Session = Depends(get_db)):
     if i:
         db.delete(i)
         db.commit()
+        calibration.maybe_schedule(db)
     return {"ok": True}

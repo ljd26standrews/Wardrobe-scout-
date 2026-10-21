@@ -1,7 +1,7 @@
 "use client";
 import { Check, Minus } from "lucide-react";
 import type { Confidence, Gate } from "@/lib/api";
-import { MODE_LABEL, MODES } from "@/lib/api";
+import { hasEstimates, MODE_LABEL, MODES } from "@/lib/api";
 import { Tip } from "@/components/ui/misc";
 import { cn } from "@/lib/utils";
 
@@ -48,6 +48,8 @@ export function ConfidencePanel({ c }: { c?: Confidence }) {
       <p className="text-sm leading-relaxed text-muted-foreground" data-testid="confidence-panel">
         {c.state === "pending"
           ? "Your decisions are being calibrated; approval estimates appear shortly."
+          : c.state === "failed"
+            ? "Calibrating your decisions failed and will be retried shortly; until then this piece is ranked by taste without a probability."
           : c.state === "unavailable"
             ? "Approval estimates are unavailable right now, so this piece is shown by taste ranking only."
             : "No approval estimate yet: there aren't enough of your rated pieces to calibrate one, so this piece is ranked by taste without a probability."}
@@ -92,7 +94,7 @@ export function ConfidencePanel({ c }: { c?: Confidence }) {
 export function GateStatus({ gate, total }: { gate: Gate; total: number }) {
   if (gate.state === "off") return null;
   const p = gate.progress;
-  if (gate.state === "calibrated") {
+  if (hasEstimates(gate.state)) {
     const cal = gate.calibration;
     const obs = gate.observed;
     const status = (
@@ -108,6 +110,7 @@ export function GateStatus({ gate, total }: { gate: Gate; total: number }) {
             </Tip>
           </>
         )}
+        {gate.state === "stale" && gate.message && <span className="block">{gate.message}</span>}
       </p>
     );
     if (!obs?.shortfall || !obs.interval) return status;
@@ -121,7 +124,9 @@ export function GateStatus({ gate, total }: { gate: Gate; total: number }) {
       </>
     );
   }
-  if (gate.state === "pending") return <p className="mt-2 text-sm text-muted-foreground" data-testid="gate-status">Calibrating approval estimates from your decisions…</p>;
+  const withdrawn = gate.withdrawn ? ` Earlier estimates were withdrawn: ${gate.withdrawn.label}.` : "";
+  if (gate.state === "pending") return <p className="mt-2 text-sm text-muted-foreground" data-testid="gate-status">Calibrating approval estimates from your decisions…{withdrawn}</p>;
+  if (gate.state === "failed") return <p className="mt-2 text-sm text-muted-foreground" data-testid="gate-status">Calibrating your decisions failed; it will be retried in a few minutes. Nothing is shown as high-confidence meanwhile.{withdrawn}</p>;
   if (gate.state === "unavailable") return <p className="mt-2 text-sm text-muted-foreground" data-testid="gate-status">Approval estimates are unavailable right now; nothing is shown as high-confidence.</p>;
   return (
     <p className="mt-2 text-sm text-muted-foreground" data-testid="gate-status">
@@ -133,6 +138,7 @@ export function GateStatus({ gate, total }: { gate: Gate; total: number }) {
           {p.approvals < p.needed_each || p.non_approvals < p.needed_each ? ` (including ${p.needed_each} approvals and ${p.needed_each} rejections)` : ""}
         </>
       )}
+      {withdrawn}
     </p>
   );
 }

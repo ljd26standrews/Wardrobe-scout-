@@ -6,7 +6,7 @@ import { motion } from "framer-motion";
 import { toast } from "sonner";
 import { Bookmark, Clock3, FlaskConical, GitCompareArrows, Heart, LayoutGrid, Rows3, ShieldCheck, ShoppingBag, SkipForward, Store, X } from "lucide-react";
 import type { FeedResponse, Gate, Product, SelectiveMode } from "@/lib/api";
-import { api, MODE_LABEL, MODES, qs } from "@/lib/api";
+import { api, hasEstimates, MODE_LABEL, MODES, qs } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { EmptyState, ErrorState, Skeleton, Tip } from "@/components/ui/misc";
 import { Input } from "@/components/ui/input";
@@ -391,7 +391,7 @@ function GateEmpty({ gate, learning, onMode, onLearning }: { gate: Gate; learnin
   const others = MODES.filter((m) => m !== gate.mode && (gate.qualified?.[m] ?? 0) > 0);
   const title = learning
     ? "No learning picks right now"
-    : gate.state === "calibrated"
+    : hasEstimates(gate.state)
       ? "No sufficiently strong matches right now"
       : gate.mode === "balanced"
         ? "Nothing to show yet"
@@ -414,7 +414,7 @@ function GateEmpty({ gate, learning, onMode, onLearning }: { gate: Gate; learnin
       }
     >
       <span data-testid="gate-message">{gate.message}</span>
-      {!learning && gate.state === "calibrated" && <span className="mt-2 block">The bar is never lowered to fill this feed; it fills as the model becomes surer of your taste.</span>}
+      {!learning && hasEstimates(gate.state) && <span className="mt-2 block">The bar is never lowered to fill this feed; it fills as the model becomes surer of your taste.</span>}
     </EmptyState>
   );
 }

@@ -154,9 +154,7 @@ def feed(
     rcfg = get_setting(db, "recommender")
     ctx = Context(db)
     ranked, offers, n_candidates, quality_lookup = ranked_candidates(db, prof, ctx, flt)
-    scfg = get_setting(db, "selective")
-    warmup = selective.resolve_mode(scfg, mode) == "balanced" and not calibration.active(db)
-    gate = selective.evaluate(db, ranked, prof, mode, quality_lookup=quality_lookup, learning=warmup)
+    gate = selective.evaluate(db, ranked, prof, mode, quality_lookup=quality_lookup, learning="warmup")
     arm = selective.trial_arm(gate.cfg, dt.date.today())
     base = {"total_candidates": n_candidates, "learning_strength": round(prof.strength, 3),
             "decisions": prof.n_informative}  # fmt: skip
@@ -452,6 +450,7 @@ def patch_product(product_id: int, body: ProductPatch, db: Session = Depends(get
 def delete_product(product_id: int, db: Session = Depends(get_db)):
     db.delete(_get(db, product_id))
     db.commit()
+    calibration.maybe_schedule(db)
     return {"ok": True}
 
 
@@ -465,6 +464,7 @@ def decide_match(product_id: int, body: MatchDecision, db: Session = Depends(get
     _get(db, product_id)
     _get(db, body.other_id)
     rel = dedup.set_user_decision(db, product_id, body.other_id, body.same)
+    calibration.maybe_schedule(db)  # matched listings are one garment: one decision, not two
     return {"relation": rel.relation, "user_confirmed": rel.user_confirmed}
 
 

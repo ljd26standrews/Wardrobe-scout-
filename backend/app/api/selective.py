@@ -6,7 +6,6 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from ..db import get_db
-from ..models import Calibration
 from ..services import calibration, jobs, selective
 
 router = APIRouter(prefix="/api/selective", tags=["selective"])
@@ -26,11 +25,12 @@ def recalibrate():
 
 @router.post("/calibrations/{calibration_id}/activate")
 def activate(calibration_id: int, db: Session = Depends(get_db)):
-    """Roll back (or forward) to a stored calibration fitted for the current taste model."""
-    cal = db.get(Calibration, calibration_id)
-    if cal is None:
-        raise HTTPException(404, "calibration not found")
-    if cal.method != calibration.METHOD or cal.engine_version != calibration.pm.ENGINE_VERSION:
-        raise HTTPException(409, "that calibration was fitted for an earlier taste model and cannot be used")
-    calibration.activate(db, calibration_id)
+    """Roll back (or forward) to a stored calibration, only if it could be used now: fitted under the current taste
+    model, photo representation, profile and reading of your decisions, on decisions that all still stand."""
+    try:
+        calibration.activate(db, calibration_id)
+    except LookupError as e:
+        raise HTTPException(404, "calibration not found") from e
+    except calibration.NotUsable as e:
+        raise HTTPException(409, f"That calibration cannot be used now: {e}.") from e
     return selective.status(db)

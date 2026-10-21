@@ -201,4 +201,5 @@ def delete_saved(product_id: int, db: Session = Depends(get_db)):
         db.add(Feedback(product_id=product_id, action="unsave", snapshot=snapshot(p) if p else {}))
         db.delete(s)
         db.commit()
+        calibration.maybe_schedule(db)  # an unsaved approval is no longer evidence
     return {"ok": True}

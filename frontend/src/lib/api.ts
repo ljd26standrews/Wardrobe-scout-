@@ -46,7 +46,16 @@ export type Recommendation = {
 };
 
 export type SelectiveMode = "balanced" | "high" | "extreme";
-export type GateState = "calibrated" | "uncalibrated" | "pending" | "unavailable" | "off";
+/** calibrated · stale (estimates in use; newer decisions not yet included) · uncalibrated (too few decisions) ·
+ *  pending (a fit is queued or running) · failed (the last fit failed; retried shortly) · unavailable · off */
+export type GateState = "calibrated" | "stale" | "uncalibrated" | "pending" | "failed" | "unavailable" | "off";
+export type CalibrationState = "calibrated" | "stale" | "uncalibrated" | "pending" | "failed";
+/** Approval estimates are in use (a stale calibration is still valid: nothing it rests on was withdrawn). */
+export const hasEstimates = (state: GateState | CalibrationState) => state === "calibrated" || state === "stale";
+/** New evidence since the calibration in use was fitted. */
+export type CalibrationDrift = { new_decisions: number; other_evidence: number; catalogue_changed: boolean; refit_due: boolean };
+/** Why the last calibration stopped being used. */
+export type CalibrationWithdrawal = { calibration_id: number; reason: string; label: string; at: string };
 export const MODES: SelectiveMode[] = ["balanced", "high", "extreme"];
 export const MODE_LABEL: Record<SelectiveMode, string> = { balanced: "Balanced", high: "High confidence", extreme: "Extremely selective" };
 
@@ -88,6 +97,8 @@ export type Gate = {
   trial?: "ranked" | "selective";
   /** Calibrated feeds: approval so far among rated pieces that passed this mode; shortfall = demonstrably below target. */
   observed?: ObservedRate & { shortfall: boolean };
+  since?: CalibrationDrift;
+  withdrawn?: CalibrationWithdrawal;
 };
 
 export type FeedResponse = { feed_id: string | null; items: Product[]; total_candidates: number; learning_strength: number; decisions: number; gate: Gate };
@@ -100,8 +111,14 @@ export type SelectiveStatus = {
   modes: { mode: SelectiveMode; label: string; target: number; confidence: number }[];
   targets_validated: boolean;
   calibration: LabelProgress & {
-    state: "calibrated" | "pending" | "insufficient";
-    calibration?: { id: number; created_at: string; n_labels: number; n_positive: number; auc_out_of_fold: number | null; map: string; brier: number; ece: number; base_rate: number };
+    state: CalibrationState;
+    calibration: { id: number; created_at: string; n_labels: number; n_positive: number; auc_out_of_fold: number | null; map: string; brier: number; ece: number; base_rate: number } | null;
+    since?: CalibrationDrift;
+    withdrawn?: CalibrationWithdrawal;
+    last_attempt?: { status: string; finished_at: string | null; error: string | null };
+    /** The photo analysis in use (lightweight features or CLIP) and how decisions are read as labels. */
+    representation: string;
+    label_version: string;
   };
   performance: {
     served_in_mode: Record<SelectiveMode, ObservedRate>;
@@ -113,7 +130,21 @@ export type SelectiveStatus = {
     note: string;
   };
   reliability?: ReliabilityBin[];
-  history: { id: number; created_at: string; labels: number; approvals: number; active: boolean; map: string; brier: number; ece: number; current_model: boolean }[];
+  history: {
+    id: number;
+    created_at: string;
+    labels: number;
+    approvals: number;
+    active: boolean;
+    map: string;
+    brier: number;
+    ece: number;
+    current_model: boolean;
+    /** Could be rolled back to now; if not, why. */
+    usable: boolean;
+    unusable_reason: string | null;
+    withdrawn: (CalibrationWithdrawal & { reason: string }) | null;
+  }[];
 };
 
 export type Evidence = {

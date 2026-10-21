@@ -30,6 +30,10 @@ BACKGROUND_KINDS = {
     "scan_seller", "scan_all", "check_watched", "recompute", "dedup", "fetch_images", "analyse_pending", "reanalyse",
 }  # fmt: skip
 SCAN_KINDS = {"scan_seller", "scan_all", "analyse_pending"}
+# Jobs after which the calibration is rechecked: the catalogue, its photo representation or its families changed.
+CATALOGUE_KINDS = SCAN_KINDS | {"recompute", "reanalyse", "dedup"}
+# A running job of these kinds may be working from evidence that has changed since: a new one may queue behind it.
+REQUEUE_WHILE_RUNNING = {"recalibrate"}
 _scheduler: BackgroundScheduler | None = None
 _lock = threading.Lock()
 
@@ -141,10 +145,10 @@ def _run(job_id: int) -> None:
             result = ai_visual_assess(db, params["product_id"])
         else:
             raise ValueError(f"unknown job kind {kind}")
-        if kind in SCAN_KINDS:
+        if kind in CATALOGUE_KINDS:
             from . import calibration
 
-            calibration.maybe_schedule(db)  # a much larger catalogue can shift what raw compatibility means
+            calibration.maybe_schedule(db)  # a changed catalogue or photo representation shifts raw compatibility
         status = outcome(status, result)
     except Exception as e:  # job failures are recorded, never crash the worker
         log.exception("job_failed", job_id=job_id, kind=kind)
@@ -265,7 +269,8 @@ def recompute_all(db, progress=None) -> dict:
 def enqueue(kind: str, params: dict | None = None) -> int:
     with session_scope() as db:
         # Avoid duplicate queued jobs of the same kind+params
-        existing = db.query(Job).filter(Job.kind == kind, Job.status.in_(["queued", "running"])).all()
+        pending = ["queued"] if kind in REQUEUE_WHILE_RUNNING else ["queued", "running"]
+        existing = db.query(Job).filter(Job.kind == kind, Job.status.in_(pending)).all()
         for j in existing:
             if (j.params or {}) == (params or {}):
                 return j.id

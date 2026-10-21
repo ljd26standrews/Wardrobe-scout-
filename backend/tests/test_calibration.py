@@ -52,7 +52,7 @@ def test_no_estimates_without_enough_decisions_of_both_kinds(env, db):
 
     world = _world(db, n=40, rated=20)
     assert calibration.recalibrate(db)["status"] == "insufficient"
-    assert calibration.active_map(db) is None and calibration.status(db)["state"] == "insufficient"
+    assert calibration.active_map(db) is None and calibration.status(db)["state"] == "uncalibrated"  # as the gate says
     db.query(Feedback).update({Feedback.action: "like"})  # 20 approvals, no rejection at all
     for p, _ in world[20:]:
         db.add(Feedback(product_id=p.id, action="love"))

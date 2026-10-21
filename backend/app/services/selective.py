@@ -110,16 +110,20 @@ class Candidate:
 @dataclass
 class Gate:
     mode: str
-    state: str  # calibrated | uncalibrated | pending | unavailable | off
+    # calibrated | stale (estimates in use; new evidence awaits a refit) | uncalibrated (too few decisions) |
+    # pending (a fit is queued or running) | failed (the last fit failed; retried later) | unavailable | off
+    state: str
     cfg: dict
     candidates: list[Candidate] = field(default_factory=list)
     calibration: calibration.ApprovalMap | None = None
     progress: dict | None = None  # labels so far and what is needed (without a calibration)
     reason: str | None = None  # why estimates are unavailable
+    lifecycle: dict = field(default_factory=dict)  # new evidence since the fit, or why the last one was withdrawn
 
     @property
     def calibrated(self) -> bool:
-        return self.state == "calibrated"
+        """Estimates are in use (a stale calibration is still valid: nothing it rests on was withdrawn)."""
+        return self.state in ("calibrated", "stale")
 
     def qualified(self) -> dict[str, int]:
         return {m: int(sum(bool(c.passes[m]) for c in self.candidates)) for m in MODES}
@@ -137,7 +141,7 @@ class Gate:
             "eligible": {m: sum(c.excluded.get(m) is None for c in self.candidates) for m in MODES},
             "qualified": self.qualified() if self.calibrated else None,
             "excluded": {k: {"count": n, "label": EXCLUSIONS[k]} for k, n in self.exclusions().items()},
-            "calibration": None, "progress": self.progress, "message": None,
+            "calibration": None, "progress": self.progress, "message": None, **self.lifecycle,
         }  # fmt: skip
         if self.calibration is not None:
             d = self.calibration.diagnostics or {}
@@ -191,12 +195,13 @@ def evaluate(
     mode: str | None = None,
     *,
     quality_lookup: dict[int, dict] | None = None,
-    learning: bool = False,
+    learning: bool | str = False,
 ) -> Gate:
     """Score every candidate under the active calibration and decide which pass each mode.
 
-    ``learning``: also compute the uncertainty of the Learning-picks pool. Never raises: a failing model or
-    calibration gives state "unavailable", which shows nothing as high-confidence."""
+    ``learning``: also compute the uncertainty of the Learning-picks pool (True), or only when Balanced has no
+    calibration in use ("warmup": its feed then carries a few). Never raises: a failing model or calibration gives
+    state "unavailable", which shows nothing as high-confidence."""
     cfg = get_setting(db, "selective")
     mode = resolve_mode(cfg, mode)
     if not cfg.get("enabled", True):
@@ -218,7 +223,8 @@ def evaluate(
             seller = sellers.get(r.product.seller_id) if r.product.seller_id else None
             strict = base or _strict_exclusion(r, cfg, prof, q, backend, seller)
             cands.append(Candidate(r, float(mi), excluded={"balanced": base, "high": strict, "extreme": strict}))
-        amap = calibration.active_map(db)
+        cal, state, ev, details = calibration.lifecycle(db)
+        amap = None if cal is None else calibration.to_map(cal)
     except Exception as e:  # noqa: BLE001 - the feed must stay usable when the model or calibration fails
         if not isinstance(e, _Unavailable):
             log.exception("selective_gate_unavailable")
@@ -227,20 +233,19 @@ def evaluate(
         return gate
 
     if amap is None:
-        suff = calibration.sufficiency(rated_outcomes(db), cfg)
-        if suff["sufficient"]:
-            calibration.maybe_schedule(db)  # e.g. the last attempt failed: try again (rate-limited, never raises)
-        gate = Gate(mode, "pending" if suff["sufficient"] else "uncalibrated", cfg, cands, progress=suff)
-        if learning:  # the pool is chosen on the raw model; its numbers are never shown as probabilities
+        gate = Gate(mode, state, cfg, cands, progress=ev.suff, lifecycle=details)
+        if learning is True or (learning == "warmup" and mode == "balanced"):
+            # the pool is chosen on the raw model; its numbers are never shown as probabilities
             _attach_sd(post, [c for c in cands if c.excluded["balanced"] is None])
         return gate
 
-    gate = Gate(mode, "calibrated", cfg, cands, calibration=amap)
+    gate = Gate(mode, state, cfg, cands, calibration=amap, lifecycle=details)
     m = np.array([c.logit for c in cands])
     est = _sigmoid(amap.a * m + amap.b)
     lowest = min(thresholds(cfg, md)[0] for md in MODES)
     # Uncertainty only where a bound could reach a target, or (Learning picks) for every eligible piece.
-    need = [c for c, e in zip(cands, est, strict=True) if e >= lowest or (learning and c.excluded["balanced"] is None)]
+    pool = learning is True
+    need = [c for c, e in zip(cands, est, strict=True) if e >= lowest or (pool and c.excluded["balanced"] is None)]
     _attach_sd(post, need)
     for c, e in zip(cands, est, strict=True):
         c.estimate = float(e)
@@ -309,7 +314,7 @@ def warmup_exploration(gate: Gate, limit: int, rate: float) -> int:
     """Learning picks in the main feed: only while Balanced has no calibration (the feed is labelled as a plain
     taste ranking then), so that a taste far from the written profile is still found. Never in a calibrated feed
     and never in the strict modes."""
-    if gate.mode != "balanced" or gate.state not in ("uncalibrated", "pending"):
+    if gate.mode != "balanced" or gate.state not in ("uncalibrated", "pending", "failed"):
         return 0
     eligible = sum(1 for c in gate.candidates if c.excluded["balanced"] is None)
     return round(limit * rate) if eligible > limit else 0
@@ -419,12 +424,16 @@ def message(gate: Gate, shown: int, policy: str = "selective") -> str | None:
             return (f"Approval estimates are unavailable right now ({gate.reason}), so nothing can be shown as "
                     f"{label.lower()}. Balanced mode shows your taste ranking meanwhile.")  # fmt: skip
         return f"Approval estimates are unavailable right now ({gate.reason}). This is your taste ranking."
-    if gate.state in ("uncalibrated", "pending"):
+    if gate.state in ("uncalibrated", "pending", "failed"):
         if policy == "learning":
             return None if shown else "No uncertain pieces to learn from right now."
         pr = gate.progress or {}
+        withdrawn = gate.lifecycle.get("withdrawn")
+        why = f"Earlier estimates were withdrawn: {withdrawn['label']}. " if withdrawn else ""
         if gate.state == "pending":
-            need = "Your decisions are being calibrated now; estimates appear when that finishes."
+            need = why + "Your decisions are being calibrated now; estimates appear when that finishes."
+        elif gate.state == "failed":
+            need = why + "Calibrating your decisions failed; it will be retried in a few minutes."
         else:
             more = max(0, pr.get("needed", 0) - pr.get("labels", 0))
             ya = max(0, pr.get("needed_each", 0) - pr.get("approvals", 0))
@@ -432,18 +441,31 @@ def message(gate: Gate, shown: int, policy: str = "selective") -> str | None:
             parts = [f"{more} more rated pieces"] if more else []
             parts += [f"{ya} more approvals"] if ya else []
             parts += [f"{na} more rejections"] if na else []
-            need = "Calibrated estimates need " + " and ".join(parts or ["a few more decisions"]) + "."
+            need = why + "Calibrated estimates need " + " and ".join(parts or ["a few more decisions"]) + "."
         if gate.mode == "balanced":
             return f"Not yet calibrated: this is your taste ranking, not a confidence-filtered feed. {need}"
         return f"{label} needs calibrated approval estimates, so nothing is shown as {label.lower()} yet. {need}"
     if policy == "learning":
         return None if shown else "No uncertain pieces to learn from right now."
+    stale = _stale_note(gate) if gate.state == "stale" else ""
     if shown:
-        return None
+        return stale or None
     q = gate.qualified()
     others = [f"{q[m]} under {MODE_LABEL[m]}" for m in MODES if m != gate.mode and q[m]]
     tail = (" " + "; ".join(others) + ".") if others else " Rating Learning picks helps the model become surer."
-    return f"No sufficiently strong matches are currently available in {label} mode.{tail}"
+    return f"No sufficiently strong matches are currently available in {label} mode.{tail}" + (
+        f" {stale}" if stale else ""
+    )
+
+
+def _stale_note(gate: Gate) -> str:
+    d = gate.lifecycle.get("since") or {}
+    n = int(d.get("new_decisions") or 0)
+    if n:
+        return f"These estimates do not yet include your {n} newest decisions; they are being updated."
+    if d.get("catalogue_changed"):
+        return "The catalogue has changed a lot since these estimates were made; they are being updated."
+    return "Your inspiration or wardrobe ratings changed since these estimates were made; they are being updated."
 
 
 def card_confidence(gate: Gate, c: Candidate) -> dict:
@@ -568,7 +590,7 @@ def status(db: Session) -> dict:
         "calibration": calibration.status(db),
         "performance": performance(db),
     }
-    cur = calibration.active(db)
+    cur, ev = calibration.serving(db)
     if cur is not None:
         d = cur.diagnostics or {}
         bins = d.get("reliability_chosen") or d.get("reliability") or []
@@ -577,13 +599,16 @@ def status(db: Session) -> dict:
             k, n = round(b["observed"] * b["n"]), int(b["n"])
             lo, hi = clopper_pearson(k, n) if n else (0.0, 1.0)
             out["reliability"].append({**b, "interval": [round(lo, 3), round(hi, 3)]})
-    out["history"] = [
-        {
+    out["history"] = []
+    for c in db.query(Calibration).order_by(Calibration.id.desc()).limit(10):
+        unusable = None if c.active else calibration.invalid_reason(db, c, ev)  # can it be rolled back to?
+        withdrawn = (c.params or {}).get("withdrawn")
+        out["history"].append({
             "id": c.id, "created_at": c.created_at.isoformat(), "labels": c.n_labels, "approvals": c.n_positive,
             "active": c.active, "map": (c.diagnostics or {}).get("map"),
             "brier": (c.diagnostics or {}).get("brier_chosen"), "ece": (c.diagnostics or {}).get("ece_chosen"),
-            "current_model": c.engine_version == pm.ENGINE_VERSION,
-        }
-        for c in db.query(Calibration).order_by(Calibration.id.desc()).limit(10)
-    ]  # fmt: skip
+            "current_model": c.engine_version == pm.ENGINE_VERSION, "usable": unusable is None,
+            "unusable_reason": calibration.WITHDRAWN[unusable] if unusable else None,
+            "withdrawn": {**withdrawn, "label": calibration.WITHDRAWN[withdrawn["reason"]]} if withdrawn else None,
+        })  # fmt: skip
     return out
