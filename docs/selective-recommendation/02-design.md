@@ -92,8 +92,10 @@ An item passes mode (t, γ) iff `p_low_i(γ) ≥ t`. Under the model, that means
 
 ### Learning picks (separate, optional, labelled)
 
-- **Pool:** eligible items that did not pass the current mode, with `p̂ ≥ 0.35`.
-- **Weights:** `w_i = p̂_i² · s_i`, boosted for categories with few labels.
+- **Optimistic plausibility:** `q_i = σ(â·(m_i + s_i) + b̂)`, the estimate one s.d. above the mean logit. A piece the model knows little about can be tried even when its plain estimate is low; a piece it is sure you would reject cannot. (A first version used `p̂ ≥ 0.35`. In the selective simulation, the persona whose taste is the opposite of the written profile then never got picks from the region it actually likes.)
+- **Pool:** eligible items that did not pass the current mode, with `q ≥ 0.35`. When fewer than three times the picks wanted qualify, the pool widens to the next most plausible pieces instead of stalling learning.
+- **Weights:** `w_i = q_i² · s_i`, boosted for categories with few labels.
+- **Before calibration, in Balanced only:** a few labelled Learning picks (the exploration rate, 18% by default) are interleaved into the feed, which is then labelled as a plain taste ranking. They never appear in a calibrated feed or in the strict modes.
 - **Sampling:** Poisson sampling with inclusion probability `π_i = min(1, K·w_i/Σw)`. The probability is logged, so impressions from this feed support inverse-propensity estimates.
 - **Main feed:** deterministic. The log records no propensity for it, so inverse-propensity estimates cannot be made for it, and none are claimed.
 - **Stable between decisions:** each piece's inclusion draw uses a random number fixed by a hash of (day, mode, number of decisions so far, piece). Refreshing does not reshuffle the picks; every decision brings fresh draws, and an Undo returns to the earlier ones. Each request's inclusion probability is exactly the logged π. (A first version fixed the draws for the whole day: once the day's picks were rated, almost no new ones appeared. The selective simulation caught it.)

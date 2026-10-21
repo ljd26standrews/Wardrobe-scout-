@@ -227,6 +227,28 @@ def test_learning_picks_are_separate_labelled_and_carry_their_inclusion_probabil
     assert not any(i["recommendation"]["explore"] for i in extreme)  # never forced on the strictest mode
 
 
+def test_learning_picks_try_what_the_model_knows_little_about_and_never_stall(env, db):
+    """Plausibility is judged optimistically (mean + 1 s.d.): a piece the model is unsure about can be tried even if
+    its plain estimate is low, while a piece it is sure you'd reject is not. Too few plausible pieces widen the
+    pool instead of stalling learning."""
+    from types import SimpleNamespace
+
+    from app.services.selective import LEARNING_POOL_MIN, Candidate, Gate, learning_feed
+    from app.services.settings_store import get_setting
+
+    def cand(i, m, s):
+        r = SimpleNamespace(product=SimpleNamespace(id=i, category="coat", seller_id=1), score=-i, suppressed=False)
+        return Candidate(r, m, sd=s, excluded=dict.fromkeys(("balanced", "high", "extreme")))
+
+    top = [cand(i, 3.0, 0.1) for i in range(24)]  # the ranking's top: the main feed, never a learning pick
+    sure_no = [cand(100 + i, -3.0, 0.1) for i in range(10)]
+    unsure = [cand(200 + i, -1.2, 1.5) for i in range(10)]  # σ(-1.2) = 0.23, but σ(-1.2 + 1.5) = 0.57
+    gate = Gate("balanced", "uncalibrated", get_setting(db, "selective"), top + sure_no + unsure)
+    picks, sampling = learning_feed(db, gate, 4, salt="t")
+    assert sampling["pool"] == LEARNING_POOL_MIN * 4  # 10 plausible, widened by the 2 next-best
+    assert picks and all(200 <= c.product.id < 210 for c in picks)
+
+
 def test_poisson_sampling_includes_each_piece_with_its_logged_probability():
     from app.services.selective import inclusion_probabilities, permanent_random_number
 

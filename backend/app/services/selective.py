@@ -50,6 +50,11 @@ ALREADY_OWN_REPEATS = 2  # "already own" this many times makes a category inelig
 MAX_RUN = 2  # diversity: at most this many consecutive pieces from one category, or one seller
 MAIN_LIMIT = 24  # the Discover page's main feed size; Learning picks never repeat its pieces
 MIN_PERFORMANCE_N = 10  # rated picks needed before an observed approval rate is reported
+# Learning picks judge plausibility optimistically, at the logit's mean plus this many s.d.: a piece the model knows
+# little about can still be tried, which is how a taste far from the written profile gets found (the selective
+# simulation's contrarian persona never did with the plain estimate).
+LEARNING_OPTIMISM = 1.0
+LEARNING_POOL_MIN = 3  # × the number of picks: the plausibility floor relaxes before learning would stall
 
 EXCLUSIONS = {
     "near_duplicate": "Near-identical to something you rejected",
@@ -227,15 +232,15 @@ def evaluate(
             calibration.maybe_schedule(db)  # e.g. the last attempt failed: try again (rate-limited, never raises)
         gate = Gate(mode, "pending" if suff["sufficient"] else "uncalibrated", cfg, cands, progress=suff)
         if learning:  # the pool is chosen on the raw model; its numbers are never shown as probabilities
-            _attach_sd(post, [c for c in cands if _sigmoid(c.logit) >= cfg["learning_min_estimate"]])
+            _attach_sd(post, [c for c in cands if c.excluded["balanced"] is None])
         return gate
 
     gate = Gate(mode, "calibrated", cfg, cands, calibration=amap)
     m = np.array([c.logit for c in cands])
     est = _sigmoid(amap.a * m + amap.b)
     lowest = min(thresholds(cfg, md)[0] for md in MODES)
-    floor = min(lowest, cfg["learning_min_estimate"]) if learning else lowest
-    need = [c for c, e in zip(cands, est, strict=True) if e >= floor]  # elsewhere no bound can reach a target
+    # Uncertainty only where a bound could reach a target, or (Learning picks) for every eligible piece.
+    need = [c for c, e in zip(cands, est, strict=True) if e >= lowest or (learning and c.excluded["balanced"] is None)]
     _attach_sd(post, need)
     for c, e in zip(cands, est, strict=True):
         c.estimate = float(e)
@@ -322,7 +327,8 @@ def main_feed(gate: Gate, limit: int) -> list[Candidate]:
         return diversify(chosen)
     if gate.mode != "balanced":
         return []  # nothing may be presented as high-confidence without a calibration
-    # Balanced without a calibration: the taste ranking itself, labelled as such (no exploration mixed in).
+    # Balanced without a calibration: the taste ranking itself, labelled as such. The feed endpoint adds a few
+    # labelled Learning picks to it (warmup_exploration); a calibrated feed is never mixed.
     return diversify([c for c in gate.candidates if c.excluded["balanced"] is None][:limit])
 
 
@@ -356,28 +362,31 @@ def permanent_random_number(salt: str, product_id: int) -> float:
 
 def learning_feed(db: Session, gate: Gate, limit: int, *, salt: str) -> tuple[list[Candidate], dict]:
     """Plausible but uncertain pieces that did not pass the current mode, sampled with probability proportional
-    to p̂²·s (more for categories you have rated little). Each pick carries its inclusion probability.
+    to q²·s, where q is the optimistic plausibility (the estimate at the logit's mean + LEARNING_OPTIMISM s.d.) and
+    s the logit's uncertainty, more for categories you have rated little. Each pick carries its inclusion
+    probability. The pool is the pieces with q at least ``learning_min_estimate``, widened to LEARNING_POOL_MIN
+    times the picks wanted when fewer qualify. Learning picks are never presented as recommendations.
 
-    Returns (picks, sampling details for the log). Without a calibration the pool is chosen on the raw model's
-    σ(m), which is used only to pick and is never shown as a probability."""
+    Returns (picks, sampling details for the log). Without a calibration the pool is chosen on the raw model,
+    whose numbers are used only to pick and are never shown as probabilities."""
     sampling = {"method": "poisson-prn", "salt": salt, "pool": 0, "expected": 0.0}
     if gate.state in ("off", "unavailable"):
         return [], sampling
     main = {c.product.id for c in main_feed(gate, MAIN_LIMIT)}
     floor = float(gate.cfg["learning_min_estimate"])
+    amap = gate.calibration
 
-    def plausibility(c: Candidate) -> float:
-        return c.estimate if c.estimate is not None else float(_sigmoid(c.logit))
+    def plausibility(c: Candidate) -> float:  # optimistic: could you approve, given what the model doesn't know?
+        z = c.logit + LEARNING_OPTIMISM * c.sd
+        return float(_sigmoid(amap.a * z + amap.b if amap is not None else z))
 
-    pool = [
-        c
-        for c in gate.candidates
-        if c.excluded["balanced"] is None
-        and not c.passes[gate.mode]
-        and c.product.id not in main
-        and c.sd is not None
-        and plausibility(c) >= floor
-    ]
+    eligible = sorted(
+        (c for c in gate.candidates if c.excluded["balanced"] is None and not c.passes[gate.mode]
+         and c.product.id not in main and c.sd is not None),
+        key=lambda c: -plausibility(c),
+    )  # fmt: skip
+    pool = [c for c in eligible if plausibility(c) >= floor]
+    pool += eligible[len(pool) : LEARNING_POOL_MIN * limit]  # too few plausible pieces: widen rather than stall
     if not pool:
         return [], sampling
     rated = Counter((o.snapshot or {}).get("category") or "other" for o in rated_outcomes(db))
