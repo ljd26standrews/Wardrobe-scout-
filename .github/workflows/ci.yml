@@ -35,7 +35,12 @@ jobs:
       - name: Tests
         env:
           WS_EMBEDDING_BACKEND: lite
-        run: python -m pytest -q
+        run: |
+          set -o pipefail
+          python -m pytest -q -rfE --tb=short 2>&1 | tee "$RUNNER_TEMP/pytest.log"
+      - name: Show failing tests as annotations
+        if: failure()
+        run: grep -E "^(FAILED|ERROR) " "$RUNNER_TEMP/pytest.log" | head -40 | sed 's/^/::error title=pytest::/' || true
       - name: Migrations upgrade, downgrade and upgrade again on an empty database
         env:
           WS_DATA_DIR: ${{ runner.temp }}/ws-migrations

@@ -287,7 +287,13 @@ function Focus({ product: p, onAct, onOpen, onUndo }: { product: Product; onAct:
   const reasons = p.recommendation?.reasons.slice(0, 3) ?? [];
   return (
     <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_380px] lg:gap-10" data-testid="discover-card" data-product-id={p.id}>
-      <Gallery product={p} className="mx-auto w-full max-w-[640px] lg:max-w-none" />
+      {/* The whole garment in view: square on a phone (above the decision bar), and on a computer no taller than
+          the window allows. */}
+      <Gallery
+        product={p}
+        wellClassName="aspect-square sm:aspect-[4/5]"
+        className="mx-auto w-full max-w-[640px] lg:w-[min(100%,calc((100dvh_-_19rem)*0.8))] lg:max-w-none"
+      />
       <div className="min-w-0 pb-28 lg:pb-0">
         <p className="meta">{[p.seller?.name ?? "Unknown seller", p.category && titleCase(p.category)].filter(Boolean).join(" · ")}</p>
         <h2 className="mt-1 text-xl font-semibold leading-7 tracking-tight" data-testid="product-title">
@@ -389,9 +395,23 @@ function FeedStatus({ data, learning, filtered }: { data: FeedResponse; learning
     const more = p ? Math.max(0, p.needed - p.labels) : 0;
     text = `Your taste ranking.${more ? ` After ${more} more likes or dislikes, Discover can show how likely each piece is to suit you.` : ""}`;
   }
+  const pct = (x: number) => `${Math.round(x * 100)}%`;
+  const obs = g.observed;
   return (
     <span data-testid="gate-status">
+      {obs?.shortfall && obs.interval && (
+        <span className="mb-1.5 block rounded-md bg-caution/10 px-3 py-2 text-caution" data-testid="gate-shortfall">
+          So far you liked {obs.approved} of the {obs.rated} pieces that passed {g.mode_label} ({pct(obs.rate ?? 0)}; 95% interval {pct(obs.interval[0])}–
+          {pct(obs.interval[1])}), below its {pct(g.target ?? 0)} aim. Its estimates look optimistic for you; a stricter mode or more decisions should help.
+        </span>
+      )}
       {text}
+      {hasEstimates(g.state) && g.calibration && !learning && (
+        <span className="mt-0.5 block">
+          Estimates rest on {g.calibration.labels} of your decisions{g.targets_validated ? "." : "; the 80, 90 and 95% aims are not yet confirmed by your own results (see Insights)."}
+        </span>
+      )}
+      {g.withdrawn && !hasEstimates(g.state) && <span className="mt-0.5 block">Earlier estimates were withdrawn: {g.withdrawn.label}.</span>}
       {data.hidden && (
         <span className="mt-0.5 block" data-testid="hidden-categories-note">
           Hidden by you: {data.hidden.categories.map(titleCase).join(", ")} ({data.hidden.pieces} pieces) ·{" "}

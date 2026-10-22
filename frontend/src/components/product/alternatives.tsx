@@ -23,7 +23,7 @@ export function AlternativesPreview({ productId }: { productId: number }) {
     <div className="space-y-2">
       {alts.slice(0, 3).map((a) => (
         <Link key={a.product.id} href={`/product/${a.product.id}`} className="flex items-center gap-3 rounded-md border p-2 hover:bg-secondary">
-          <Photo src={a.product.images[0]?.src} alt="" className="size-14 shrink-0 rounded-sm" />
+          <Photo src={a.product.images[0]?.src} unavailable={a.product.images.length > 0} alt="" className="size-14 shrink-0 rounded-sm" />
           <div className="min-w-0 flex-1">
             <p className="truncate text-sm">{a.product.title}</p>
             <p className="text-xs text-muted-foreground">

@@ -205,12 +205,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 /** One header pattern for every page: title, an optional line of context, actions on the right. */
 export function PageHeader({ title, description, actions, className }: { title: string; description?: React.ReactNode; actions?: React.ReactNode; className?: string }) {
   return (
-    <header className={cn("mb-6 flex flex-wrap items-end justify-between gap-x-6 gap-y-3", className)}>
-      <div className="min-w-0">
-        <h1 className="page-title">{title}</h1>
-        {description && <div className="mt-1.5 max-w-2xl text-sm text-muted-foreground">{description}</div>}
+    <header className={cn("mb-6", className)}>
+      <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-3">
+        <h1 className="page-title min-w-0">{title}</h1>
+        {actions && <div className="flex flex-wrap items-center gap-2">{actions}</div>}
       </div>
-      {actions && <div className="flex flex-wrap items-center gap-2">{actions}</div>}
+      {description && <div className="mt-1.5 max-w-2xl text-sm text-muted-foreground">{description}</div>}
     </header>
   );
 }

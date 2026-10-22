@@ -86,7 +86,7 @@ function Head({ p, children }: { p: Product; children?: React.ReactNode }) {
   return (
     <th scope="col" className="w-[220px] min-w-[180px] max-w-[260px] px-3 pb-4 text-left align-top font-normal">
       <Link href={`/product/${p.id}`} className="block rounded-md">
-        <Photo src={p.images[0]?.src} alt="" className="aspect-[4/5]" />
+        <Photo src={p.images[0]?.src} unavailable={p.images.length > 0} alt="" className="aspect-[4/5]" />
         <span className="mt-2 line-clamp-2 text-sm font-medium hover:underline">{p.title}</span>
       </Link>
       <span className="meta mt-0.5 block truncate">{p.seller?.name ?? "Unknown seller"}</span>

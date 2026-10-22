@@ -8,7 +8,7 @@ import { Photo } from "./photo";
 
 /** The product's garment photos: one large view (whole garment, never cropped), thumbnails to switch views, arrow
  *  keys, and click to zoom. Size charts are not here: they belong to Sizing. */
-export function Gallery({ product, className }: { product: Product; className?: string }) {
+export function Gallery({ product, className, wellClassName = "aspect-[4/5]" }: { product: Product; className?: string; wellClassName?: string }) {
   const images = product.images.filter((i) => i.src);
   const [index, setIndex] = useState(0);
   const [zoom, setZoom] = useState(false);
@@ -17,7 +17,7 @@ export function Gallery({ product, className }: { product: Product; className?: 
 
   if (!images.length) {
     return (
-      <div className={cn("image-well flex aspect-[4/5] flex-col items-center justify-center gap-3 p-6 text-center text-muted-foreground", className)}>
+      <div className={cn("image-well flex flex-col items-center justify-center gap-3 p-6 text-center text-muted-foreground", wellClassName, className)}>
         <ImageOff className="size-6" strokeWidth={1.5} aria-hidden />
         <p className="max-w-[18rem] text-[13px] leading-relaxed">
           {product.data_origin === "seed"
@@ -47,7 +47,7 @@ export function Gallery({ product, className }: { product: Product; className?: 
         }}
       >
         <button type="button" className="block w-full cursor-zoom-in" onClick={() => setZoom(true)} aria-label="Zoom photo" tabIndex={-1}>
-          <Photo src={current.src} alt={`${product.title}, photo ${index + 1}`} className="aspect-[4/5]" eager />
+          <Photo src={current.src} alt={`${product.title}, photo ${index + 1}`} className={wellClassName} eager />
         </button>
         <span className="pointer-events-none absolute right-2 top-2 inline-flex items-center gap-1 rounded-md bg-background/90 px-2 py-1 text-xs text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100">
           <ZoomIn className="size-3.5" aria-hidden /> Zoom

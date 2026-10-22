@@ -48,7 +48,7 @@ export function ProductTile({
         className="block rounded-md"
         aria-label={`${product.title}, ${product.seller?.name ?? "unknown seller"}`}
       >
-        <Photo src={product.images[0]?.src} alt="" className="aspect-[4/5]" />
+        <Photo src={product.images[0]?.src} unavailable={product.images.length > 0} alt="" className="aspect-[4/5]" />
         <div className="mt-2 space-y-0.5">
           <h3 className="line-clamp-2 text-sm font-medium leading-5 text-foreground" data-testid="product-title">
             {product.title}

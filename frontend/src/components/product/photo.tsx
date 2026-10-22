@@ -4,8 +4,23 @@ import { ImageOff } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 /** A product photo: the whole garment (object-contain) on the neutral image well, never cropped. A photo that
- *  fails to load shows a plain "unavailable" well, never a stand-in image. */
-export function Photo({ src, alt, className, eager, children }: { src?: string | null; alt: string; className?: string; eager?: boolean; children?: React.ReactNode }) {
+ *  fails to load, or that the scan could not download (``unavailable``), shows a plain well saying so, never a
+ *  stand-in image. */
+export function Photo({
+  src,
+  alt,
+  className,
+  eager,
+  unavailable,
+  children,
+}: {
+  src?: string | null;
+  alt: string;
+  className?: string;
+  eager?: boolean;
+  unavailable?: boolean;
+  children?: React.ReactNode;
+}) {
   const [failed, setFailed] = useState(false);
   return (
     <div className={cn("image-well", className)}>
@@ -15,7 +30,7 @@ export function Photo({ src, alt, className, eager, children }: { src?: string |
       ) : (
         <div className="flex h-full w-full flex-col items-center justify-center gap-2 p-4 text-center text-xs text-muted-foreground">
           <ImageOff className="size-5" strokeWidth={1.5} aria-hidden />
-          {src ? "Photo unavailable" : "No photo"}
+          {src || unavailable ? "Photo unavailable" : "No photo"}
         </div>
       )}
       {children}

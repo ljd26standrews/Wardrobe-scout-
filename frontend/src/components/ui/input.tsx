@@ -52,8 +52,7 @@ export const Select = React.forwardRef<HTMLSelectElement, React.SelectHTMLAttrib
     <select
       ref={ref}
       className={cn(
-        "flex h-10 w-full appearance-none rounded-md border border-input bg-card bg-[length:12px] bg-[right_0.75rem_center] bg-no-repeat px-3 pr-8 text-[15px] md:text-sm [@media(pointer:coarse)]:h-11",
-        "bg-[url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2 4l4 4 4-4' fill='none' stroke='%23888' stroke-width='1.5'/%3E%3C/svg%3E\")]",
+        "select-chevron flex h-10 w-full appearance-none rounded-md border border-input bg-card px-3 pr-8 text-[15px] md:text-sm [@media(pointer:coarse)]:h-11",
         className,
       )}
       {...names}

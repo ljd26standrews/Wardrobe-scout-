@@ -7,7 +7,7 @@ export default defineConfig({
   timeout: 45_000,
   fullyParallel: false,
   workers: 1,
-  reporter: [["list"]],
+  reporter: process.env.GITHUB_ACTIONS ? [["list"], ["github"]] : [["list"]], // failures as annotations in CI
   use: {
     baseURL: process.env.E2E_BASE_URL ?? "http://localhost:3000",
     screenshot: "only-on-failure",
