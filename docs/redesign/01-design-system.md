@@ -101,7 +101,9 @@ it was decorative.
   `0 12px 32px -12px rgb(0 0 0 / .25)`, plus a border.
 - **Images:**
   - tiles: aspect ratio 4:5;
-  - detail view: 4:5 up to 3:4;
+  - detail view: 4:5;
+  - Discover's focused view: no taller than the window on a computer, and square on a phone so the whole
+    garment shows above the decision bar;
   - always `contain` in `--image-well`;
   - a photo that fails to load shows a plain "Photo unavailable" well, never a stand-in image.
 - **Icons:** Lucide, stroke 1.75: 16 px inline, 20 px in navigation and actions.
@@ -122,18 +124,19 @@ it was decorative.
 - **AppShell.**
   - Desktop (≥ 1024 px): a sidebar of 232 px on `--surface`. It holds the wordmark (text only); primary
     navigation (Discover, Browse, Saved, Compare); a "Your data" group (Wardrobe, Sellers, Insights, Evaluate);
-    and, at the foot, Settings, the theme switch and the scan status.
-  - Below 1024 px: a compact top bar with the page title, and a bottom tab bar (Discover, Browse, Saved,
+    and, at the foot, Settings, the theme switch and a running-jobs indicator.
+  - Below 1024 px: a compact top bar (wordmark and theme switch), and a bottom tab bar (Discover, Browse, Saved,
     Wardrobe, More). More opens a sheet with the remaining routes.
   - Every existing route keeps its URL.
-- **PageHeader.** Title, an optional one-line description, and actions on the right (wrapping on phones).
+- **PageHeader.** The title with its actions on the same row (wrapping on phones), then an optional line of
+  description.
 - **ProductTile.**
   - An image well (4:5, contain), then the title (two lines at most), then seller · price (with ≈ £ when
     converted).
   - At most one quiet status line: "Learning pick", "Saved to Later" or "Matches your taste ≈80%". The last
     appears only with a calibrated estimate, never next to quality.
-  - Hover or focus shows quick actions (Like, Not now, Dislike, Open). On touch they sit in the tile's
-    footer row.
+  - Hover or focus shows quick actions (Like, Not now, Dislike); the tile itself opens the piece. On touch the
+    actions sit in the tile's footer row.
 - **ActionBar** (focused rating view): Dislike · Skip · Not now · Like · Love, plus Open and Undo.
   - Keyboard: D / → / W / S / L / Enter / Z.
   - It is fixed at the bottom on phones, beside the details on desktop.
@@ -177,7 +180,9 @@ it was decorative.
 ## 6. Checks
 
 - Contrast: `node frontend/scripts/contrast.mjs` (token pairs, light and dark).
-- Layout and behaviour: Playwright at 390, 768 and 1440 px, in light and dark, with reduced motion; keyboard
-  paths; focus visibility; touch-target sizes; the edge-case catalogue (long titles, missing prices, unknown
-  currency, broken photos, landscape photos, many offers, nothing to recommend).
+- Layout and behaviour (`frontend/e2e/layout.spec.ts`, `mobile.spec.ts`, `timing.spec.ts`): Playwright at 320
+  (reflow), 390, 768 and 1440 px and at 200% zoom, in light and dark, with reduced motion; keyboard paths; focus
+  visibility; accessible names; touch-target sizes on a phone; the edge-case catalogue (long titles, missing
+  prices, currencies without a rate, broken photos, landscape photos, many offers, a strict mode with nothing
+  to recommend).
 - Before and after screenshots: `docs/redesign/screens/{before,after}`.

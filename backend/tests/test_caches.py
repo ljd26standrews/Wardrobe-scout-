@@ -218,3 +218,25 @@ def test_status_says_which_photo_backend_is_in_use_and_what_needs_reanalysis(cli
     emb.reset_backend()
     e = client.get("/api/status").json()["embedding"]
     assert e["image_backend"] == "lite-test-v2" and e["analysed_other"] == 2 and e["recompute_needed"] is True
+
+
+def test_a_restored_snapshot_is_a_new_instance(env, db, tmp_path):
+    """A restored copy keeps its data's revisions but gets its own instance number, so nothing cached for the
+    original database is ever served for the copy."""
+    import sqlite3
+    from pathlib import Path
+
+    from app.config import get_settings
+    from app.services import revisions
+    from app.services.backup import restore_full_snapshot, write_full_snapshot
+
+    _listings(db, 2)
+    instance, products = revisions.current(db, "products")
+    s = get_settings()
+    snap = tmp_path / "snap.zip"
+    write_full_snapshot(Path(s.database_url.removeprefix("sqlite:///")), s.data_dir, snap)
+    out = restore_full_snapshot(snap, tmp_path / "restored")
+    with sqlite3.connect(out["database"]) as c:
+        rows = dict(c.execute("SELECT name, n FROM data_revisions").fetchall())
+    assert rows["products"] == products
+    assert rows["instance"] != instance

@@ -134,7 +134,7 @@ export default function SettingsPage() {
     <div>
       <PageHeader title="Settings" description="Your starting preferences, Discover options, exchange rates, photo analysis, schedules and backups." />
       <div className="grid gap-6">
-        <Section title="Taste profile" description="Your starting preferences. As you make decisions, your decisions count for more than these." onSave={taste.save} onReset={taste.reset} dirty={taste.dirty}>
+        <Section title="Taste profile" description="Your starting preferences. As you decide on pieces, what you decide counts for more than these." onSave={taste.save} onReset={taste.reset} dirty={taste.dirty}>
           <div className="grid gap-4 md:grid-cols-2">
             <Field label="Preferred colours">
               <ListInput value={taste.value.preferred_colours} onChange={(v) => taste.update({ preferred_colours: v })} />
