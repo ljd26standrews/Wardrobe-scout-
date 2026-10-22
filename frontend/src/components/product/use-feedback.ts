@@ -3,11 +3,13 @@ import { useCallback } from "react";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
 
-export type ActionName = "love" | "like" | "maybe" | "dislike" | "skip" | "purchased";
+/** "like_later" is Like with "not now": you like the look but won't buy it now (saved to Later). */
+export type ActionName = "love" | "like" | "like_later" | "maybe" | "dislike" | "skip" | "purchased";
 
 const MESSAGES: Record<ActionName, string> = {
   love: "Loved — strong signal recorded",
   like: "Saved to your shortlist",
+  like_later: "Saved to Later — you like the look, not buying now",
   maybe: "Saved to Maybe",
   dislike: "Noted — similar items will be deprioritised",
   skip: "Skipped (nothing learned)",
@@ -19,11 +21,14 @@ export function useFeedback(onDone?: () => void, onUndo?: (productId: number) =>
   return useCallback(
     async (productId: number, action: ActionName, reasons: string[] = [], note?: string, context: Record<string, unknown> = {}) => {
       try {
-        const res = await api.post<{ feedback_id: number }>("/api/feedback", { product_id: productId, action, reasons, note, context });
+        const [sent, sentReasons] = action === "like_later" ? (["like", [...reasons, "not_now"]] as const) : ([action, reasons] as const);
+        const res = await api.post<{ feedback_id: number }>("/api/feedback", { product_id: productId, action: sent, reasons: sentReasons, note, context });
         onDone?.();
         if (action !== "skip") {
           toast(MESSAGES[action], {
-            description: reasons.includes("too_expensive") ? "Recorded as a value ceiling, not a style dislike." : undefined,
+            description: reasons.some((r) => ["too_expensive", "already_own", "wrong_size", "construction", "quality_unclear"].includes(r))
+              ? "Recorded about buying or quality, not as a dislike of the look."
+              : undefined,
             action: {
               label: "Undo",
               onClick: async () => {

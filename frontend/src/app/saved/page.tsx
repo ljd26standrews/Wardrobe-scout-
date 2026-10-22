@@ -16,6 +16,7 @@ type SavedResponse = { items: Product[]; totals: Record<string, { count: number;
 const LISTS = [
   { key: "loved", label: "Loved" },
   { key: "liked", label: "Shortlist" },
+  { key: "later", label: "Later" },
   { key: "maybe", label: "Maybe" },
   { key: "wishlist", label: "Wishlist" },
 ];

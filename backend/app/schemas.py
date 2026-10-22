@@ -64,7 +64,7 @@ class FeedbackIn(BaseModel):
 
 
 class SavedPatch(BaseModel):
-    list_name: Literal["loved", "liked", "maybe", "wishlist"] | None = None
+    list_name: Literal["loved", "liked", "later", "maybe", "wishlist"] | None = None
     priority: int | None = Field(default=None, ge=1, le=3)
     note: str | None = Field(default=None, max_length=2000)
     target_size: str | None = Field(default=None, max_length=20)

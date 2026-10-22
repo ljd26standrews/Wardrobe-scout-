@@ -10,8 +10,9 @@ See docs/selective-recommendation/02-design.md. In short:
   (``performance``); nothing here claims they are met.
 * Eligibility runs first and every exclusion keeps its reason: near-duplicates of pieces you rejected and pieces
   with independent evidence of poor quality never qualify; the strict modes also require an analysed photo and
-  leave out sellers with recorded concerns, prices above a ceiling you set for an unproven piece, and categories
-  you have said you already own. Unknown quality is not poor quality.
+  leave out sellers with recorded concerns, unproven pieces above the highest price you judged too much for one of
+  their kind, and pieces like one you said you already own (never a whole category: hiding a category is an
+  explicit setting). Unknown quality is not poor quality.
 * The gate is never relaxed to fill the feed. Without a calibration, Balanced shows the taste ranking labelled
   as not yet calibrated, and the strict modes show nothing and say what is needed. If the model or calibration
   fails, the same degraded behaviour applies: nothing is ever presented as high-confidence without a calibration.
@@ -36,7 +37,7 @@ from . import calibration
 from . import embeddings as emb
 from . import preference_model as pm
 from .approval_data import rated_outcomes
-from .recommender import Profile, Ranked, above_judged_price
+from .recommender import Profile, Ranked, above_judged_price, owned_like
 from .settings_store import get_setting
 
 log = get_logger(__name__)
@@ -46,7 +47,6 @@ MODE_LABEL = {"balanced": "Balanced", "high": "High confidence", "extreme": "Ext
 STRICT = frozenset({"high", "extreme"})
 POOR_QUALITY_BELOW = 40  # independent quality evidence scoring below this is known poor quality
 QUALITY_SUPPORTS_PRICE = 60  # quality evidence at or above this justifies a price above your ceiling
-ALREADY_OWN_REPEATS = 2  # "already own" this many times makes a category ineligible in the strict modes
 MAX_RUN = 2  # diversity: at most this many consecutive pieces from one category, or one seller
 MAIN_LIMIT = 24  # the Discover page's main feed size; Learning picks never repeat its pieces
 MIN_PERFORMANCE_N = 10  # rated picks needed before an observed approval rate is reported
@@ -63,7 +63,7 @@ EXCLUSIONS = {
     "no_photo_analysis": "No analysed garment photo yet",
     "seller_concerns": "The seller has recorded concerns",
     "price_ceiling": "Above the price you judged too much for an unproven piece of this kind",
-    "already_own": "A category you have said you already own",
+    "already_own": "Like a piece you said you already own",
 }
 
 
@@ -181,7 +181,7 @@ def _strict_exclusion(
     qs = (quality or {}).get("quality_score")
     if above_judged_price(prof, cat, prof.fx.gbp(p.price, p.currency)) and (qs is None or qs < QUALITY_SUPPORTS_PRICE):
         return "price_ceiling"
-    if prof.redundant.get(cat, 0) >= ALREADY_OWN_REPEATS:
+    if owned_like(prof, p, backend) is not None:
         return "already_own"
     return None
 
@@ -568,7 +568,9 @@ def performance(db: Session) -> dict:
         "uncalibrated_ranking": _rate(*uncalibrated),
         "trial": {arm: _rate(*v) for arm, v in trial.items()},
         "min_rated": MIN_PERFORMANCE_N,
-        "note": "Approved = love, save or purchased; a maybe or a dislike is not. Pieces shown but not rated are "
+        "note": 'Approved = you liked the look (love or like, including "not now"); a dislike about the look is not. '
+        "Purchases, maybes and rejections only for price, size, owning something like it or quality are left out "
+        "(they are not about the look). Pieces shown but not rated are "
         "left out, so these rates describe the pieces you chose to rate.",
     }
 

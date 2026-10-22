@@ -31,7 +31,7 @@ test("discover: reason-aware dislike sets a value ceiling, not a taste dislike",
   await page.getByTestId("reason-too_expensive").click();
   await shot(page, "reject-dialog");
   await page.getByTestId("reject-submit").click();
-  await expect(page.getByText("Recorded as a value ceiling, not a style dislike.")).toBeVisible();
+  await expect(page.getByText("Recorded about buying or quality, not as a dislike of the look.")).toBeVisible();
   await page.goto("/insights");
   await expect(page.getByText("Value ceilings")).toBeVisible();
   await expect(page.getByText(/unproven quality above/).first()).toBeVisible();

@@ -101,7 +101,19 @@ export type Gate = {
   withdrawn?: CalibrationWithdrawal;
 };
 
-export type FeedResponse = { feed_id: string | null; items: Product[]; total_candidates: number; learning_strength: number; decisions: number; gate: Gate };
+export type PriceFilter = { currency: string; min: number | null; max: number | null; unknown_currency_left_out: number };
+/** Categories you hid from Discover (Settings → Discover), and how many listings that left out. */
+export type HiddenCategories = { categories: string[]; pieces: number };
+export type FeedResponse = {
+  feed_id: string | null;
+  items: Product[];
+  total_candidates: number;
+  learning_strength: number;
+  decisions: number;
+  gate: Gate;
+  price_filter?: PriceFilter | null;
+  hidden?: HiddenCategories | null;
+};
 
 export type ObservedRate = { rated: number; approved: number; rate: number | null; interval: [number, number] | null };
 export type ReliabilityBin = { lo: number; hi: number; n: number; mean_estimate: number; observed: number; interval: [number, number] };
@@ -428,16 +440,26 @@ export function qs(params: Record<string, string | number | boolean | string[] |
   return s ? `?${s}` : "";
 }
 
-export const REASONS: { value: string; label: string; hint: string }[] = [
-  { value: "silhouette", label: "Dislike the silhouette", hint: "Learns about cut/fit" },
-  { value: "colour", label: "Dislike the colour", hint: "Only this colour is down-weighted" },
-  { value: "logo", label: "Dislike the logo", hint: "Learns about branding visibility" },
-  { value: "fabric", label: "Fabric doesn't appeal", hint: "Learns about materials" },
-  { value: "not_my_style", label: "Not my style", hint: "A general taste rejection" },
-  { value: "construction", label: "Poor apparent quality", hint: "Raises quality strictness — not a taste dislike" },
-  { value: "too_expensive", label: "Too expensive for the quality", hint: "Sets a value ceiling — not a taste dislike" },
-  { value: "already_own", label: "Already own something similar", hint: "Avoids redundancy — not a taste dislike" },
-  { value: "too_repetitive", label: "Too repetitive", hint: "Varies the feed — not a taste dislike" },
-  { value: "wrong_category", label: "Wrong category (listing error)", hint: "A data error — nothing is learned" },
-  { value: "specific_item", label: "Don't like this specific item", hint: "Hides near-identical listings only" },
+/** What a rejection reason is about: only "look" reasons say you dislike how it looks (backend approval_data.py). */
+export type ReasonGroup = "look" | "buying" | "quality" | "listing";
+export const REASON_GROUP_LABEL: Record<ReasonGroup, string> = {
+  look: "About the look",
+  buying: "About buying it",
+  quality: "About quality",
+  listing: "About the listing",
+};
+export const REASONS: { value: string; label: string; hint: string; group: ReasonGroup }[] = [
+  { value: "silhouette", label: "Dislike the silhouette", hint: "Learns about cut and fit", group: "look" },
+  { value: "colour", label: "Dislike the colour", hint: "Only this colour is down-weighted", group: "look" },
+  { value: "logo", label: "Dislike the logo", hint: "Learns about visible branding", group: "look" },
+  { value: "fabric", label: "Fabric doesn't appeal", hint: "Learns about materials", group: "look" },
+  { value: "specific_item", label: "Don't like this piece", hint: "Hides near-identical listings only", group: "look" },
+  { value: "not_my_style", label: "Not my style", hint: "A general dislike of the look", group: "look" },
+  { value: "too_expensive", label: "Too expensive for the quality", hint: "A value judgement, not a dislike of the look", group: "buying" },
+  { value: "already_own", label: "Already own something similar", hint: "Pieces like it become less useful; not a dislike of the look", group: "buying" },
+  { value: "wrong_size", label: "Not in my size", hint: "This listing only; not a dislike of the look", group: "buying" },
+  { value: "construction", label: "Poor apparent quality", hint: "About how it's made, not the look", group: "quality" },
+  { value: "quality_unclear", label: "Not enough quality evidence", hint: "About evidence, not the look", group: "quality" },
+  { value: "too_repetitive", label: "Too repetitive", hint: "Varies the feed; nothing about the look", group: "listing" },
+  { value: "wrong_category", label: "Wrong category (listing error)", hint: "A data error; nothing is learned", group: "listing" },
 ];

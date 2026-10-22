@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import { Check } from "lucide-react";
-import { REASONS } from "@/lib/api";
+import { REASON_GROUP_LABEL, REASONS, type ReasonGroup } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/input";
@@ -23,7 +23,10 @@ export function RejectDialog({ open, onOpenChange, onSubmit, title }: { open: bo
         <div className="grid gap-2">
           {REASONS.map((r, i) => {
             const on = selected.includes(r.value);
+            const heading = i === 0 || REASONS[i - 1].group !== r.group ? REASON_GROUP_LABEL[r.group as ReasonGroup] : null;
             return (
+              <div key={r.value} className="contents">
+              {heading && <p className="label mt-2 first:mt-0">{heading}</p>}
               <button
                 key={r.value}
                 onClick={() => toggle(r.value)}
@@ -37,6 +40,7 @@ export function RejectDialog({ open, onOpenChange, onSubmit, title }: { open: bo
                 </span>
                 <kbd className="hidden text-[10px] text-muted-foreground md:inline">{i + 1}</kbd>
               </button>
+              </div>
             );
           })}
         </div>
@@ -50,7 +54,7 @@ export function RejectDialog({ open, onOpenChange, onSubmit, title }: { open: bo
           </Button>
         </div>
         <p className="mt-3 text-xs leading-relaxed text-muted-foreground">
-          “Too expensive” and “already own” never teach the system that you dislike the style itself.
+          Only reasons about the look teach the app what you don&apos;t like. Buying, quality and listing reasons are kept apart.
         </p>
       </DialogContent>
     </Dialog>

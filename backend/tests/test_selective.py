@@ -171,10 +171,11 @@ def test_eligibility_exclusions_keep_their_reasons(client, db):
     db.add(rejected)
     db.flush()
     db.add(Feedback(product_id=rejected.id, action="dislike", reasons=["too_expensive"]))
-    owned.category = "blazer"
+    owned.category = "blazer"  # a navy blazer, like the navy blazers you said you own (scoped, not the category)
     for k in range(2):
-        b = Product(seller_id=poor.seller_id, title_original="b", title_en=f"blazer {k}", category="blazer",
-                    source_url=f"https://shop.example/b{k}", external_id=f"b{k}", status="sold_out")  # fmt: skip
+        b = Product(seller_id=poor.seller_id, title_original="b", title_en=f"navy blazer {k}", category="blazer",
+                    colours=["navy"], source_url=f"https://shop.example/b{k}", external_id=f"b{k}",
+                    status="sold_out")  # fmt: skip
         db.add(b)
         db.flush()
         db.add(Feedback(product_id=b.id, action="dislike", reasons=["already_own"]))

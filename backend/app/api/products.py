@@ -136,6 +136,11 @@ def ranked_candidates(db: Session, prof, ctx: Context, flt: dict) -> tuple[list,
     candidates = feed_candidates(db, prof, include_skipped_after_days=rcfg.get("skip_resurface_days", 10))
     if not flt.get("include_seed"):
         candidates = [p for p in candidates if p.data_origin != "seed"]
+    hidden = set(get_setting(db, "discover").get("hidden_categories") or [])
+    if hidden:  # your explicit choice (Settings → Discover), reported with every feed so it can be undone
+        shown = [p for p in candidates if (p.category or "other") not in hidden]
+        ctx.hidden = {"categories": sorted(hidden), "pieces": len(candidates) - len(shown)}
+        candidates = shown
     filters = {k: v for k, v in flt.items() if k != "include_seed"}
     ctx.price_filter = price_filter(db, flt, candidates, ctx)  # as applied, reported with the feed
     candidates = _apply_filters(candidates, **filters, origin=None, ctx=ctx)
@@ -184,7 +189,7 @@ def feed(
     gate = selective.evaluate(db, ranked, prof, mode, quality_lookup=quality_lookup, learning="warmup")
     arm = selective.trial_arm(gate.cfg, dt.date.today())
     base = {"total_candidates": n_candidates, "learning_strength": round(prof.strength, 3),
-            "decisions": prof.n_informative, "price_filter": ctx.price_filter}  # fmt: skip
+            "decisions": prof.n_informative, "price_filter": ctx.price_filter, "hidden": ctx.hidden}  # fmt: skip
     if gate.state == "off" or arm == "ranked":
         seed = int(dt.date.today().strftime("%Y%m%d"))
         exploration = rcfg.get("exploration_rate", 0.18)
@@ -242,7 +247,7 @@ def learning_feed(
     ranked, offers, n_candidates, quality_lookup = ranked_candidates(db, prof, ctx, flt)
     gate = selective.evaluate(db, ranked, prof, mode, quality_lookup=quality_lookup, learning=True)
     base = {"total_candidates": n_candidates, "learning_strength": round(prof.strength, 3),
-            "decisions": prof.n_informative, "price_filter": ctx.price_filter}  # fmt: skip
+            "decisions": prof.n_informative, "price_filter": ctx.price_filter, "hidden": ctx.hidden}  # fmt: skip
     if gate.state == "off":
         summary = gate.summary(0, policy="learning")
         summary["message"] = "Learning picks are part of selective recommendation, which is switched off in Settings."

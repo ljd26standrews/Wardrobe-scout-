@@ -36,6 +36,7 @@ class Context:
         self._quality: dict[int, dict] = {}
         self._strong: dict[int, list[int]] | None = None
         self.price_filter: dict | None = None  # the feed's price filter as applied (api/products.price_filter)
+        self.hidden: dict | None = None  # categories you hid from Discover, and how many pieces that left out
 
     def seller_evidence(self, seller_id: int | None) -> list[Evidence]:
         if not seller_id:

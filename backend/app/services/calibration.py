@@ -121,6 +121,7 @@ def out_of_fold(
     *,
     exclude: frozenset[str] = frozenset(),
     before: datetime | None = None,
+    version: str = LABEL_VERSION,
 ):
     """(m, s, y, fold) for every rated piece, each scored by a taste model fitted without its fold's decisions.
 
@@ -136,7 +137,8 @@ def out_of_fold(
         if not len(idx):
             continue
         held = exclude | {fams[j] for j in idx}
-        post = pm.fit_rows(space, *pm.observations_with_families(db, space, exclude=held, before=before)[:4])
+        obs = pm.observations_with_families(db, space, exclude=held, before=before, version=version)
+        post = pm.fit_rows(space, *obs[:4])
         m[idx] = X[idx] @ post.mean
         s[idx] = post.logit_sd(X[idx])
     return m, s, y, fold
@@ -258,10 +260,11 @@ def fit_map(
     *,
     exclude: frozenset[str] = frozenset(),
     before: datetime | None = None,
+    version: str = LABEL_VERSION,
 ) -> tuple[float, float, np.ndarray, dict, np.ndarray, np.ndarray]:
     """The whole calibration procedure on these labels, storing nothing: out-of-fold logits, Bayesian Platt,
     nested diagnostics, and the identity map unless Platt beats it out of fold. (a, b, cov, diagnostics, y, fold)"""
-    m, _, y, fold = out_of_fold(db, space, outcomes, exclude=exclude, before=before)
+    m, _, y, fold = out_of_fold(db, space, outcomes, exclude=exclude, before=before, version=version)
     a, b, cov = fit_platt(m, y)
     diag = diagnostics(m, y, fold)
     use_platt = _prefer_platt(m, y, fold)

@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import useSWR from "swr";
 import { motion } from "framer-motion";
 import { toast } from "sonner";
-import { Bookmark, Clock3, FlaskConical, GitCompareArrows, Heart, LayoutGrid, Rows3, ShieldCheck, ShoppingBag, SkipForward, Store, X } from "lucide-react";
+import { Bookmark, Clock3, FlaskConical, GitCompareArrows, Heart, Hourglass, LayoutGrid, Rows3, ShieldCheck, ShoppingBag, SkipForward, Store, X } from "lucide-react";
 import type { FeedResponse, Gate, Product, SelectiveMode } from "@/lib/api";
 import { api, hasEstimates, MODE_LABEL, MODES, qs } from "@/lib/api";
 import { Button } from "@/components/ui/button";
@@ -17,7 +17,7 @@ import { ProductCard } from "@/components/product/product-card";
 import { ProductInfo } from "@/components/product/product-detail-body";
 import { RejectDialog } from "@/components/product/reject-dialog";
 import { useFeedback, type ActionName } from "@/components/product/use-feedback";
-import { cn } from "@/lib/utils";
+import { cn, titleCase } from "@/lib/utils";
 
 type Seen = { product: Product; feedId: string | null; position: number };
 
@@ -167,6 +167,7 @@ export default function DiscoverPage() {
       const k = e.key.toLowerCase();
       if (k === "l") act(current, "love");
       else if (k === "s") act(current, "like");
+      else if (k === "w") act(current, "like_later");
       else if (k === "m") act(current, "maybe");
       else if (k === "d" || k === "x") setRejecting(current);
       else if (k === "arrowright" || k === "n") act(current, "skip");
@@ -190,6 +191,14 @@ export default function DiscoverPage() {
             </p>
           )}
           {data && data.gate?.state !== "off" && data.gate?.trial !== "ranked" && <GateStatus gate={data.gate} total={data.total_candidates} />}
+          {data?.hidden && (
+            <p className="mt-1 text-sm text-muted-foreground" data-testid="hidden-categories-note">
+              Hidden by you: {data.hidden.categories.map(titleCase).join(", ")} ({data.hidden.pieces} pieces).{" "}
+              <Link href="/settings" className="underline underline-offset-2">
+                Change in Settings
+              </Link>
+            </p>
+          )}
           {data && data.gate?.state === "off" && (
             <p className="mt-2 text-sm text-muted-foreground">
               {data.total_candidates} undecided pieces ·{" "}
@@ -355,6 +364,9 @@ export default function DiscoverPage() {
             </ActionBtn>
             <ActionBtn label="Maybe (M)" testid="action-maybe" onClick={() => act(current, "maybe")}>
               <Clock3 />
+            </ActionBtn>
+            <ActionBtn label="Like the look, not now (W)" testid="action-later" onClick={() => act(current, "like_later")}>
+              <Hourglass />
             </ActionBtn>
             <ActionBtn label="Save (S)" testid="action-like" onClick={() => act(current, "like")}>
               <Bookmark />

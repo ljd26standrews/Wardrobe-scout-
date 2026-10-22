@@ -110,6 +110,8 @@ export default function SettingsPage() {
   const rec = useSection(data, "recommender", refresh);
   const sel = useSection(data, "selective", refresh);
   const currency = useSection(data, "currency", refresh);
+  const discover = useSection(data, "discover", refresh);
+  const { data: facets } = useSWR<{ categories: { value: string; count: number }[] }>("/api/facets");
   const landed = useSection(data, "landed_cost", refresh);
   const ai = useSection(data, "ai", refresh);
   const schedule = useSection(data, "schedule", refresh);
@@ -289,6 +291,21 @@ export default function SettingsPage() {
             <Field label="CNY → GBP" hint={`${currency.value?.rate_source ?? ""}${currency.value?.rate_updated_at ? ` · ${timeAgo(currency.value.rate_updated_at)}` : ""}`}>
               <NumberInput value={currency.value?.cny_to_gbp} onChange={(v) => currency.update({ cny_to_gbp: v, rate_source: "set manually" })} />
             </Field>
+            <Field
+              label="Other currencies (pounds per unit)"
+              hint="e.g. USD 0.79. A currency without a rate is shown as listed and left out of price filters, medians and comparisons; nothing is guessed."
+            >
+              <Input
+                placeholder="USD 0.79, EUR 0.85"
+                defaultValue={Object.entries(currency.value?.other_to_gbp ?? {}).map(([k, v]) => `${k} ${v}`).join(", ")}
+                key={JSON.stringify(currency.value?.other_to_gbp ?? {})}
+                onBlur={(e) => {
+                  const pairs = e.target.value.split(",").map((x) => x.trim().split(/\s+/)).filter((x) => x.length === 2 && x[0] && Number(x[1]) > 0);
+                  currency.update({ other_to_gbp: Object.fromEntries(pairs.map(([k, v]) => [k.toUpperCase(), Number(v)])) });
+                }}
+                data-testid="other-rates"
+              />
+            </Field>
             <Button
               size="sm"
               variant="outline"
@@ -305,6 +322,31 @@ export default function SettingsPage() {
             >
               <RefreshCw /> Fetch ECB rate
             </Button>
+          </Section>
+
+          <Section
+            title="Discover"
+            description="Categories you choose to hide from Discover. Browse still lists everything. “Already own” never hides a category by itself; it only affects pieces like the one you own."
+            onSave={discover.save}
+            dirty={discover.dirty}
+          >
+            <div className="flex flex-wrap gap-1.5" data-testid="hidden-categories">
+              {(facets?.categories ?? []).map((c) => {
+                const hidden: string[] = discover.value?.hidden_categories ?? [];
+                const on = hidden.includes(c.value);
+                return (
+                  <button
+                    key={c.value}
+                    onClick={() => discover.update({ hidden_categories: on ? hidden.filter((x) => x !== c.value) : [...hidden, c.value] })}
+                    className={`rounded-full border px-3 py-1 text-xs ${on ? "border-foreground bg-foreground text-background" : "hover:bg-secondary"}`}
+                    aria-pressed={on}
+                  >
+                    {on ? "Hidden: " : ""}
+                    {titleCase(c.value)}
+                  </button>
+                );
+              })}
+            </div>
           </Section>
 
           <Section title="UK landed cost" description="Assumptions used for the estimate on every product." onSave={landed.save} onReset={landed.reset} dirty={landed.dirty}>

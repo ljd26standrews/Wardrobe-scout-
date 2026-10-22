@@ -161,7 +161,7 @@ export function SelectiveInsights() {
   return (
     <div data-testid="selective-insights">
       <p className="mt-2 max-w-2xl text-sm leading-relaxed text-muted-foreground">
-        Discover recommends a piece only when the model is sure enough you&apos;ll approve of it (love, save or buy). The 80%, 90% and 95% targets are aspirations:
+        Discover recommends a piece only when the model is sure enough you&apos;ll like the look (love or like it). The 80%, 90% and 95% targets are aspirations:
         they count as met only when the observed rates below confirm them, and with few decisions the intervals stay wide.
       </p>
       <div className="mt-6 grid grid-cols-2 gap-3 md:grid-cols-4">

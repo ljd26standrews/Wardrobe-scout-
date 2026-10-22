@@ -5,6 +5,7 @@ Usage (from backend/):
     .venv/bin/python -m eval.selective               # both protocols, on a copy of your database
     .venv/bin/python -m eval.selective --db PATH     # another database file
     .venv/bin/python -m eval.selective --block 20    # rolling-origin block size (default 10)
+    .venv/bin/python -m eval.selective --labels approval-v1   # the earlier reading of decisions, for comparison
 
 Protocols
 ---------
@@ -157,19 +158,22 @@ def _modes(cfg: dict) -> dict[str, tuple[float, float]]:
     return {m: thresholds(cfg, m) for m in MODES}
 
 
-def predict(db, space, cfg, outcomes, *, train, exclude, before, block, n_train) -> list[Prediction]:
+def predict(db, space, cfg, outcomes, *, train, exclude, before, block, n_train, version=None) -> list[Prediction]:
     """Score ``outcomes`` with a taste model and calibration fitted only on ``train`` (and the rest of what was
-    known ``before``), with the ``exclude``d families left out of everything."""
+    known ``before``), with the ``exclude``d families left out of everything; decisions read as ``version``."""
     from app.services import calibration
     from app.services import preference_model as pm
+    from app.services.approval_data import LABEL_VERSION
 
-    post = pm.fit_rows(space, *pm.observations_with_families(db, space, exclude=exclude, before=before)[:4])
+    version = version or LABEL_VERSION
+    obs = pm.observations_with_families(db, space, exclude=exclude, before=before, version=version)
+    post = pm.fit_rows(space, *obs[:4])
     X, y, fams = calibration.label_matrix(space, outcomes)
     m = X @ post.mean
     s = post.logit_sd(X)
     amap = None
     if calibration.sufficiency(train, cfg)["sufficient"]:
-        a, b, cov, *_ = calibration.fit_map(db, space, train, exclude=exclude, before=before)
+        a, b, cov, *_ = calibration.fit_map(db, space, train, exclude=exclude, before=before, version=version)
         amap = calibration.ApprovalMap(0, a, b, cov, len(train), sum(o.y for o in train), datetime.now(UTC), {})
     preds = [Prediction(f, int(yi), n_train, block, float(mi), float(si), float(_sigmoid(mi)))
              for f, yi, mi, si in zip(fams, y, m, s, strict=True)]  # fmt: skip
@@ -181,13 +185,16 @@ def predict(db, space, cfg, outcomes, *, train, exclude, before, block, n_train)
     return preds
 
 
-def rolling_origin(db, *, block: int = BLOCK, first: int = FIRST_ORIGIN) -> list[Prediction]:
+def rolling_origin(
+    db, *, block: int = BLOCK, first: int = FIRST_ORIGIN, version: str | None = None
+) -> list[Prediction]:
     from app.services import calibration
-    from app.services.approval_data import rated_outcomes
+    from app.services.approval_data import LABEL_VERSION, rated_outcomes
     from app.services.settings_store import get_setting
 
+    version = version or LABEL_VERSION
     cfg = get_setting(db, "selective")
-    outcomes = rated_outcomes(db)
+    outcomes = rated_outcomes(db, version=version)
     space = calibration._space(db)
     seller = _sellers(db, outcomes)
     preds: list[Prediction] = []
@@ -195,8 +202,9 @@ def rolling_origin(db, *, block: int = BLOCK, first: int = FIRST_ORIGIN) -> list
         test = outcomes[i : i + block]
         cutoff = test[0].created_at
         held = frozenset(o.family for o in test)
-        train = [o for o in rated_outcomes(db, before=cutoff) if o.family not in held]
-        new = predict(db, space, cfg, test, train=train, exclude=held, before=cutoff, block=b, n_train=len(train))
+        train = [o for o in rated_outcomes(db, before=cutoff, version=version) if o.family not in held]
+        new = predict(db, space, cfg, test, train=train, exclude=held, before=cutoff, block=b, n_train=len(train),
+                      version=version)  # fmt: skip
         known = {seller.get(o.feedback_id) for o in train} - {None}
         by_family = {o.family: o for o in test}  # one label per family; a piece that cannot be scored is skipped
         for p in new:
@@ -455,7 +463,8 @@ def _cal_line(name: str, c: dict) -> str:
 
 
 def report(result: dict) -> str:
-    lines = ["# Selective recommendation: measured on your own outcomes", ""]
+    lines = ["# Selective recommendation: measured on your own outcomes", "",
+             f"Decisions read as `{result.get('labels', 'aesthetic-v2')}` (approval_data.py).", ""]  # fmt: skip
     for key, title in (("logged", "Logged decisions, rolling origin"), ("representative", "Evaluate grades")):
         r = result.get(key) or {}
         lines += [f"## {title}", ""]
@@ -506,18 +515,21 @@ def _share(r: dict) -> str:
     return f"{_pct(r['rate'])} [{_pct(r['interval'][0])}, {_pct(r['interval'][1])}]"
 
 
-def run_all(db, *, block: int = BLOCK, seed: int = 0) -> dict:
+def run_all(db, *, block: int = BLOCK, seed: int = 0, labels: str | None = None) -> dict:
+    from app.services.approval_data import LABEL_VERSION
     from app.services.preference_model import ENGINE_VERSION
     from app.services.settings_store import get_setting
 
+    labels_version = labels or LABEL_VERSION
     cfg = get_setting(db, "selective")
-    preds = rolling_origin(db, block=block)
+    preds = rolling_origin(db, block=block, version=labels_version)
     logged = summarise(preds, cfg) if preds else {"refused": f"needs more than {FIRST_ORIGIN} rated pieces"}
     # Aggregates only: no per-decision records are saved. The hash identifies the label set for comparisons.
-    labels = hashlib.sha256("|".join(sorted(f"{p.family}:{p.y}" for p in preds)).encode()).hexdigest()[:16]
+    label_hash = hashlib.sha256("|".join(sorted(f"{p.family}:{p.y}" for p in preds)).encode()).hexdigest()[:16]
     served = served_feeds(db)  # before the representative protocol, which deletes decisions from the copy
-    return {"engine_version": ENGINE_VERSION, "settings": cfg, "block": block, "label_set_hash": labels,
-            "logged": logged, "served": served, "representative": representative(db, seed)}  # fmt: skip
+    return {"engine_version": ENGINE_VERSION, "labels": labels_version, "settings": cfg, "block": block,
+            "label_set_hash": label_hash, "logged": logged, "served": served,
+            "representative": representative(db, seed)}  # fmt: skip
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -526,6 +538,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--data-dir", help="where results are saved (default: WS_DATA_DIR)")
     ap.add_argument("--block", type=int, default=BLOCK)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--labels", choices=("approval-v1", "aesthetic-v2"), help="reading of decisions (default: current)")
     args = ap.parse_args(argv)
 
     from app.config import get_settings
@@ -540,7 +553,7 @@ def main(argv: list[str] | None = None) -> int:
     with tempfile.TemporaryDirectory(prefix="ws-eval-") as tmp:
         db = open_copy(src, Path(tmp))
         try:
-            result = run_all(db, block=args.block, seed=args.seed)
+            result = run_all(db, block=args.block, seed=args.seed, labels=args.labels)
         finally:
             db.close()
     print(report(result))

@@ -57,8 +57,11 @@ def test_only_explicit_decisions_become_labels(env, db):
     _fb(db, ps["seed"], "love", seed=True)  # seed examples are notes, not rated recommendations
     db.commit()
 
-    labels = {o.product_id: o.y for o in rated_outcomes(db)}
+    # The earlier reading ("approval-v1"), kept unchanged for comparison; tests/test_taste_contract.py has the
+    # current one, in which a purchase, a maybe and a price-only rejection say nothing about the look.
+    labels = {o.product_id: o.y for o in rated_outcomes(db, version="approval-v1")}
     assert labels == {ps["love"].id: 1, ps["like"].id: 1, ps["bought"].id: 1, ps["dislike"].id: 0, ps["maybe"].id: 0}
+    assert {o.product_id: o.y for o in rated_outcomes(db)} == {ps["love"].id: 1, ps["like"].id: 1}
     like = next(o for o in rated_outcomes(db) if o.product_id == ps["like"].id)
     assert (like.feed_id, like.position) == ("f1", 3)
 

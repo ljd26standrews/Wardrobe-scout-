@@ -28,7 +28,7 @@ export function ConfidenceBadge({ c }: { c?: Confidence }) {
     <Tip
       content={
         <>
-          Calibrated approval estimate: about {approx(c.estimate).replace("≈", "")} chance you&apos;d love, save or buy it
+          Calibrated approval estimate: about {approx(c.estimate).replace("≈", "")} chance you&apos;d like the look (love or like it)
           {c.bound != null && c.level != null && c.level > 0.5 ? `; with ${pct(c.level)} confidence at least ${atLeast(c.bound)}` : ""}. Calibrated on your own rated pieces.
         </>
       }
@@ -61,7 +61,7 @@ export function ConfidencePanel({ c }: { c?: Confidence }) {
     <div className="space-y-3 text-sm" data-testid="confidence-panel">
       <p>
         <span className="text-3xl font-medium">{approx(c.estimate)}</span>{" "}
-        <span className="text-muted-foreground">estimated chance you&apos;d approve (love, save or buy)</span>
+        <span className="text-muted-foreground">estimated chance you&apos;d like the look</span>
       </p>
       {c.bound != null && c.level != null && c.level > 0.5 ? (
         <p className="text-muted-foreground">

@@ -43,18 +43,22 @@ from .settings_store import get_setting
 
 ACTION_WEIGHT = {"love": 2.0, "like": 1.0, "purchased": 1.5, "maybe": 0.35, "dislike": -1.0}
 
+# Every reason a decision can carry; approval_data says which are about the look, buying, quality or the listing.
 REASONS = {
     "silhouette": "Dislike the silhouette",
     "colour": "Dislike the colour",
     "logo": "Dislike the logo",
     "fabric": "Fabric doesn't appeal to me",
     "construction": "Poor apparent quality",
+    "quality_unclear": "Not enough quality evidence",
     "too_expensive": "Too expensive for the quality",
     "already_own": "Already own something similar",
+    "wrong_size": "Not in my size",
     "specific_item": "Don't like this specific item",
     "not_my_style": "Not my style",
     "wrong_category": "Wrong category (listing error)",
     "too_repetitive": "Too repetitive",
+    "not_now": "Like the look, but not now",
 }
 
 ATTR_TYPE_WEIGHT = {"colour": 1.0, "category": 1.0, "fibre": 1.0, "brand": 0.8, "seller": 0.5, "fit": 1.0, "logo": 1.0}
@@ -148,6 +152,18 @@ def snapshot(p: Product) -> dict:
 
 
 @dataclass
+class Owned:
+    """A piece you said you already own something like ("already own"). Pieces like it (the same garment type in
+    the same main colour, or a near-identical photo) are less useful to you; nothing else is affected."""
+
+    product_id: int | None
+    category: str
+    colour: str | None
+    vec: np.ndarray | None
+    title: str
+
+
+@dataclass
 class Proto:
     vec: np.ndarray
     weight: float
@@ -174,7 +190,9 @@ class Profile:
     price_ceiling_source: dict[str, tuple[float, str]] = field(default_factory=dict)  # (price, currency) as listed
     price_tolerance: dict[str, float] = field(default_factory=dict)
     fx: Rates = field(default_factory=Rates)
-    redundant: Counter = field(default_factory=Counter)
+    redundant: Counter = field(default_factory=Counter)  # "already own" per category: shown, never a category ban
+    owned: list[Owned] = field(default_factory=list)
+    owned_threshold: float = 0.96  # photo similarity that counts as "like it" (Settings → near-duplicate threshold)
     construction_concerns: int = 0
     decided_ids: set[int] = field(default_factory=set)
     # Product families (Product.group_id) you have decided on: their other listings are the same garment.
@@ -198,6 +216,7 @@ class Profile:
 def build_profile(db: Session, backend_name: str | None = None) -> Profile:
     prof = Profile(fx=rates(db))
     cfg = get_setting(db, "recommender")
+    prof.owned_threshold = float(cfg.get("near_duplicate_threshold", 0.96))
     backend_name = backend_name or emb.get_image_backend().name
 
     events = db.query(Feedback).order_by(Feedback.created_at).all()
@@ -271,6 +290,11 @@ def build_profile(db: Session, backend_name: str | None = None) -> Profile:
             prof.price_tolerance[cat] = max(prof.price_tolerance.get(cat, 0.0), gbp)
         if routing.redundancy:
             prof.redundant[cat] += 1
+            colours = (p.colours if p is not None else source.get("colours")) or []
+            vec = None
+            if p is not None and p.image_embedding is not None and p.embedding_backend == backend_name:
+                vec = emb.from_bytes(p.image_embedding)
+            prof.owned.append(Owned(p.id if p is not None else None, cat, colours[0] if colours else None, vec, title))
         if routing.construction_concern:
             prof.construction_concerns += 1
 
@@ -285,12 +309,12 @@ def build_profile(db: Session, backend_name: str | None = None) -> Profile:
             if wgt > 0:
                 prof.pos_visual.append(Proto(emb.from_bytes(item.embedding), wgt, item.name, None, "wardrobe"))
 
-    # A decision about a garment covers its other listings, except a dislike only for the price: a cheaper
-    # offer of the same piece is exactly what you would want to see.
+    # A decision about a garment covers its other listings, except a dislike only for the price, the size or
+    # missing quality evidence: a cheaper offer, one in your size or one with evidence is what you would want.
     covering = [
         pid
         for pid, fb in latest.items()
-        if not (fb.action == "dislike" and fb.reasons and set(fb.reasons) <= {"too_expensive"})
+        if not (fb.action == "dislike" and fb.reasons and set(fb.reasons) <= LISTING_SPECIFIC)
     ]
     if covering:
         prof.decided_groups = {
@@ -299,6 +323,25 @@ def build_profile(db: Session, backend_name: str | None = None) -> Profile:
     k = cfg.get("cold_start_k", 15)
     prof.strength = prof.n_informative / (prof.n_informative + k) if prof.n_informative else 0.0
     return prof
+
+
+LISTING_SPECIFIC = frozenset({"too_expensive", "wrong_size", "quality_unclear"})  # about one listing, not the garment
+
+
+def owned_like(prof: Profile, p: Product, backend: str) -> Owned | None:
+    """The "already own" objection this piece falls under: the same garment type in the same main colour, or a
+    near-identical photo. Never a whole category (hiding a category is an explicit setting: Settings → Discover)."""
+    for o in prof.owned:
+        if o.product_id == p.id:
+            return o
+        if (p.category or "other") != o.category:
+            continue
+        if o.colour and p.colours and p.colours[0] == o.colour:
+            return o
+        if o.vec is not None and p.image_embedding is not None and p.embedding_backend == backend:
+            if float(o.vec @ emb.from_bytes(p.image_embedding)) >= prof.owned_threshold:
+                return o
+    return None
 
 
 def above_judged_price(prof: Profile, category: str, gbp: float | None) -> bool:
@@ -557,8 +600,9 @@ def rank_products(
         wardrobe_c = wl["score"] if wl else 0.5
         if wl and wl.get("note"):
             (reasons if wardrobe_c > 0.5 else cautions).append(wl["note"])
-        if prof.redundant.get(cat):
+        if owned := owned_like(prof, p, backend):
             wardrobe_c = min(wardrobe_c, 0.35)
+            cautions.append(f"You said you already own something like this ({owned.title})")
         sl = sellers.get(p.seller_id) if p.seller_id else None
         rep = {"trusted": 0.8, "mixed": 0.5, "concerns": 0.15}.get(sl.reputation_status if sl else "", 0.5)
         prio = 0.5 + (3 - (sl.priority if sl else 3)) * 0.06
@@ -926,6 +970,7 @@ def describe_profile(db: Session, prof: Profile | None = None) -> dict:
         },
         "price_tolerance": {cat: round(v, 2) for cat, v in prof.price_tolerance.items()},
         "redundant_categories": dict(prof.redundant),
+        "already_own": [{"title": o.title, "category": o.category, "colour": o.colour} for o in prof.owned],
         "rejection_reasons": {REASONS.get(k, k): v for k, v in prof.reason_counts.items()},
         "construction_concerns": prof.construction_concerns,
         "palette_neutral_share": _neutral_share(prof),

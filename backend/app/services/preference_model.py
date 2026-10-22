@@ -21,7 +21,11 @@ Features x(item):
 * ``bias``       intercept (absorbs the base rate so "everything shown was loved" is not mistaken for
                  "trust the written profile more").
 
-Observations: love (y=1, weight 2), like (1, 1), purchased (1, 1.5), maybe (1, 0.3), dislike (0, 1).
+Observations follow the feedback contract (approval_data, "aesthetic-v2"): what you said about the look. Love
+(y=1, weight 2), like (1, 1; also "like the look, not now"), dislike (0, 1). A purchase, a maybe, and a dislike
+only for price, size, owning something like it, quality or the listing are not about the look and teach nothing;
+they do not erase an earlier like either. (The earlier "approval-v1" reading, kept for comparison, also learned from
+purchases (1, 1.5) and maybes (1, 0.3).)
 Positive-unlabelled learning: a small *background* sample of undecided catalogue items is added as weak
 label-0 observations. It does not claim you dislike them; it lets the model learn what distinguishes the
 items you choose from a typical item (without it, a run of loves of yellow pieces barely moved the yellow
@@ -59,9 +63,11 @@ from sqlalchemy.orm import Session
 
 from ..models import Feedback, InspirationImage, Product, WardrobeItem
 from . import embeddings as emb
+from .approval_data import LABEL_VERSION, WITHDRAW, reading
 
 # Recorded with every feed served (impression log), so evaluations can tell model versions apart.
-ENGINE_VERSION = "bayes-2026.10-s1"  # s1: full-covariance posterior, logo-only logo rejections, new reasons
+# s1: full-covariance posterior, logo-only logo rejections, new reasons; s2: aesthetic-v2 reading of decisions
+ENGINE_VERSION = "bayes-2026.10-s2"
 GROUPS = ("colour", "category", "fibre", "fit", "logo", "brand")
 PCA_DIM = 16
 IMG_SCALE = 0.5
@@ -84,7 +90,8 @@ PRIOR_SCALE = 2.0  # written-profile score (0..1) -> logit units: (score - 0.5) 
 # 2.0 vs 4.0 gave up a little when the profile is right (0.95→0.89) but gained when it is partly or
 # wholly wrong (0.46→0.54, 0.16→0.23), the best average. Held-out seeds are reported in eval/RESULTS.md.
 
-LABEL = {"love": (1, 2.0), "like": (1, 1.0), "purchased": (1, 1.5), "maybe": (1, 0.3), "dislike": (0, 1.0)}
+LABEL = {"love": (1, 2.0), "like": (1, 1.0), "dislike": (0, 1.0)}  # (y, weight) per decision about the look
+LABEL_V1 = {"love": (1, 2.0), "like": (1, 1.0), "purchased": (1, 1.5), "maybe": (1, 0.3), "dislike": (0, 1.0)}
 REASON_GROUPS = {
     "colour": {"colour"},
     "fabric": {"fibre"},
@@ -95,6 +102,7 @@ REASON_GROUPS = {
 # and its near-duplicates (recommender suppression), but no colour, shape or style weight learns from it.
 NON_TASTE_REASONS = {
     "too_expensive", "already_own", "construction", "specific_item",
+    "wrong_size", "quality_unclear",  # buying and quality, not the look (approval_data's contract)
     "wrong_category",  # a data error (the listing's category was wrong), not taste
     "too_repetitive",  # a feed problem (too much of the same), not taste
 }  # fmt: skip
@@ -386,7 +394,12 @@ def family_key(family: tuple) -> str:
 
 
 def observations_with_families(
-    db: Session, space: FeatureSpace, *, exclude: frozenset[str] = frozenset(), before: datetime | None = None
+    db: Session,
+    space: FeatureSpace,
+    *,
+    exclude: frozenset[str] = frozenset(),
+    before: datetime | None = None,
+    version: str = LABEL_VERSION,
 ) -> tuple[list, list, list, int, list]:
     """``observations`` plus, for each row, the garment family of the decision it came from (None for
     inspiration, wardrobe and background rows).
@@ -399,10 +412,9 @@ def observations_with_families(
     query = db.query(Feedback)
     if before is not None:
         query = query.filter(Feedback.created_at < before)
+    labels = LABEL if version != "approval-v1" else LABEL_V1
     latest: dict[int | tuple, Feedback] = {}
     for fb in query.order_by(Feedback.created_at):
-        if fb.action == "skip":
-            continue
         if fb.product_id is not None:
             key: int | tuple = fb.product_id
         elif fb.snapshot:
@@ -411,18 +423,19 @@ def observations_with_families(
             continue
         if exclude and _family_of_key(key, group_of) in exclude:
             continue
-        if fb.action == "unsave":
+        said = reading(fb.action, fb.reasons, version)  # the latest decision about the look counts
+        if said == WITHDRAW:
             latest.pop(key, None)
-            continue
-        latest[key] = fb
+        elif said is not None:
+            latest[key] = fb
     decisions = []  # (family, x, y, w)
     for pid, fb in latest.items():
-        if fb.action not in LABEL or (isinstance(pid, int) and pid not in space.row):
+        if fb.action not in labels or (isinstance(pid, int) and pid not in space.row):
             continue
         reasons = set(fb.reasons or [])
         if fb.action == "dislike" and reasons and reasons <= NON_TASTE_REASONS:
             continue  # value/redundancy/construction/this-item-only judgements are not taste
-        y, w = LABEL[fb.action]
+        y, w = labels[fb.action]
         x = space.X[space.row[pid]].copy() if isinstance(pid, int) else space.vector(attr_keys(fb.snapshot))
         specific = reasons - NON_TASTE_REASONS - GENERAL_REASONS
         if fb.action == "dislike" and specific:

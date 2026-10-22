@@ -1,4 +1,10 @@
-"""Feedback (love / like / maybe / dislike / skip / purchased) and saved lists."""
+"""Feedback (love / like / maybe / dislike / skip / purchased) and saved lists.
+
+What each decision means (approval_data has the contract): love and like say you like the look ("not now" adds
+that you would not buy it now, and saves it to Later); a dislike's reasons say whether it was about the look, buying
+or quality; maybe is undecided; purchased moves the piece to your wardrobe. Saving a piece to a list always means
+you like the look, wherever it is done.
+"""
 
 from __future__ import annotations
 
@@ -10,12 +16,26 @@ from ..db import get_db
 from ..models import Feedback, Product, SavedItem, WardrobeItem
 from ..schemas import FeedbackIn, SavedPatch
 from ..services import calibration, jobs
+from ..services.approval_data import LABEL_VERSION, POSITIVE_REASONS, REJECTION_REASONS, latest_readings
 from ..services.presenter import Context, product_card
 from ..services.recommender import REASONS, snapshot
 
 router = APIRouter(prefix="/api", tags=["feedback"])
 
 LIST_FOR_ACTION = {"love": "loved", "like": "liked", "maybe": "maybe"}
+
+
+def list_for(action: str, reasons: list[str] | None) -> str | None:
+    """The saved list a decision puts a piece in ("not now" goes to Later), or None."""
+    if action in ("love", "like") and "not_now" in (reasons or []):
+        return "later"
+    return LIST_FOR_ACTION.get(action)
+
+
+def _check_reasons(action: str, reasons: list[str]) -> None:
+    allowed = POSITIVE_REASONS if action in ("love", "like") else REJECTION_REASONS if action == "dislike" else set()
+    if wrong := [r for r in reasons if r not in allowed]:
+        raise HTTPException(422, f"reasons {wrong} do not go with {action}")
 
 
 @router.get("/feedback/reasons")
@@ -28,6 +48,7 @@ def give_feedback(body: FeedbackIn, db: Session = Depends(get_db)):
     p = db.get(Product, body.product_id)
     if p is None:
         raise HTTPException(404, "product not found")
+    _check_reasons(body.action, body.reasons)
     fb = Feedback(
         product_id=p.id,
         action=body.action,
@@ -40,8 +61,7 @@ def give_feedback(body: FeedbackIn, db: Session = Depends(get_db)):
     p.is_new = False
     saved = db.query(SavedItem).filter_by(product_id=p.id).one_or_none()
     wardrobe_id = None
-    if body.action in LIST_FOR_ACTION:
-        lst = LIST_FOR_ACTION[body.action]
+    if lst := list_for(body.action, body.reasons):
         if saved is None:
             saved = SavedItem(product_id=p.id, list_name=lst, priority=1 if lst == "loved" else 2)
             db.add(saved)
@@ -86,7 +106,7 @@ def give_feedback(body: FeedbackIn, db: Session = Depends(get_db)):
     return {
         "ok": True,
         "feedback_id": fb.id,
-        "saved": saved.list_name if saved and body.action in LIST_FOR_ACTION else None,
+        "saved": saved.list_name if saved and list_for(body.action, body.reasons) else None,
         "wardrobe_item_id": wardrobe_id,
     }
 
@@ -135,11 +155,11 @@ def undo_feedback(feedback_id: int, db: Session = Depends(get_db)):
             .first()
         )
         saved = db.query(SavedItem).filter_by(product_id=pid).one_or_none()
-        if prev is not None and prev.action in LIST_FOR_ACTION:
+        if prev is not None and (lst := list_for(prev.action, prev.reasons)):
             if saved is None:
-                db.add(SavedItem(product_id=pid, list_name=LIST_FOR_ACTION[prev.action]))
+                db.add(SavedItem(product_id=pid, list_name=lst))
             else:
-                saved.list_name = LIST_FOR_ACTION[prev.action]
+                saved.list_name = lst
         elif saved is not None and saved.list_name != "wishlist":
             db.delete(saved)
     db.commit()
@@ -181,15 +201,24 @@ def saved_items(list_name: str | None = Query(None, alias="list"), db: Session =
 
 @router.patch("/saved/{product_id}")
 def patch_saved(product_id: int, body: SavedPatch, db: Session = Depends(get_db)):
+    """Save a piece to a list, move it between lists, or note what to check before buying. Saving a piece that is in
+    no list records that you like the look, as the Like button does; moving it or adding a note records nothing."""
     s = db.query(SavedItem).filter_by(product_id=product_id).one_or_none()
     if s is None:
-        if db.get(Product, product_id) is None:
+        p = db.get(Product, product_id)
+        if p is None:
             raise HTTPException(404, "product not found")
         s = SavedItem(product_id=product_id, list_name=body.list_name or "wishlist")
         db.add(s)
+        events = db.query(Feedback).filter(Feedback.product_id == product_id).order_by(Feedback.created_at, Feedback.id)
+        said = latest_readings(events, LABEL_VERSION).get(product_id)
+        if said is None or said[1] != 1:  # not already a like: saving says you like the look
+            db.add(Feedback(product_id=product_id, action="like", context={"surface": "save"}, snapshot=snapshot(p)))
+            p.is_new = False
     for k, v in body.model_dump(exclude_unset=True).items():
         setattr(s, k, v)
     db.commit()
+    calibration.maybe_schedule(db)
     return {"ok": True, "list": s.list_name, "priority": s.priority}
 
 

@@ -200,19 +200,17 @@ It is then combined with quality evidence, value, wardrobe fit and seller credib
 
 - **Written preferences are a prior, not a rule.** With no history the feed follows your profile. As decisions accumulate, the model learns how much to trust what you wrote. If your behaviour contradicts the profile, behaviour wins, and Insights shows the learned trust.
 - **Every learned preference carries a confidence.** Insights shows each weight as a bar with an interval, and faded bars are not yet significant. Feed reasons say how sure the model is: "You tend to like olive (fairly sure)".
-- **Reason-aware rejections.** A reason limits what gets learned:
+- **Reason-aware rejections.** A reason limits what gets learned (see "What your decisions mean" below):
   - *Colour* only updates colour.
   - *Silhouette* updates fit and visual shape.
   - *Logo* updates logo visibility only. It is not a verdict on the brand.
   - *Fabric* updates materials.
-  - *Poor apparent quality* makes quality stricter. It teaches no taste, so similar-looking pieces from better sellers are not avoided.
-  - *Too expensive for the quality* and *Already own something similar* teach **no** taste at all. They only set a value ceiling or signal redundancy.
   - *This specific item* hides near-identical listings only.
   - *Not my style* is a general taste rejection.
-  - *Too repetitive* and *Wrong category (listing error)* teach no taste.
   - A dislike without a reason is a mild general negative.
+  - Reasons about buying (*too expensive*, *already own something similar*, *not in my size*), about quality (*poor apparent quality*, *not enough quality evidence*) and about the listing (*wrong category*, *too repetitive*) teach **no** taste.
   - **One garment counts once.** Loving two sellers' listings of the same piece is one decision, not two.
-  - **Skip teaches nothing.**
+  - **Skip teaches nothing**, and neither does a piece you scrolled past.
 - **Seed examples.** Your four starting items count as positive style examples, but they do not create seller affinity. The ¥510 Aristide white T-shirt is recorded with *too expensive for the quality*, which sets a T-shirt value ceiling and does **not** teach a dislike of white or heavyweight tees (this is covered by a test).
 - **Exploration.** With selective recommendation on (the default), exploration lives in **Learning picks**; see the next section. With it off, about 18% of feed slots (adjustable) are chosen by *Thompson sampling*, which favours items the model is uncertain about rather than items that are merely unusual, and they are labelled as exploration picks.
 - **One garment, one card.** Listings that are the same piece (a confirmed match, the same purchase link or several shared photos) share one feed slot, led by the best-ranked offer. A decision on one listing covers the others, except a dislike given only for the price, so a cheaper offer can still appear.
@@ -224,6 +222,35 @@ It is then combined with quality evidence, value, wardrobe fit and seller credib
 - **Near-duplicates** of items you rejected (shared photos or near-identical images) are suppressed.
 - **Visual signals** come from your approvals and rejections, your uploaded inspiration and anti-inspiration photos, and your wardrobe photos (weighted by how much you love each piece).
 - **Legacy engine.** The previous hand-weighted engine is still available under Settings → Ranking → Recommendation engine.
+
+### What your decisions mean
+
+Each decision says something about one of three things, and they are kept apart in what the app learns, in the
+confidence filter, in the evaluation and on screen:
+
+| Decision | Your taste (the look) | Buying | Quality |
+|---|---|---|---|
+| **Love** / **Like** | You like the look (love counts double) | Saved to Loved / Shortlist | – |
+| **Like · not now** | You like the look | Not now: saved to **Later** | – |
+| **Save** a piece to any list | You like the look (recorded as a like) | In that list | – |
+| **Maybe** | Undecided: no taste signal, and an earlier like no longer counts | Saved to Maybe | – |
+| **Dislike** with a reason about the look, or no reason | You don't like the look (scoped to the reason) | – | – |
+| **Dislike** · too expensive | – | Not at this price (a value judgement, not a budget) | – |
+| **Dislike** · already own something similar | – | Pieces *like it* (same type and main colour, or a near-identical photo) are less useful; never a whole category | – |
+| **Dislike** · not in my size | – | This listing only; other listings of the same garment still appear | – |
+| **Dislike** · poor apparent quality / not enough quality evidence | – | – | Quality, not taste |
+| **Purchased** | Nothing on its own (an earlier like still counts) | Moved to your wardrobe | – |
+| **Skip** / scrolling past | Nothing | Shown again after a while | – |
+| **Unsave** / **Undo** | The decision no longer counts | List restored | – |
+
+A later decision that is only about buying or quality (say, *too expensive* after a like) does not cancel what you
+said about the look. Hiding a whole category is a separate, explicit choice (Settings → Discover), shown on every
+Discover feed it affects and reversible there.
+
+The reading is versioned (`aesthetic-v2`); your original decisions are stored unchanged, and the previous reading
+(`approval-v1`: purchases counted as approvals, any rejection or maybe as non-approvals) remains available for
+comparison in `eval/selective.py --labels approval-v1`. Upgrading retires calibrations fitted under the old reading;
+the app refits them on its own.
 
 **How well does it work?** The `backend/eval/` harness simulates users and measures precision@10, the share of each 10-item feed the user actually wants. Settings were tuned on one seed and tested on 8 held-out seeds. Full details and confidence intervals are in [`backend/eval/RESULTS.md`](backend/eval/RESULTS.md).
 
@@ -267,7 +294,7 @@ These are synthetic users with synthetic images, so the table shows learning beh
 
 ## Selective recommendation: show a piece only when it's likely right
 
-Discover's main feed (**For you**) recommends a piece only when the app is sure enough that you will approve of it: love it, save it or buy it.
+Discover's main feed (**For you**) recommends a piece only when the app is sure enough that you will like the look of it (love or like it). Whether you would buy it now (price, size, already owning something like it) and how well made it is are kept separate: see "What your decisions mean" above.
 
 - **Approval estimates come from your own decisions.** Once you have rated at least 30 pieces, including 5 approvals and 5 rejections (adjustable), the taste model is calibrated on them. Every rated piece is scored by a model fitted without it. A two-parameter map then turns raw compatibility into an approval estimate, and it is kept only if it beats the model's own probabilities out of sample. **Before that, no percentage appears anywhere.**
 - **Three modes**, switchable on Discover:

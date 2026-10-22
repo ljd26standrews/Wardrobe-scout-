@@ -109,6 +109,9 @@ DEFAULTS: dict[str, Any] = {
         "learning_min_estimate": 0.35,  # Learning picks: plausible enough to be worth your time
         "trial": False,  # opt-in prospective comparison with the previous ranking (daily switchback)
     },
+    # Discover: categories you chose to hide from its feeds (Browse still lists everything). Only ever set by you:
+    # "already own" judgements never hide a category, they affect pieces like the one you own.
+    "discover": {"hidden_categories": []},
     "currency": {
         "cny_to_gbp": 0.105,
         "rate_source": "default assumption - update in Settings or refresh from ECB",
@@ -294,6 +297,12 @@ def validate_setting(key: str, value: Any) -> list[str]:
                     errors.append(f"other_to_gbp: {cur!r} is not a three-letter currency code")
                 elif not _is_number(rate) or not 0.0001 <= rate <= 10000:
                     errors.append(f"other_to_gbp.{cur} must be between 0.0001 and 10000")
+    if key == "discover" and "hidden_categories" in value:
+        cats = value["hidden_categories"]
+        if not isinstance(cats, list) or not all(isinstance(c, str) and 0 < len(c) <= 40 for c in cats):
+            errors.append("hidden_categories must be a list of category names")
+        elif len(cats) > 100:
+            errors.append("hidden_categories: at most 100")
     if key == "landed_cost" and isinstance(value.get("category_weight_kg"), dict):
         for cat, w in value["category_weight_kg"].items():
             if not _is_number(w) or not 0 <= w <= 50:
