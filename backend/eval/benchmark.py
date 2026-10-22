@@ -48,6 +48,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -282,10 +283,10 @@ def freeze(src: Path, data_dir: Path, name: str = DEFAULT_NAME, *, new_version: 
 
 def _single_file(src: Path, dst: Path) -> None:
     """Copy a database (WAL folded in) to one self-contained file."""
-    with sqlite3.connect(src) as a, sqlite3.connect(dst) as b:
+    with closing(sqlite3.connect(src)) as a, closing(sqlite3.connect(dst)) as b:
         a.backup(b)
-    with sqlite3.connect(dst) as b:
-        b.execute("PRAGMA journal_mode=DELETE")
+    with closing(sqlite3.connect(dst)) as b:
+        b.execute("PRAGMA journal_mode=DELETE")  # one self-contained file; closed so it can be moved (Windows)
     for suffix in ("", "-wal", "-shm"):
         p = Path(str(src) + suffix)
         if p.exists():

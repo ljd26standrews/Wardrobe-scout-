@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 _previous: list[tuple] = []  # the databases the process used before each open_copy, restored by close_copy
@@ -17,8 +18,8 @@ def open_copy(src: Path, tmp: Path):
 
     _previous.append((appdb._engine, appdb._SessionLocal, os.environ.get("WS_DATABASE_URL")))
     copy = tmp / "eval.db"
-    with sqlite3.connect(src.resolve().as_uri() + "?mode=ro", uri=True) as a, sqlite3.connect(copy) as b:
-        a.backup(b)
+    with closing(sqlite3.connect(src.resolve().as_uri() + "?mode=ro", uri=True)) as a, closing(sqlite3.connect(copy)) as b:
+        a.backup(b)  # closed, not just committed: the source must not stay open (Windows locks open files)
     os.environ["WS_DATABASE_URL"] = f"sqlite:///{copy}"
     get_settings.cache_clear()
     from app.db import SessionLocal, init_engine, migrate

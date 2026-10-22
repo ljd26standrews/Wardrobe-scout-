@@ -270,8 +270,9 @@ def download_database():
     src = s.database_url.removeprefix("sqlite:///")
     dst = s.backups_dir / f"wardrobe_scout-{utcnow().strftime('%Y%m%d-%H%M%S')}.db"
     import sqlite3
+    from contextlib import closing
 
-    with sqlite3.connect(src) as a, sqlite3.connect(dst) as b:
+    with closing(sqlite3.connect(src)) as a, closing(sqlite3.connect(dst)) as b:
         a.backup(b)  # consistent snapshot even while the app is running
     return FileResponse(dst, filename=dst.name, media_type="application/octet-stream")
 
