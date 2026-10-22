@@ -78,11 +78,24 @@ class ReasonsIn(BaseModel):
         return v
 
 
+class SavedState(BaseModel):
+    """A saved piece's details, as Undo restores them."""
+
+    list_name: str
+    priority: int | None = None
+    note: str | None = None
+    target_size: str | None = None
+
+
 class SavedPatch(BaseModel):
     list_name: Literal["loved", "liked", "later", "maybe", "wishlist"] | None = None
     priority: int | None = Field(default=None, ge=1, le=3)
     note: str | None = Field(default=None, max_length=2000)
     target_size: str | None = Field(default=None, max_length=20)
+    # Apply only if the piece is still saved exactly like this (an Undo of a move: a newer change is never
+    # overwritten). Not saved at all: null with "expect_set": true.
+    expect: SavedState | None = None
+    expect_set: bool = False
 
 
 class EvidenceIn(BaseModel):

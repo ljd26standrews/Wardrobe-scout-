@@ -53,9 +53,13 @@ def add_judgement(body: JudgementIn, db: Session = Depends(get_db)):
 
 
 @router.delete("/judgements/{judgement_id}")
-def undo_judgement(judgement_id: int, db: Session = Depends(get_db)):
+def undo_judgement(judgement_id: int, product_id: int | None = Query(None), db: Session = Depends(get_db)):
+    """Undo a grade. With ``product_id`` (the graded piece) it is idempotent: a repeat, or an id since given to a
+    newer grade of another piece, changes nothing."""
     j = db.get(Judgement, judgement_id)
-    if j is None:
+    if j is None or (product_id is not None and j.product_id != product_id):
+        if product_id is not None:
+            return {"ok": True, "already_undone": True, "status": ev.status(db)}
         raise HTTPException(404, "judgement not found")
     db.delete(j)
     db.commit()
