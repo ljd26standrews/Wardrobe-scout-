@@ -5,7 +5,7 @@ export const Input = React.forwardRef<HTMLInputElement, React.InputHTMLAttribute
   <input
     ref={ref}
     className={cn(
-      "flex h-10 w-full rounded-lg border border-input bg-card px-3 py-2 text-[15px] md:text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50 file:border-0 file:bg-transparent file:text-sm file:font-medium",
+      "flex h-10 w-full rounded-md border border-input bg-card px-3 py-2 text-[15px] md:text-sm placeholder:text-muted-foreground disabled:opacity-50 file:border-0 file:bg-transparent file:text-sm file:font-medium [@media(pointer:coarse)]:h-11",
       className,
     )}
     {...props}
@@ -17,7 +17,7 @@ export const Textarea = React.forwardRef<HTMLTextAreaElement, React.TextareaHTML
   <textarea
     ref={ref}
     className={cn(
-      "flex min-h-[80px] w-full rounded-lg border border-input bg-card px-3 py-2 text-[15px] md:text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+      "flex min-h-[80px] w-full rounded-md border border-input bg-card px-3 py-2 text-[15px] md:text-sm placeholder:text-muted-foreground",
       className,
     )}
     {...props}
@@ -29,7 +29,7 @@ export const Select = React.forwardRef<HTMLSelectElement, React.SelectHTMLAttrib
   <select
     ref={ref}
     className={cn(
-      "flex h-10 w-full appearance-none rounded-lg border border-input bg-card bg-[length:12px] bg-[right_0.75rem_center] bg-no-repeat px-3 pr-8 text-[15px] md:text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+      "flex h-10 w-full appearance-none rounded-md border border-input bg-card bg-[length:12px] bg-[right_0.75rem_center] bg-no-repeat px-3 pr-8 text-[15px] md:text-sm [@media(pointer:coarse)]:h-11",
       "bg-[url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2 4l4 4 4-4' fill='none' stroke='%23888' stroke-width='1.5'/%3E%3C/svg%3E\")]",
       className,
     )}

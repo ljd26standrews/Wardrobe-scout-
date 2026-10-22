@@ -143,6 +143,58 @@ def test_saving_always_means_you_like_the_look(client, db):
     assert labels.get(new.id) == 1 and legacy.id not in labels
 
 
+def test_reasons_can_follow_a_dislike_and_change_what_it_says(client, db):
+    """Discover records a dislike at once and asks for reasons afterwards. Reasons complete that same decision:
+    "too expensive" turns it from a dislike of the look into a buying reason; reasons fit only a dislike, and only
+    the latest decision about the piece can take them."""
+    from app.services.approval_data import rated_outcomes
+
+    s = _seller(db)
+    p = _product(db, s, "later-reasons", "navy wool overcoat")
+    fid = client.post("/api/feedback", json={"product_id": p.id, "action": "dislike"}).json()["feedback_id"]
+    assert {o.product_id: o.y for o in rated_outcomes(db)}.get(p.id) == 0  # a plain dislike is about the look
+
+    r = client.post(f"/api/feedback/{fid}/reasons", json={"reasons": ["too_expensive"], "note": "over budget"})
+    assert r.status_code == 200 and r.json()["reasons"] == ["too_expensive"]
+    db.expire_all()
+    assert p.id not in {o.product_id: o.y for o in rated_outcomes(db)}  # about buying now, not the look
+
+    assert client.post(f"/api/feedback/{fid}/reasons", json={"reasons": ["not_a_reason"]}).status_code == 422
+    assert client.post(f"/api/feedback/{fid}/reasons", json={"reasons": ["not_now"]}).status_code == 422
+    like = client.post("/api/feedback", json={"product_id": p.id, "action": "like"}).json()["feedback_id"]
+    assert client.post(f"/api/feedback/{like}/reasons", json={"reasons": ["colour"]}).status_code == 422
+    assert client.post(f"/api/feedback/{fid}/reasons", json={"reasons": ["colour"]}).status_code == 409
+    assert client.post("/api/feedback/999999/reasons", json={"reasons": ["colour"]}).status_code == 404
+
+
+def test_removing_a_saved_piece_can_be_undone_exactly(client, db):
+    """Remove is undoable: Undo puts the piece back in its list with its priority and purchase notes, and the
+    approval it carried counts again."""
+    from app.services.approval_data import rated_outcomes
+
+    s = _seller(db)
+    p = _product(db, s, "remove-undo", "navy wool overcoat")
+    notes = {"list_name": "wishlist", "priority": 1, "note": "ask for the chest measurement", "target_size": "M"}
+    assert client.patch(f"/api/saved/{p.id}", json=notes).status_code == 200
+    assert {o.product_id: o.y for o in rated_outcomes(db)}.get(p.id) == 1
+
+    r = client.delete(f"/api/saved/{p.id}")
+    assert r.status_code == 200 and r.json()["feedback_id"]
+    assert all(i["id"] != p.id for i in client.get("/api/saved").json()["items"])
+    db.expire_all()
+    assert p.id not in {o.product_id: o.y for o in rated_outcomes(db)}  # unsaving withdraws the approval
+
+    assert client.delete(f"/api/feedback/{r.json()['feedback_id']}").status_code == 200
+    back = [i["saved"] for i in client.get("/api/saved").json()["items"] if i["id"] == p.id]
+    assert len(back) == 1
+    assert {k: back[0][k] for k in ("list", "priority", "note", "target_size")} == {
+        "list": "wishlist", "priority": 1, "note": "ask for the chest measurement", "target_size": "M"
+    }  # fmt: skip
+    db.expire_all()
+    assert {o.product_id: o.y for o in rated_outcomes(db)}.get(p.id) == 1
+    assert client.delete(f"/api/saved/{p.id + 10_000}").json() == {"ok": True, "feedback_id": None}
+
+
 # ----------------------------------------------------------------- ownership is scoped, category exclusions explicit
 def _world(db, n_each=4):
     """Navy and grey overcoats and navy trousers, with photo vectors."""

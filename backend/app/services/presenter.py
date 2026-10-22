@@ -181,7 +181,14 @@ def product_card(ctx: Context, p: Product, ranked: Ranked | None = None, detail:
         "quality": q,
         "pros": pros,
         "cons": cons,
-        "saved": {"list": saved.list_name, "priority": saved.priority, "note": saved.note} if saved else None,
+        "saved": {
+            "list": saved.list_name,
+            "priority": saved.priority,
+            "note": saved.note,
+            "target_size": saved.target_size,
+        }
+        if saved
+        else None,
     }
     if ranked is not None:
         data["recommendation"] = {

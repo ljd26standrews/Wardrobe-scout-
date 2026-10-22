@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Card, ErrorState, Skeleton } from "@/components/ui/misc";
 import { Field, Input, Textarea } from "@/components/ui/input";
 import { Slider, Switch } from "@/components/ui/switch";
+import { PageHeader } from "@/components/app-shell";
 import { useJobWatcher } from "@/components/job-watcher";
 import { timeAgo, titleCase } from "@/lib/utils";
 
@@ -26,7 +27,7 @@ function Section({ title, description, children, onSave, onReset, dirty }: { tit
     <Card className="p-5 md:p-6">
       <div className="mb-5 flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h2 className="text-2xl">{title}</h2>
+          <h2 className="section-title">{title}</h2>
           {description && <p className="mt-1 max-w-xl text-sm text-muted-foreground">{description}</p>}
         </div>
         <div className="flex gap-2">
@@ -123,10 +124,9 @@ export default function SettingsPage() {
 
   return (
     <div>
-      <p className="label">Configuration</p>
-      <h1 className="page-title mt-2">Settings</h1>
-      <div className="mt-8 grid gap-6">
-        <Section title="Taste profile" description="Your starting preferences. They're a cold-start prior — your actual decisions gradually outweigh them." onSave={taste.save} onReset={taste.reset} dirty={taste.dirty}>
+      <PageHeader title="Settings" description="Your starting preferences, Discover options, exchange rates, photo analysis, schedules and backups." />
+      <div className="grid gap-6">
+        <Section title="Taste profile" description="Your starting preferences. As you make decisions, your decisions count for more than these." onSave={taste.save} onReset={taste.reset} dirty={taste.dirty}>
           <div className="grid gap-4 md:grid-cols-2">
             <Field label="Preferred colours">
               <ListInput value={taste.value.preferred_colours} onChange={(v) => taste.update({ preferred_colours: v })} />
@@ -470,7 +470,6 @@ export default function SettingsPage() {
               <p className="text-muted-foreground">Back up your preferences, decisions, saved lists, wardrobe (with photos), inspiration and evidence.</p>
               <div className="flex flex-wrap gap-2">
                 <Button size="sm" asChild>
-                  {/* eslint-disable-next-line @next/next/no-html-link-for-pages -- file download, not a page */}
                   <a href="/api/backup/export" download>
                     <Download /> Export backup
                   </a>
@@ -498,7 +497,6 @@ export default function SettingsPage() {
                   />
                 </label>
                 <Button size="sm" variant="outline" asChild>
-                  {/* eslint-disable-next-line @next/next/no-html-link-for-pages -- file download, not a page */}
                   <a href="/api/backup/database" download>
                     <Database /> Download database
                   </a>

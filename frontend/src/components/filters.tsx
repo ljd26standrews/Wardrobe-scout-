@@ -3,9 +3,10 @@ import useSWR from "swr";
 import { SlidersHorizontal, X } from "lucide-react";
 import type { Facets } from "@/lib/api";
 import { Button } from "@/components/ui/button";
+import { Chip } from "@/components/ui/chips";
 import { Dialog, DialogContent, DialogTrigger } from "@/components/ui/dialog";
 import { Field, Input, Select } from "@/components/ui/input";
-import { cn, titleCase } from "@/lib/utils";
+import { titleCase } from "@/lib/utils";
 
 export type Filters = {
   q?: string;
@@ -33,13 +34,9 @@ function Chips<T extends string | number>({ options, value, onChange }: { option
       {options.map((o) => {
         const on = value.includes(o.value);
         return (
-          <button
-            key={String(o.value)}
-            onClick={() => onChange(on ? value.filter((x) => x !== o.value) : [...value, o.value])}
-            className={cn("rounded-full border px-3 py-1 text-xs transition-colors", on ? "border-foreground bg-foreground text-background" : "hover:bg-secondary")}
-          >
-            {o.label} <span className="opacity-60">{o.count}</span>
-          </button>
+          <Chip key={String(o.value)} on={on} count={o.count} onClick={() => onChange(on ? value.filter((x) => x !== o.value) : [...value, o.value])}>
+            {o.label}
+          </Chip>
         );
       })}
     </div>

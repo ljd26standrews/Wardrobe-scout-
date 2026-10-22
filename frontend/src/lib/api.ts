@@ -173,6 +173,8 @@ export type Evidence = {
   captured_at: string | null;
   created_by: string;
   scope?: "seller";
+  /** The same source however it was linked (one shop, one review, one forum thread): repeats are grouped, not added up. */
+  source_key?: string | null;
 };
 
 export type ProductImage = {
@@ -439,6 +441,16 @@ export function qs(params: Record<string, string | number | boolean | string[] |
   const s = sp.toString();
   return s ? `?${s}` : "";
 }
+
+/** Saved lists, in the order they are shown. "liked" is shown as Shortlist. */
+export const SAVED_LISTS = [
+  { key: "loved", label: "Loved" },
+  { key: "liked", label: "Shortlist" },
+  { key: "later", label: "Later" },
+  { key: "maybe", label: "Maybe" },
+  { key: "wishlist", label: "Wishlist" },
+] as const;
+export const SAVED_LIST_LABEL: Record<string, string> = Object.fromEntries(SAVED_LISTS.map((l) => [l.key, l.label]));
 
 /** What a rejection reason is about: only "look" reasons say you dislike how it looks (backend approval_data.py). */
 export type ReasonGroup = "look" | "buying" | "quality" | "listing";

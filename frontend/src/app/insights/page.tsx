@@ -7,6 +7,7 @@ import type { Confidence, Gate } from "@/lib/api";
 import { api, hasEstimates } from "@/lib/api";
 import { ConfidenceBadge } from "@/components/product/confidence";
 import { SelectiveInsights } from "@/components/selective-insights";
+import { PageHeader } from "@/components/app-shell";
 import { Card, ErrorState, Meter, Skeleton } from "@/components/ui/misc";
 import { cn, formatPrice, timeAgo, titleCase } from "@/lib/utils";
 
@@ -55,7 +56,7 @@ function Stat({ label, value, sub }: { label: string; value: React.ReactNode; su
   return (
     <Card className="p-4">
       <p className="label">{label}</p>
-      <p className="mt-2 font-serif text-4xl leading-none tabular-nums">{value}</p>
+      <p className="mt-2 text-[28px] font-semibold leading-8 tabular-nums">{value}</p>
       {sub && <p className="mt-2 text-xs text-muted-foreground">{sub}</p>}
     </Card>
   );
@@ -126,17 +127,15 @@ export default function InsightsPage() {
 
   return (
     <div>
-      <p className="label">What the system has learned</p>
-      <h1 className="page-title mt-2">Insights</h1>
-      <p className="mt-3 max-w-2xl text-sm leading-relaxed text-muted-foreground">{data.stage}</p>
+      <PageHeader title="Insights" description={data.stage} />
 
-      <div className="mt-8 grid grid-cols-2 gap-3 md:grid-cols-4">
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
         <Stat label="Learned weight" value={`${Math.round(data.learning_strength * 100)}%`} sub="share of ranking driven by your behaviour" />
         <Stat label="Informative decisions" value={data.decisions.informative} sub={`${data.decisions.positive} positive · ${data.decisions.negative} negative`} />
         <Stat label="Visual examples" value={data.visual_examples.positive + data.visual_examples.negative} sub={`${data.visual_examples.positive} approved · ${data.visual_examples.negative} rejected`} />
         <Stat label="Neutral palette share" value={data.palette_neutral_share == null ? "—" : `${Math.round(data.palette_neutral_share * 100)}%`} sub="of positive colour signal" />
       </div>
-      {!data.embedding.is_clip && data.embedding.note && <p className="mt-4 rounded-xl bg-muted/70 p-3 text-xs leading-relaxed text-muted-foreground">Image model: {data.embedding.image_backend}. {data.embedding.note}</p>}
+      {!data.embedding.is_clip && data.embedding.note && <p className="mt-4 rounded-md bg-muted p-3 text-xs leading-relaxed text-muted-foreground">Image model: {data.embedding.image_backend}. {data.embedding.note}</p>}
       <Card className="mt-4 flex flex-wrap items-center justify-between gap-3 p-4 text-sm" data-testid="evaluate-link">
         <p className="max-w-xl leading-relaxed text-muted-foreground">
           <span className="text-foreground">This page shows what the model believes, not how well it works.</span> To measure that fairly, grade
@@ -147,10 +146,10 @@ export default function InsightsPage() {
         </Link>
       </Card>
 
-      <h2 className="mt-14 text-3xl">Selective recommendation</h2>
+      <h2 className="section-title mt-12">Selective recommendation</h2>
       <SelectiveInsights />
 
-      <h2 className="mt-14 text-3xl">Learned preferences</h2>
+      <h2 className="section-title mt-12">Learned preferences</h2>
       {data.engine === "bayes" && data.model ? (
         <>
           <p className="mt-2 max-w-2xl text-sm leading-relaxed text-muted-foreground">
@@ -275,7 +274,7 @@ export default function InsightsPage() {
 
       {data.top_explained.length === 0 && data.top_gate?.message && (
         <>
-          <h2 className="mt-14 text-3xl">Top picks</h2>
+          <h2 className="section-title mt-12">Top picks</h2>
           <p className="mt-3 max-w-2xl text-sm leading-relaxed text-muted-foreground" data-testid="top-picks-empty">
             {data.top_gate.message}
           </p>
@@ -283,7 +282,7 @@ export default function InsightsPage() {
       )}
       {data.top_explained.length > 0 && (
         <>
-          <h2 className="mt-14 text-3xl">Why the top picks rank highly</h2>
+          <h2 className="section-title mt-12">Why the top picks rank highly</h2>
           {data.top_gate && data.top_gate.state !== "off" && (
             <p className="mt-2 max-w-2xl text-sm text-muted-foreground">
               What Discover recommends now in {data.top_gate.mode_label} mode{hasEstimates(data.top_gate.state) ? "" : " (not yet calibrated: a taste ranking, without approval estimates)"}.
@@ -326,8 +325,8 @@ export default function InsightsPage() {
         </>
       )}
 
-      <h2 className="mt-14 text-3xl">Decision history</h2>
-      <ul className="mt-4 divide-y rounded-2xl border bg-card">
+      <h2 className="section-title mt-12">Decision history</h2>
+      <ul className="mt-4 divide-y rounded-md border bg-card">
         {(history ?? []).map((f) => (
           <li key={f.id} className="flex items-start gap-3 p-3 text-sm">
             <span className={cn("mt-0.5 w-20 shrink-0 text-xs uppercase tracking-label", f.action === "dislike" ? "text-divneg" : f.action === "skip" || f.action === "unsave" ? "text-muted-foreground" : "text-divpos")}>{f.action}</span>

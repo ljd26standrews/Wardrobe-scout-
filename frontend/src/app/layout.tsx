@@ -1,8 +1,5 @@
 import type { Metadata, Viewport } from "next";
 import "@fontsource-variable/inter";
-import "@fontsource/cormorant-garamond/400.css";
-import "@fontsource/cormorant-garamond/500.css";
-import "@fontsource/cormorant-garamond/600.css";
 import "./globals.css";
 import { AppShell } from "@/components/app-shell";
 
@@ -17,8 +14,8 @@ export const viewport: Viewport = {
   initialScale: 1,
   viewportFit: "cover",
   themeColor: [
-    { media: "(prefers-color-scheme: light)", color: "#f6f3ee" },
-    { media: "(prefers-color-scheme: dark)", color: "#131211" },
+    { media: "(prefers-color-scheme: light)", color: "#fcfbf9" },
+    { media: "(prefers-color-scheme: dark)", color: "#131210" },
   ],
 };
 

@@ -65,7 +65,7 @@ function ActiveScan({ job, refresh }: { job: Job; refresh: () => void }) {
     <Card className="p-5" data-testid="scan-panel-active">
       <div className="flex flex-wrap items-center gap-3">
         {paused ? <Pause className="size-4" /> : <Spinner />}
-        <h3 className="font-serif text-2xl">{KIND_LABEL[job.kind] ?? job.kind}</h3>
+        <h3 className="section-title">{KIND_LABEL[job.kind] ?? job.kind}</h3>
         <Badge variant="outline" data-testid="scan-stage">
           {paused ? "paused" : job.control === "cancel" ? "cancelling" : s?.stage ?? job.status}
         </Badge>

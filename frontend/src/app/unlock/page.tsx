@@ -21,10 +21,14 @@ export default function UnlockPage() {
           else setError("Incorrect access code");
         }}
       >
-        <Input type="password" autoFocus value={code} onChange={(e) => setCode(e.target.value)} placeholder="Access code" />
+        <Input type="password" autoFocus aria-label="Access code" value={code} onChange={(e) => setCode(e.target.value)} placeholder="Access code" />
         <Button type="submit">Unlock</Button>
       </form>
-      {error && <p className="mt-3 text-sm text-destructive">{error}</p>}
+      {error && (
+        <p className="mt-3 text-sm text-destructive" role="alert">
+          {error}
+        </p>
+      )}
     </div>
   );
 }

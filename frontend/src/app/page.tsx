@@ -1,77 +1,134 @@
 "use client";
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import useSWR from "swr";
-import { motion } from "framer-motion";
 import { toast } from "sonner";
-import { Bookmark, Clock3, FlaskConical, GitCompareArrows, Heart, Hourglass, LayoutGrid, Rows3, ShieldCheck, ShoppingBag, SkipForward, Store, X } from "lucide-react";
+import { Bookmark, FlaskConical, Heart, Hourglass, LayoutGrid, Maximize2, Rows3, ShieldCheck, SkipForward, Store, Undo2, X } from "lucide-react";
 import type { FeedResponse, Gate, Product, SelectiveMode } from "@/lib/api";
 import { api, hasEstimates, MODE_LABEL, MODES, qs } from "@/lib/api";
+import { PageHeader } from "@/components/app-shell";
 import { Button } from "@/components/ui/button";
-import { EmptyState, ErrorState, Skeleton, Tip } from "@/components/ui/misc";
-import { Input } from "@/components/ui/input";
+import { EmptyState, ErrorState, Skeleton } from "@/components/ui/misc";
 import { FilterSheet, type Filters } from "@/components/filters";
-import { GateStatus } from "@/components/product/confidence";
+import { approx } from "@/components/product/confidence";
 import { Gallery } from "@/components/product/gallery";
-import { ProductCard } from "@/components/product/product-card";
-import { ProductInfo } from "@/components/product/product-detail-body";
-import { RejectDialog } from "@/components/product/reject-dialog";
-import { useFeedback, type ActionName } from "@/components/product/use-feedback";
+import { LandedCost, Price } from "@/components/product/price";
+import { PiecePanel, usePiece } from "@/components/product/side-panel";
+import { ProductTile, type TileAction } from "@/components/product/tile";
+import { unmarkDecided, useDecided, useFeedback, type ActionName } from "@/components/product/use-feedback";
+import { useStoredState } from "@/lib/use-stored-state";
 import { cn, titleCase } from "@/lib/utils";
 
-type Seen = { product: Product; feedId: string | null; position: number };
-
-function useStoredState<T>(key: string, initial: T): [T, (v: T) => void] {
-  const [v, setV] = useState<T>(initial);
-  useEffect(() => {
-    try {
-      const raw = localStorage.getItem(key);
-      if (raw) setV(JSON.parse(raw));
-    } catch {}
-  }, [key]);
-  const set = (nv: T) => {
-    setV(nv);
-    try {
-      localStorage.setItem(key, JSON.stringify(nv));
-    } catch {}
-  };
-  return [v, set];
-}
-
-const ENTER_FROM: Record<string, number> = { love: -40, like: -40, purchased: -40, dislike: 40, skip: 24 };
+type Seen = { feedId: string | null; position: number };
+type View = "card" | "grid"; // "card" is the focused one-at-a-time view
 
 export default function DiscoverPage() {
+  return (
+    <Suspense fallback={<FocusSkeleton />}>
+      <Discover />
+    </Suspense>
+  );
+}
+
+function Discover() {
   const [filters, setFilters] = useStoredState<Filters>("ws-filters", {});
-  const [mode, setMode] = useStoredState<"card" | "grid">("ws-discover-mode", "card");
-  const [hidden, setHidden] = useState<Set<number>>(new Set());
-  // The card on screen stays put while the ranking behind it is refreshed after each decision.
-  const [pinned, setPinned] = useState<number | null>(null);
-  const seen = useRef(new Map<number, Seen>());
-  const logged = useRef(new Set<string>());
-  const [rejecting, setRejecting] = useState<Product | null>(null);
-  const [lastAction, setLastAction] = useState<string>("skip");
-  // Selective recommendation: the mode is a saved setting, so the server and every page agree on it.
+  const [view, setView] = useStoredState<View>("ws-discover-mode", "card");
+  const [tab, setTab] = useStoredState<"foryou" | "learning">("ws-discover-tab", "foryou");
+  // The selectivity mode is a saved setting, so the server and every page agree on it.
   const { data: settings, mutate: mutateSettings } = useSWR<Record<string, any>>("/api/settings"); // eslint-disable-line @typescript-eslint/no-explicit-any
   const selective = settings?.selective as { enabled: boolean; mode: SelectiveMode } | undefined;
-  const [tab, setTab] = useStoredState<"foryou" | "learning">("ws-discover-tab", "foryou");
   const learning = !!selective?.enabled && tab === "learning";
-  // The mode is part of the request (and so of the cache key): one mode's pieces can never be served from another's cache.
+  // The mode is part of the request (and of the cache key): one mode's pieces are never served from another's cache.
   const url = settings ? `/api/feed${learning ? "/learning" : ""}${qs({ limit: 24, mode: selective?.enabled ? selective.mode : undefined, ...filters })}` : null;
-  const { data, error, isLoading, mutate } = useSWR<FeedResponse>(url);
+  const { data, error, isLoading, mutate } = useSWR<FeedResponse>(url, { keepPreviousData: true });
+  const decided = useDecided();
+  const { open: openPiece } = usePiece();
+  // The server's gate is the truth: if selective recommendation was switched on or off elsewhere (another tab,
+  // Settings), re-read the setting so the controls shown match, and a mode click cannot switch it back.
+  const serverOff = data ? data.gate.state === "off" : undefined;
+  useEffect(() => {
+    if (serverOff !== undefined && selective && serverOff === selective.enabled) mutateSettings();
+  }, [serverOff, selective, mutateSettings]);
+  const seen = useRef(new Map<number, Seen>());
+  const logged = useRef(new Set<string>());
+
+  // Pieces you decided on this session never come back from a response fetched before the decision.
+  const items = useMemo(() => {
+    data?.items.forEach((p, i) => seen.current.set(p.id, { feedId: data.feed_id, position: i }));
+    return (data?.items ?? []).filter((p) => !decided.has(p.id));
+  }, [data, decided]);
+
+  // The focused piece stays put while the ranking behind it refreshes, as long as the latest response still has it.
+  const [pinned, setPinned] = useState<number | null>(null);
   const queue = useMemo(() => {
-    data?.items.forEach((p, i) => seen.current.set(p.id, { product: p, feedId: data.feed_id, position: i }));
-    const items = (data?.items ?? []).filter((p) => !hidden.has(p.id));
-    // The card on screen stays put across re-ranking only while the latest response still includes it: a piece
-    // the gate no longer passes is never kept on screen from an older response.
     const pin = pinned != null ? items.find((p) => p.id === pinned) : undefined;
     return pin ? [pin, ...items.filter((p) => p.id !== pin.id)] : items;
-  }, [data, hidden, pinned]);
+  }, [items, pinned]);
   const current = queue[0];
-
   useEffect(() => {
-    setHidden(new Set());
-    setPinned(null);
-  }, [url]);
+    if (current && current.id !== pinned) setPinned(current.id);
+  }, [current, pinned]);
+
+  // Impressions: what was actually displayed, from which feed and position (for a fair evaluation later).
+  const logViews = useCallback((feedId: string | null, surface: string, shown: { product_id: number; position: number }[]) => {
+    const fresh = shown.filter((it) => !logged.current.has(`${feedId}:${surface}:${it.product_id}`));
+    if (!feedId || !fresh.length) return;
+    fresh.forEach((it) => logged.current.add(`${feedId}:${surface}:${it.product_id}`));
+    api.post(`/api/feed/${feedId}/viewed`, { surface, items: fresh }).catch(() => {});
+  }, []);
+  useEffect(() => {
+    if (view !== "card" || !current) return;
+    const s = seen.current.get(current.id);
+    if (s) logViews(s.feedId, "card", [{ product_id: current.id, position: s.position }]);
+  }, [view, current, logViews]);
+  useEffect(() => {
+    if (view !== "grid" || !data?.feed_id) return;
+    logViews(data.feed_id, "grid", items.map((p) => ({ product_id: p.id, position: seen.current.get(p.id)?.position ?? 0 })));
+  }, [view, data?.feed_id, items, logViews]);
+
+  const last = useRef<{ feedbackId: number; productId: number } | null>(null);
+  const [canUndo, setCanUndo] = useState(false);
+  const restore = useCallback(
+    async (productId: number) => {
+      setPinned(productId);
+      const fresh = await mutate();
+      if (fresh && !fresh.items.some((p) => p.id === productId)) {
+        toast("It's undecided again, but not in this feed", { description: learning ? "It isn't among today's learning picks." : `It doesn't currently pass ${MODE_LABEL[fresh.gate.mode]}.` });
+      }
+    },
+    [mutate, learning],
+  );
+  const feedback = useFeedback({ onDone: () => mutate(), onUndo: restore, hide: true });
+  const act = useCallback(
+    async (p: Product, action: ActionName) => {
+      const s = seen.current.get(p.id);
+      try {
+        const res = await feedback(p.id, action, [], undefined, { explore: !!p.recommendation?.explore, surface: view, feed_id: s?.feedId ?? null, position: s?.position ?? null }, p.title);
+        if (action !== "skip") {
+          last.current = { feedbackId: res.feedback_id, productId: p.id };
+          setCanUndo(true);
+        }
+      } catch {
+        /* rolled back by useFeedback: the piece is shown again and an error says so */
+      }
+    },
+    [feedback, view],
+  );
+  const undoLast = useCallback(async () => {
+    const l = last.current;
+    if (!l) return;
+    last.current = null;
+    setCanUndo(false);
+    try {
+      await api.del(`/api/feedback/${l.feedbackId}`);
+      unmarkDecided(l.productId);
+      toast("Undone");
+      restore(l.productId);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Could not undo");
+    }
+  }, [restore]);
+
   const chooseMode = useCallback(
     async (m: SelectiveMode) => {
       if (!settings || !selective || m === selective.mode) return;
@@ -80,149 +137,61 @@ export default function DiscoverPage() {
       try {
         await api.put("/api/settings/selective", next);
       } catch (e) {
-        toast.error(e instanceof Error ? e.message : "Could not change the mode");
+        toast.error(e instanceof Error ? e.message : "Could not change how selective Discover is");
       }
       mutateSettings();
     },
     [settings, selective, mutateSettings],
   );
-  // An undone piece is waiting to come back from the server: keep its pin until the fresh response arrives.
-  const restoring = useRef<number | null>(null);
-  useEffect(() => {
-    if (restoring.current == null && current && current.id !== pinned) setPinned(current.id);
-  }, [current, pinned]);
 
-  // Impression log: what was actually displayed, from which feed and position (for honest evaluation later).
-  const logViews = useCallback((feedId: string | null, surface: string, items: { product_id: number; position: number }[]) => {
-    const fresh = items.filter((it) => !logged.current.has(`${feedId}:${surface}:${it.product_id}`));
-    if (!feedId || !fresh.length) return;
-    fresh.forEach((it) => logged.current.add(`${feedId}:${surface}:${it.product_id}`));
-    api.post(`/api/feed/${feedId}/viewed`, { surface, items: fresh }).catch(() => {});
-  }, []);
+  // Keyboard (focused view): L love · S like · W not now · D dislike · → or N skip · Enter details · Z undo
   useEffect(() => {
-    if (mode !== "card" || !current) return;
-    const s = seen.current.get(current.id);
-    if (s) logViews(s.feedId, "card", [{ product_id: current.id, position: s.position }]);
-  }, [mode, current, logViews]);
-  useEffect(() => {
-    if (mode !== "grid" || !data?.feed_id) return;
-    const shown = data.items.map((p, position) => ({ product_id: p.id, position })).filter((it) => !hidden.has(it.product_id));
-    logViews(data.feed_id, "grid", shown);
-  }, [mode, data, hidden, logViews]);
-
-  const restore = useCallback(
-    async (productId: number) => {
-      setHidden((h) => {
-        const n = new Set(h);
-        n.delete(productId);
-        return n;
-      });
-      setPinned(productId);
-      restoring.current = productId;
-      let fresh: FeedResponse | undefined;
-      try {
-        fresh = await mutate();
-      } finally {
-        restoring.current = null;
-      }
-      if (fresh?.items.some((p) => p.id === productId)) setPinned(productId);
-      else if (fresh) {
-        toast("It's undecided again, but not in this feed", {
-          description: learning ? "It isn't among today's learning picks." : `It doesn't currently pass ${MODE_LABEL[fresh.gate.mode]}.`,
-        });
-      }
-    },
-    [mutate, learning],
-  );
-  const feedback = useFeedback(undefined, restore);
-  const act = useCallback(
-    async (p: Product, action: ActionName, reasons: string[] = [], note?: string) => {
-      setLastAction(action);
-      setHidden((h) => new Set(h).add(p.id));
-      const s = seen.current.get(p.id);
-      try {
-        await feedback(p.id, action, reasons, note, {
-          explore: !!p.recommendation?.explore,
-          surface: mode,
-          feed_id: s?.feedId ?? null,
-          position: s?.position ?? null,
-        });
-        mutate(); // re-rank the rest of the queue with this decision included
-      } catch {
-        setHidden((h) => {
-          const n = new Set(h);
-          n.delete(p.id);
-          return n;
-        });
-      }
-    },
-    [feedback, mode, mutate],
-  );
-
-  // Keyboard shortcuts (card mode)
-  useEffect(() => {
-    if (mode !== "card") return;
+    if (view !== "card") return;
     const onKey = (e: KeyboardEvent) => {
-      if (!current || rejecting || (e.target as HTMLElement)?.closest("input,textarea,select,[role=dialog]")) return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      if ((e.target as HTMLElement)?.closest("input,textarea,select,[role=dialog],[role=group]")) return;
       const k = e.key.toLowerCase();
-      if (k === "l") act(current, "love");
-      else if (k === "s") act(current, "like");
-      else if (k === "w") act(current, "like_later");
-      else if (k === "m") act(current, "maybe");
-      else if (k === "d" || k === "x") setRejecting(current);
-      else if (k === "arrowright" || k === "n") act(current, "skip");
-      else if (k === "c") window.location.href = `/compare?id=${current.id}`;
+      if (k === "z") {
+        undoLast();
+        e.preventDefault();
+        return;
+      }
+      if (!current) return;
+      const map: Record<string, ActionName> = { l: "love", s: "like", w: "like_later", d: "dislike", x: "dislike", n: "skip", arrowright: "skip" };
+      if (map[k]) act(current, map[k]);
+      else if (k === "enter") openPiece(current);
       else return;
       e.preventDefault();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [mode, current, act, rejecting]);
+  }, [view, current, act, undoLast, openPiece]);
+
+  const tileAction = (p: Product, a: TileAction) => act(p, a);
 
   return (
     <div>
-      <div className="mb-6 flex flex-wrap items-end justify-between gap-4 md:mb-8">
-        <div>
-          <p className="label">Today&apos;s selection</p>
-          <h1 className="page-title mt-2">Discover</h1>
-          {data?.gate?.trial === "ranked" && (
-            <p className="mt-2 max-w-2xl text-sm text-muted-foreground" data-testid="gate-status">
-              {data.gate.message}
-            </p>
-          )}
-          {data && data.gate?.state !== "off" && data.gate?.trial !== "ranked" && <GateStatus gate={data.gate} total={data.total_candidates} />}
-          {data?.hidden && (
-            <p className="mt-1 text-sm text-muted-foreground" data-testid="hidden-categories-note">
-              Hidden by you: {data.hidden.categories.map(titleCase).join(", ")} ({data.hidden.pieces} pieces).{" "}
-              <Link href="/settings" className="underline underline-offset-2">
-                Change in Settings
-              </Link>
-            </p>
-          )}
-          {data && data.gate?.state === "off" && (
-            <p className="mt-2 text-sm text-muted-foreground">
-              {data.total_candidates} undecided pieces ·{" "}
-              {data.decisions === 0 ? "cold start (ranking on your written preferences)" : `learning from ${data.decisions} decisions (${Math.round(data.learning_strength * 100)}% learned weight)`}
-            </p>
-          )}
-        </div>
-        <div className="flex w-full items-center gap-2 sm:w-auto">
-          <Input placeholder="Search…" className="h-8 flex-1 rounded-full sm:w-48" value={filters.q ?? ""} onChange={(e) => setFilters({ ...filters, q: e.target.value || undefined })} />
-          <FilterSheet filters={filters} onChange={setFilters} />
-          <div className="flex rounded-full border p-0.5">
-            <button aria-label="Card view" onClick={() => setMode("card")} className={cn("rounded-full p-1.5", mode === "card" && "bg-secondary")}>
-              <Rows3 className="size-4" />
-            </button>
-            <button aria-label="Grid view" onClick={() => setMode("grid")} className={cn("rounded-full p-1.5", mode === "grid" && "bg-secondary")}>
-              <LayoutGrid className="size-4" />
-            </button>
-          </div>
-        </div>
-      </div>
+      <PageHeader
+        title="Discover"
+        description={data ? <FeedStatus data={data} learning={learning} filtered={Object.keys(filters).length > 0} /> : "Pieces chosen for your taste."}
+        actions={
+          <>
+            <FilterSheet filters={filters} onChange={setFilters} />
+            <div className="flex rounded-md border border-input p-0.5" role="radiogroup" aria-label="View">
+              <ViewButton on={view === "card"} label="One at a time" onClick={() => setView("card")}>
+                <Rows3 />
+              </ViewButton>
+              <ViewButton on={view === "grid"} label="Grid" onClick={() => setView("grid")}>
+                <LayoutGrid />
+              </ViewButton>
+            </div>
+          </>
+        }
+      />
 
       {selective?.enabled && (
         <div className="mb-6 flex flex-wrap items-center justify-between gap-3 border-b">
-          <div className="-mb-px flex gap-1" role="tablist" aria-label="Feed">
+          <div className="-mb-px flex" role="tablist" aria-label="Feed">
             {(
               [
                 ["foryou", "For you", ShieldCheck],
@@ -236,216 +205,292 @@ export default function DiscoverPage() {
                 data-testid={`tab-${key}`}
                 onClick={() => setTab(key)}
                 className={cn(
-                  "inline-flex items-center gap-1.5 whitespace-nowrap border-b-2 border-transparent px-3 pb-2.5 pt-1 text-sm text-muted-foreground transition-colors hover:text-foreground",
-                  tab === key && "border-foreground text-foreground",
+                  "-mb-px inline-flex min-h-11 items-center gap-1.5 border-b-2 border-transparent px-3 text-sm font-medium text-muted-foreground hover:text-foreground",
+                  tab === key && "border-primary text-foreground",
                 )}
               >
-                <Icon className="size-4" strokeWidth={1.6} /> {label}
+                <Icon className="size-4" strokeWidth={1.75} /> {label}
               </button>
             ))}
+            <Link href="/browse" className="inline-flex min-h-11 items-center px-3 text-sm text-muted-foreground hover:text-foreground">
+              Browse all
+            </Link>
           </div>
-          <div className="mb-2 flex rounded-full border p-0.5 text-xs" role="radiogroup" aria-label="How selective">
-            {MODES.map((m) => (
-              <button
-                key={m}
-                role="radio"
-                aria-checked={selective.mode === m}
-                data-testid={`mode-${m}`}
-                onClick={() => chooseMode(m)}
-                className={cn("rounded-full px-3 py-1.5 transition-colors", selective.mode === m ? "bg-foreground text-background" : "text-muted-foreground hover:text-foreground")}
-              >
-                {MODE_LABEL[m]}
-              </button>
-            ))}
-          </div>
+          {!learning && (
+            <div className="mb-2 flex rounded-md border border-input p-0.5 text-[13px]" role="radiogroup" aria-label="How selective">
+              {MODES.map((m) => (
+                <button
+                  key={m}
+                  role="radio"
+                  aria-checked={selective.mode === m}
+                  data-testid={`mode-${m}`}
+                  onClick={() => chooseMode(m)}
+                  className={cn("min-h-9 rounded-[5px] px-2.5 font-medium [@media(pointer:coarse)]:min-h-11", selective.mode === m ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground")}
+                >
+                  {MODE_LABEL[m]}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
-      )}
-      {learning && !!data?.items.length && (
-        <p className="mb-6 max-w-2xl text-sm leading-relaxed text-muted-foreground" data-testid="learning-note">
-          Pieces the model is unsure about. They&apos;re not recommendations and never appear in For you; how you rate them teaches the model the most.
-        </p>
       )}
 
       {error ? (
         <ErrorState error={error} retry={() => mutate()} />
       ) : isLoading || !data ? (
-        <div className="grid grid-cols-[minmax(0,1fr)] gap-8 md:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)]">
-          <Skeleton className="aspect-[4/5] w-full rounded-2xl" />
-          <div className="space-y-4">
-            <Skeleton className="h-4 w-32" />
-            <Skeleton className="h-10 w-3/4" />
-            <Skeleton className="h-6 w-40" />
-            <Skeleton className="h-40 w-full" />
-          </div>
-        </div>
-      ) : !current && data.gate && data.gate.state !== "off" && data.total_candidates > 0 ? (
-        <GateEmpty gate={data.gate} learning={learning} onMode={chooseMode} onLearning={() => setTab("learning")} />
-      ) : !current ? (
-        <EmptyState
-          icon={<Store />}
-          title={data?.total_candidates === 0 && !Object.keys(filters).length ? "No collected products yet" : "You're all caught up"}
-          action={
-            <>
-              <Button asChild>
-                <Link href="/sellers">Scan sellers or import</Link>
-              </Button>
-              {Object.keys(filters).length > 0 && (
-                <Button variant="outline" onClick={() => setFilters({})}>
-                  Clear filters
-                </Button>
-              )}
-            </>
-          }
-        >
-          {data?.total_candidates === 0
-            ? "Wardrobe Scout only shows real listings it has collected. Run a seller scan, paste a product link, use the browser bookmarklet, or import a CSV to get started. Seed examples from your notes live in Saved."
-            : "Nothing left matching these filters. New arrivals appear after the next catalogue refresh."}
-        </EmptyState>
-      ) : mode === "grid" ? (
-        <div className="grid grid-cols-2 gap-x-4 gap-y-10 md:grid-cols-3 xl:grid-cols-4">
-          {queue.map((p) => (
-            <ProductCard
-              key={p.id}
-              product={p}
-              footer={
-                <div className="flex gap-1">
-                  <Button size="sm" variant="outline" aria-label="Love" onClick={() => act(p, "love")}>
-                    <Heart />
-                  </Button>
-                  <Button size="sm" variant="outline" aria-label="Save" onClick={() => act(p, "like")}>
-                    <Bookmark />
-                  </Button>
-                  <Button size="sm" variant="outline" aria-label="Maybe" onClick={() => act(p, "maybe")}>
-                    <Clock3 />
-                  </Button>
-                  <Button size="sm" variant="outline" aria-label="Dislike" onClick={() => setRejecting(p)}>
-                    <X />
-                  </Button>
-                </div>
-              }
-            />
+        view === "grid" ? <GridSkeleton /> : <FocusSkeleton />
+      ) : !items.length ? (
+        <FeedEmpty data={data} learning={learning} filtered={Object.keys(filters).length > 0} onClear={() => setFilters({})} onMode={chooseMode} onLearning={() => setTab("learning")} />
+      ) : view === "grid" ? (
+        <div className="grid grid-cols-2 gap-x-4 gap-y-8 sm:grid-cols-3 lg:grid-cols-4 2xl:grid-cols-5" data-testid="discover-grid">
+          {items.map((p) => (
+            <ProductTile key={p.id} product={p} onOpen={openPiece} onAction={tileAction} />
           ))}
         </div>
       ) : (
-        // Each decision brings the next piece in from the side matching the gesture (no exit phase, so
-        // rapid decisions never leave overlapping cards behind).
-        <motion.div
-            key={current.id}
-            initial={{ opacity: 0, x: ENTER_FROM[lastAction] ?? 0, y: ENTER_FROM[lastAction] ? 0 : 12 }}
-            animate={{ opacity: 1, x: 0, y: 0 }}
-            transition={{ type: "spring", stiffness: 300, damping: 32 }}
-            className="grid grid-cols-[minmax(0,1fr)] gap-6 md:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)] md:gap-12"
-            data-testid="discover-card"
-          >
-            <div className="md:sticky md:top-24 md:self-start">
-              <Gallery product={current} />
-              {current.recommendation?.explore && (
-                <p className="mt-3 text-xs text-muted-foreground">
-                  {current.confidence?.learning
-                    ? "Learning pick — the model is unsure about pieces like this; your reaction teaches it the most."
-                    : "Exploration pick — about 1 in 6 suggestions deliberately test something new."}
-                </p>
-              )}
-            </div>
-            <div className="pb-24 md:pb-6">
-              <ProductInfo product={current} inFeed />
-            </div>
-          </motion.div>
+        current && <Focus product={current} onAct={act} onOpen={() => openPiece(current)} onUndo={canUndo ? undoLast : undefined} />
       )}
-
-      {mode === "card" && current && (
-        <div className="fixed inset-x-0 bottom-[calc(env(safe-area-inset-bottom)+4.2rem)] z-30 px-3 lg:bottom-6">
-          <div className="mx-auto flex max-w-xl items-center justify-between gap-1 rounded-full border bg-background/90 p-1.5 shadow-xl backdrop-blur-md">
-            <ActionBtn label="Dislike (D)" testid="action-dislike" onClick={() => setRejecting(current)} className="text-destructive">
-              <X />
-            </ActionBtn>
-            <ActionBtn label="Skip (→)" testid="action-skip" onClick={() => act(current, "skip")}>
-              <SkipForward />
-            </ActionBtn>
-            <ActionBtn label="Maybe (M)" testid="action-maybe" onClick={() => act(current, "maybe")}>
-              <Clock3 />
-            </ActionBtn>
-            <ActionBtn label="Like the look, not now (W)" testid="action-later" onClick={() => act(current, "like_later")}>
-              <Hourglass />
-            </ActionBtn>
-            <ActionBtn label="Save (S)" testid="action-like" onClick={() => act(current, "like")}>
-              <Bookmark />
-            </ActionBtn>
-            <ActionBtn label="Love (L)" testid="action-love" big onClick={() => act(current, "love")} className="bg-foreground text-background hover:bg-foreground/90">
-              <Heart />
-            </ActionBtn>
-            <ActionBtn label="Compare (C)" testid="action-compare" onClick={() => (window.location.href = `/compare?id=${current.id}`)}>
-              <GitCompareArrows />
-            </ActionBtn>
-            <ActionBtn label="Purchased" testid="action-purchased" className="max-sm:hidden" onClick={() => act(current, "purchased")}>
-              <ShoppingBag />
-            </ActionBtn>
-          </div>
-        </div>
-      )}
-
-      <RejectDialog
-        open={!!rejecting}
-        title={rejecting?.title}
-        onOpenChange={(o) => !o && setRejecting(null)}
-        onSubmit={(reasons, note) => {
-          const p = rejecting!;
-          setRejecting(null);
-          act(p, "dislike", reasons, note);
-        }}
-      />
+      <PiecePanel onChanged={() => mutate()} />
     </div>
   );
 }
 
-/** Why a selective feed is empty, and what you can do: never a quietly relaxed threshold. */
-function GateEmpty({ gate, learning, onMode, onLearning }: { gate: Gate; learning: boolean; onMode: (m: SelectiveMode) => void; onLearning: () => void }) {
-  const others = MODES.filter((m) => m !== gate.mode && (gate.qualified?.[m] ?? 0) > 0);
+function ViewButton({ on, label, onClick, children }: { on: boolean; label: string; onClick: () => void; children: React.ReactNode }) {
+  return (
+    <button
+      role="radio"
+      aria-checked={on}
+      aria-label={label}
+      title={label}
+      onClick={onClick}
+      className={cn("inline-flex size-9 items-center justify-center rounded-[5px] [@media(pointer:coarse)]:size-11 [&_svg]:size-4", on ? "bg-secondary text-foreground" : "text-muted-foreground hover:text-foreground")}
+    >
+      {children}
+    </button>
+  );
+}
+
+/** One piece at a time: its photos large, its essentials, and the decisions. */
+function Focus({ product: p, onAct, onOpen, onUndo }: { product: Product; onAct: (p: Product, a: ActionName) => void; onOpen: () => void; onUndo?: () => void }) {
+  const reasons = p.recommendation?.reasons.slice(0, 3) ?? [];
+  return (
+    <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_380px] lg:gap-10" data-testid="discover-card" data-product-id={p.id}>
+      <Gallery product={p} className="mx-auto w-full max-w-[640px] lg:max-w-none" />
+      <div className="min-w-0 pb-28 lg:pb-0">
+        <p className="meta">{[p.seller?.name ?? "Unknown seller", p.category && titleCase(p.category)].filter(Boolean).join(" · ")}</p>
+        <h2 className="mt-1 text-xl font-semibold leading-7 tracking-tight" data-testid="product-title">
+          {p.title}
+        </h2>
+        <div className="mt-2 space-y-1">
+          <Price product={p} size="lg" />
+          <div>
+            <LandedCost product={p} />
+          </div>
+        </div>
+        {(p.confidence?.estimate != null || p.confidence?.learning || reasons.length > 0) && (
+          <div className="mt-5 border-t pt-4">
+            <p className="text-sm font-medium">{p.confidence?.learning || p.recommendation?.explore ? "A learning pick" : "Why it's suggested"}</p>
+            {p.confidence?.estimate != null && (
+              <p className="meta mt-1" data-testid="approval-estimate">
+                Estimated chance you&apos;ll like the look: {approx(p.confidence.estimate)}
+              </p>
+            )}
+            {p.confidence?.learning && <p className="meta mt-1">The app is unsure about pieces like this; how you react teaches it the most. Not a recommendation.</p>}
+            <ul className="mt-2 space-y-1 text-sm leading-relaxed text-muted-foreground">
+              {reasons.map((r) => (
+                <li key={r}>{r}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+        <Button variant="link" className="mt-3 h-auto" onClick={onOpen} data-testid="open-details">
+          <Maximize2 /> Sizing, evidence and offers
+        </Button>
+        <ActionBar product={p} onAct={onAct} onUndo={onUndo} />
+      </div>
+    </div>
+  );
+}
+
+/** The decisions for the focused piece: beside the details on desktop, fixed above the tabs on phones. */
+function ActionBar({ product, onAct, onUndo }: { product: Product; onAct: (p: Product, a: ActionName) => void; onUndo?: () => void }) {
+  const b = (a: ActionName, label: string, key: string, icon: React.ReactNode, testid: string, primary?: boolean) => (
+    <button
+      type="button"
+      onClick={() => onAct(product, a)}
+      data-testid={testid}
+      aria-keyshortcuts={key === "→" ? "ArrowRight" : key}
+      className={cn(
+        "inline-flex min-h-12 flex-1 flex-col items-center justify-center gap-0.5 rounded-md px-2 text-xs font-medium [&_svg]:size-5 lg:min-h-11 lg:flex-row lg:justify-start lg:gap-3 lg:px-3 lg:text-sm",
+        primary ? "bg-primary text-primary-foreground hover:bg-primary/90" : "border border-input bg-background hover:bg-secondary",
+      )}
+    >
+      {icon}
+      <span>{label}</span>
+      <kbd className="ml-auto hidden text-xs font-normal opacity-70 lg:inline">{key}</kbd>
+    </button>
+  );
+  return (
+    <div className="fixed inset-x-0 bottom-[calc(env(safe-area-inset-bottom)+52px)] z-30 border-t bg-background px-3 py-2 lg:static lg:mt-5 lg:border-0 lg:p-0">
+      <div className="mx-auto flex max-w-xl gap-1.5 lg:max-w-none lg:flex-col lg:gap-2">
+        {onUndo && (
+          <button
+            type="button"
+            onClick={onUndo}
+            className="inline-flex min-h-12 flex-1 flex-col items-center justify-center gap-0.5 rounded-md px-2 text-xs font-medium text-muted-foreground hover:bg-secondary lg:hidden [&_svg]:size-5"
+            data-testid="undo-last-mobile"
+          >
+            <Undo2 />
+            <span>Undo</span>
+          </button>
+        )}
+        {b("dislike", "Dislike", "D", <X />, "action-dislike")}
+        {b("skip", "Skip", "→", <SkipForward />, "action-skip")}
+        {b("like_later", "Not now", "W", <Hourglass />, "action-later")}
+        {b("like", "Like", "S", <Bookmark />, "action-like")}
+        {b("love", "Love", "L", <Heart />, "action-love", true)}
+      </div>
+      {onUndo && (
+        <button type="button" onClick={onUndo} className="mt-2 hidden min-h-10 items-center gap-2 rounded-md px-3 text-sm text-muted-foreground hover:bg-secondary hover:text-foreground lg:inline-flex" data-testid="undo-last">
+          <Undo2 className="size-4" /> Undo last <kbd className="text-xs opacity-70">Z</kbd>
+        </button>
+      )}
+    </div>
+  );
+}
+
+/** What this feed is, in plain words. */
+function FeedStatus({ data, learning, filtered }: { data: FeedResponse; learning: boolean; filtered: boolean }) {
+  const g = data.gate;
+  const count = data.items.length;
+  let text: string;
+  if (g.trial === "ranked") text = g.message ?? "Trial day: the earlier ranking is shown today.";
+  else if (g.state === "off") text = `${data.total_candidates} pieces you haven't decided on, ranked for your taste.`;
+  else if (learning) text = "Pieces the app is unsure about. Not recommendations: how you react teaches it the most.";
+  else if (hasEstimates(g.state))
+    text = `${count} piece${count === 1 ? "" : "s"} likely enough to suit your taste for ${g.mode_label}${g.state === "stale" ? " (being updated with your newest decisions)" : ""}.`;
+  else if (g.state === "pending") text = "Updating match estimates from your decisions. Meanwhile, this is your taste ranking.";
+  else if (g.state === "failed") text = "Match estimates couldn't be updated and will be retried shortly. Meanwhile, this is your taste ranking.";
+  else if (g.state === "unavailable") text = "Match estimates are unavailable right now. This is your taste ranking.";
+  else {
+    const p = g.progress;
+    const more = p ? Math.max(0, p.needed - p.labels) : 0;
+    text = `Your taste ranking.${more ? ` After ${more} more likes or dislikes, Discover can show how likely each piece is to suit you.` : ""}`;
+  }
+  return (
+    <span data-testid="gate-status">
+      {text}
+      {data.hidden && (
+        <span className="mt-0.5 block" data-testid="hidden-categories-note">
+          Hidden by you: {data.hidden.categories.map(titleCase).join(", ")} ({data.hidden.pieces} pieces) ·{" "}
+          <Link href="/settings" className="text-primary underline-offset-4 hover:underline">
+            change
+          </Link>
+        </span>
+      )}
+      {data.price_filter?.unknown_currency_left_out ? (
+        <span className="mt-0.5 block">{data.price_filter.unknown_currency_left_out} pieces priced in an unknown currency are left out of your price filter.</span>
+      ) : null}
+      {filtered && <span className="mt-0.5 block">Filters are on.</span>}
+    </span>
+  );
+}
+
+/** Why there is nothing to show, and what helps. Never filler. */
+function FeedEmpty({ data, learning, filtered, onClear, onMode, onLearning }: { data: FeedResponse; learning: boolean; filtered: boolean; onClear: () => void; onMode: (m: SelectiveMode) => void; onLearning: () => void }) {
+  const g: Gate = data.gate;
+  if (data.total_candidates === 0 && !filtered) {
+    return (
+      <EmptyState
+        icon={<Store />}
+        title="Nothing to discover yet"
+        action={
+          <Button asChild>
+            <Link href="/sellers">Add a seller or import a listing</Link>
+          </Button>
+        }
+      >
+        Discover shows pieces from the sellers you scan. Nothing has been collected yet, or you have decided on everything.
+      </EmptyState>
+    );
+  }
+  const others = MODES.filter((m) => m !== g.mode && (g.qualified?.[m] ?? 0) > 0);
+  const strict = !learning && g.state !== "off" && g.mode !== "balanced";
   const title = learning
     ? "No learning picks right now"
-    : hasEstimates(gate.state)
-      ? "No sufficiently strong matches right now"
-      : gate.mode === "balanced"
-        ? "Nothing to show yet"
-        : `Nothing can be shown as ${gate.mode_label.toLowerCase()} yet`;
+    : filtered
+      ? "Nothing here matches your filters"
+      : strict
+        ? hasEstimates(g.state)
+          ? `No pieces pass ${g.mode_label} right now`
+          : `${g.mode_label} needs match estimates first`
+        : "You've seen everything here";
   return (
-    <EmptyState icon={learning ? <FlaskConical /> : <ShieldCheck />} title={title}
+    <EmptyState
+      icon={learning ? <FlaskConical /> : <ShieldCheck />}
+      title={title}
       action={
         <>
+          {filtered && (
+            <Button variant="outline" onClick={onClear}>
+              Clear filters
+            </Button>
+          )}
           {others.map((m) => (
             <Button key={m} variant="outline" onClick={() => onMode(m)} data-testid={`switch-${m}`}>
-              {MODE_LABEL[m]} ({gate.qualified?.[m]})
+              {MODE_LABEL[m]} ({g.qualified?.[m]})
             </Button>
           ))}
-          {!learning && gate.state !== "unavailable" && (
-            <Button variant={others.length ? "ghost" : "outline"} onClick={onLearning}>
+          {!learning && g.state !== "off" && g.state !== "unavailable" && (
+            <Button variant="outline" onClick={onLearning}>
               <FlaskConical /> Learning picks
             </Button>
           )}
+          <Button variant="ghost" asChild>
+            <Link href="/browse">Browse all</Link>
+          </Button>
         </>
       }
     >
-      <span data-testid="gate-message">{gate.message}</span>
-      {!learning && hasEstimates(gate.state) && <span className="mt-2 block">The bar is never lowered to fill this feed; it fills as the model becomes surer of your taste.</span>}
+      <span data-testid="gate-message">
+        {strict && !hasEstimates(g.state)
+          ? "It shows only pieces the app is confident you'll like, and it needs more of your likes and dislikes to judge that. Balanced shows your taste ranking meanwhile."
+          : strict
+            ? "The bar is never lowered to fill this feed. It fills as the app learns your taste."
+            : learning
+              ? "There are no uncertain pieces to learn from at the moment."
+              : "Everything that fits has been decided. New pieces appear after the next scan."}
+        {g.state === "stale" && " Estimates are being updated with your newest decisions."}
+        {g.withdrawn && ` Earlier estimates were withdrawn: ${g.withdrawn.label}.`}
+      </span>
     </EmptyState>
   );
 }
 
-function ActionBtn({ label, onClick, children, className, big, testid }: { label: string; onClick: () => void; children: React.ReactNode; className?: string; big?: boolean; testid?: string }) {
+function FocusSkeleton() {
   return (
-    <Tip content={label}>
-      <button
-        aria-label={label}
-        data-testid={testid}
-        onClick={onClick}
-        className={cn(
-          "flex items-center justify-center rounded-full transition-all hover:bg-secondary active:scale-90 [&_svg]:stroke-[1.6]",
-          big ? "size-12 sm:size-14 [&_svg]:size-6" : "size-10 sm:size-11 [&_svg]:size-5",
-          className,
-        )}
-      >
-        {children}
-      </button>
-    </Tip>
+    <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_380px] lg:gap-10">
+      <Skeleton className="aspect-[4/5] w-full" />
+      <div className="space-y-3">
+        <Skeleton className="h-4 w-40" />
+        <Skeleton className="h-7 w-3/4" />
+        <Skeleton className="h-6 w-32" />
+        <Skeleton className="h-48 w-full" />
+      </div>
+    </div>
+  );
+}
+
+function GridSkeleton() {
+  return (
+    <div className="grid grid-cols-2 gap-x-4 gap-y-8 sm:grid-cols-3 lg:grid-cols-4 2xl:grid-cols-5">
+      {Array.from({ length: 8 }).map((_, i) => (
+        <div key={i} className="space-y-2">
+          <Skeleton className="aspect-[4/5] w-full" />
+          <Skeleton className="h-4 w-3/4" />
+          <Skeleton className="h-3 w-1/2" />
+        </div>
+      ))}
+    </div>
   );
 }

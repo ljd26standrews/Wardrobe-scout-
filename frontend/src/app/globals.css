@@ -2,93 +2,105 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Palette: warm paper, ink, taupe. HSL triplets consumed by Tailwind. */
+/* Design system tokens (docs/redesign/01-design-system.md): neutral surfaces, one accent (--primary), semantic
+   status colours. HSL triplets consumed by Tailwind. Contrast pairs are checked by scripts/contrast.mjs. */
 @layer base {
   :root {
-    --background: 38 30% 96%;
-    --foreground: 30 8% 11%;
-    --card: 40 33% 98%;
-    --card-foreground: 30 8% 11%;
-    --popover: 40 33% 99%;
-    --popover-foreground: 30 8% 11%;
-    --primary: 30 8% 12%;
-    --primary-foreground: 40 33% 97%;
-    --secondary: 36 20% 90%;
-    --secondary-foreground: 30 8% 15%;
-    --muted: 36 18% 91%;
-    --muted-foreground: 30 6% 42%;
-    --accent: 34 16% 86%;
-    --accent-foreground: 30 8% 12%;
-    --destructive: 4 55% 45%;
-    --destructive-foreground: 40 33% 97%;
-    --positive: 140 22% 34%;
-    --caution: 32 62% 40%;
-    --love: 352 45% 46%;
+    --background: 40 20% 98.5%;
+    --surface: 40 14% 96%;
+    --image-well: 36 10% 93%;
+    --foreground: 30 10% 10%;
+    --card: 40 20% 98.5%;
+    --card-foreground: 30 10% 10%;
+    --popover: 40 20% 99%;
+    --popover-foreground: 30 10% 10%;
+    --primary: 222 47% 31%;
+    --primary-foreground: 40 33% 98%;
+    --secondary: 36 12% 92%;
+    --secondary-foreground: 30 10% 12%;
+    --muted: 36 12% 93%;
+    --muted-foreground: 30 6% 34%;
+    --accent: 36 12% 90%;
+    --accent-foreground: 30 10% 10%;
+    --destructive: 4 55% 42%;
+    --destructive-foreground: 40 33% 98%;
+    --positive: 140 22% 31%;
+    --caution: 32 70% 32%;
+    --love: 222 47% 31%; /* love is the accent: no second hue */
     --div-pos: 206 54% 40%;
     --div-neg: 17 55% 46%;
     --chart-accent: 206 58% 40%; /* single-series chart marks; validated vs --card with the dataviz checks */
-    --border: 34 16% 84%;
-    --input: 34 16% 82%;
-    --ring: 30 8% 30%;
-    --radius: 0.75rem;
+    --border: 34 12% 86%;
+    --input: 30 6% 55%; /* control outlines: >= 3:1 (WCAG non-text contrast) */
+    --ring: 222 47% 31%;
+    --radius: 10px;
+    --shadow-overlay: 0 12px 32px -12px rgb(0 0 0 / 0.25);
     color-scheme: light;
   }
 
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
       --background: 30 6% 7%;
-      --foreground: 38 22% 90%;
-      --card: 30 6% 9.5%;
-      --card-foreground: 38 22% 90%;
-      --popover: 30 6% 10%;
-      --popover-foreground: 38 22% 90%;
-      --primary: 38 25% 90%;
-      --primary-foreground: 30 8% 9%;
+      --surface: 30 5% 9.5%;
+      --image-well: 30 4% 13%;
+      --foreground: 38 20% 92%;
+      --card: 30 6% 8%;
+      --card-foreground: 38 20% 92%;
+      --popover: 30 5% 10.5%;
+      --popover-foreground: 38 20% 92%;
+      --primary: 218 60% 72%;
+      --primary-foreground: 222 47% 12%;
       --secondary: 30 5% 15%;
-      --secondary-foreground: 38 22% 88%;
+      --secondary-foreground: 38 20% 90%;
       --muted: 30 5% 14%;
-      --muted-foreground: 34 8% 62%;
+      --muted-foreground: 34 8% 68%;
       --accent: 30 5% 18%;
-      --accent-foreground: 38 22% 90%;
-      --destructive: 4 55% 58%;
-      --positive: 140 25% 55%;
-      --caution: 34 60% 58%;
-      --love: 352 50% 62%;
+      --accent-foreground: 38 20% 92%;
+      --destructive: 4 60% 64%;
+      --destructive-foreground: 30 6% 7%;
+      --positive: 140 28% 60%;
+      --caution: 34 65% 62%;
+      --love: 218 60% 72%;
       --div-pos: 207 50% 54%;
       --div-neg: 19 53% 54%;
       --chart-accent: 207 50% 54%;
       --border: 30 5% 20%;
-      --input: 30 5% 22%;
-      --ring: 38 20% 70%;
+      --input: 30 5% 44%;
+      --ring: 218 60% 72%;
+      --shadow-overlay: 0 12px 32px -12px rgb(0 0 0 / 0.6);
       color-scheme: dark;
     }
   }
 
   :root[data-theme="dark"] {
     --background: 30 6% 7%;
-    --foreground: 38 22% 90%;
-    --card: 30 6% 9.5%;
-    --card-foreground: 38 22% 90%;
-    --popover: 30 6% 10%;
-    --popover-foreground: 38 22% 90%;
-    --primary: 38 25% 90%;
-    --primary-foreground: 30 8% 9%;
+    --surface: 30 5% 9.5%;
+    --image-well: 30 4% 13%;
+    --foreground: 38 20% 92%;
+    --card: 30 6% 8%;
+    --card-foreground: 38 20% 92%;
+    --popover: 30 5% 10.5%;
+    --popover-foreground: 38 20% 92%;
+    --primary: 218 60% 72%;
+    --primary-foreground: 222 47% 12%;
     --secondary: 30 5% 15%;
-    --secondary-foreground: 38 22% 88%;
+    --secondary-foreground: 38 20% 90%;
     --muted: 30 5% 14%;
-    --muted-foreground: 34 8% 62%;
+    --muted-foreground: 34 8% 68%;
     --accent: 30 5% 18%;
-    --accent-foreground: 38 22% 90%;
-    --destructive: 4 55% 58%;
-    --positive: 140 25% 55%;
-    --caution: 34 60% 58%;
-    --love: 352 50% 62%;
+    --accent-foreground: 38 20% 92%;
+    --destructive: 4 60% 64%;
+    --destructive-foreground: 30 6% 7%;
+    --positive: 140 28% 60%;
+    --caution: 34 65% 62%;
+    --love: 218 60% 72%;
     --div-pos: 207 50% 54%;
     --div-neg: 19 53% 54%;
     --chart-accent: 207 50% 54%;
     --border: 30 5% 20%;
-    --input: 30 5% 22%;
-    --ring: 38 20% 70%;
+    --input: 30 5% 44%;
+    --ring: 218 60% 72%;
+    --shadow-overlay: 0 12px 32px -12px rgb(0 0 0 / 0.6);
     color-scheme: dark;
   }
 
@@ -100,24 +112,57 @@
   }
   body {
     @apply bg-background text-foreground antialiased;
-    font-feature-settings: "ss01", "cv11";
+    font-feature-settings: "cv11", "tnum" 0;
+    font-size: 15px;
+    line-height: 1.47;
   }
   h1,
   h2,
   h3 {
-    @apply font-serif font-medium tracking-tight;
+    @apply font-semibold tracking-tight;
+  }
+  /* One visible focus style for everything interactive (keyboard only). */
+  :focus-visible {
+    outline: 2px solid hsl(var(--ring));
+    outline-offset: 2px;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
   }
 }
 
 @layer components {
   .label {
-    @apply text-[11px] font-medium uppercase tracking-label text-muted-foreground;
+    @apply text-xs font-medium text-muted-foreground;
   }
   .hairline {
     @apply border-border/80;
   }
   .page-title {
-    @apply font-serif text-4xl font-medium leading-none tracking-tight md:text-5xl;
+    @apply text-[22px] font-semibold leading-7 tracking-tight md:text-[28px] md:leading-[34px];
+  }
+  .section-title {
+    @apply text-lg font-semibold leading-6 tracking-tight;
+  }
+  .meta {
+    @apply text-[13px] leading-[18px] text-muted-foreground;
+  }
+  /* Product photos: whole garment, never cropped, on a neutral well with a stable shape. */
+  .image-well {
+    @apply relative overflow-hidden rounded-md bg-imagewell;
+  }
+  .image-well > img {
+    @apply h-full w-full object-contain;
+  }
+  .overlay-shadow {
+    box-shadow: var(--shadow-overlay);
   }
   .safe-bottom {
     padding-bottom: max(env(safe-area-inset-bottom), 0.5rem);

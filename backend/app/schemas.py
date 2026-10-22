@@ -63,6 +63,21 @@ class FeedbackIn(BaseModel):
         return v
 
 
+class ReasonsIn(BaseModel):
+    """Reasons given after a dislike was recorded (reasons are optional and may come later)."""
+
+    reasons: list[str] = Field(default_factory=list, max_length=20)
+    note: str | None = Field(default=None, max_length=2000)
+
+    @field_validator("reasons")
+    @classmethod
+    def _valid_reasons(cls, v: list[str]) -> list[str]:
+        bad = [r for r in v if r not in REASONS]
+        if bad:
+            raise ValueError(f"unknown reasons: {bad}")
+        return v
+
+
 class SavedPatch(BaseModel):
     list_name: Literal["loved", "liked", "later", "maybe", "wishlist"] | None = None
     priority: int | None = Field(default=None, ge=1, le=3)

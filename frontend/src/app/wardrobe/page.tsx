@@ -1,17 +1,24 @@
 "use client";
+import Link from "next/link";
 import { useRef, useState } from "react";
 import useSWR from "swr";
 import { toast } from "sonner";
 import { ImagePlus, Layers, Plus, Shirt, ThumbsDown, Trash2 } from "lucide-react";
 import { api, qs, type WardrobeResponse } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, EmptyState, ErrorState, Skeleton } from "@/components/ui/misc";
 import { Dialog, DialogContent, DialogTrigger } from "@/components/ui/dialog";
 import { Field, Input, Select, Textarea } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Swatches } from "@/components/product/meta";
+import { Photo } from "@/components/product/photo";
+import { PageHeader } from "@/components/app-shell";
 import { cn, formatGBP, titleCase } from "@/lib/utils";
+
+// Remove buttons on photos: on hover or focus with a mouse, always visible on touch screens.
+const OVERLAY_BUTTON =
+  "absolute right-1.5 top-1.5 inline-flex size-9 items-center justify-center rounded-md bg-background/95 text-foreground hover:bg-secondary [@media(pointer:coarse)]:size-11 [@media(pointer:fine)]:opacity-0 [@media(pointer:fine)]:group-hover:opacity-100 [@media(pointer:fine)]:focus-visible:opacity-100";
 
 const CATEGORIES = ["t-shirt", "polo", "shirt", "sweatshirt", "hoodie", "knitwear", "cardigan", "zip jacket", "jacket", "blazer", "overcoat", "down jacket", "gilet", "trousers", "jeans", "shorts", "footwear", "accessories", "bag"];
 
@@ -133,32 +140,30 @@ function InspirationPanel() {
           <option value={1}>Inspiration (more like this)</option>
           <option value={-1}>Anti-inspiration (less like this)</option>
         </Select>
-        <label className="inline-flex h-10 cursor-pointer items-center gap-2 rounded-full bg-primary px-5 text-sm text-primary-foreground">
-          <ImagePlus className="size-4" /> Upload images
-          <input type="file" accept="image/*" multiple className="hidden" onChange={(e) => upload(e.target.files)} />
+        <label className={cn(buttonVariants(), "cursor-pointer focus-within:outline focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-ring")}>
+          <ImagePlus /> Upload images
+          <input type="file" accept="image/*" multiple className="sr-only" onChange={(e) => upload(e.target.files)} />
         </label>
       </div>
       <div className="mt-6 grid grid-cols-3 gap-3 md:grid-cols-6">
         {(data ?? []).map((i) => (
-          <div key={i.id} className="group relative aspect-[4/5] overflow-hidden rounded-xl bg-muted">
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src={i.image} alt={i.note ?? "inspiration"} className="h-full w-full object-cover" />
+          <Photo key={i.id} src={i.image} alt={i.note ?? (i.polarity < 0 ? "Less like this" : "More like this")} className="group aspect-[4/5]">
             {i.polarity < 0 && (
-              <span className="absolute left-2 top-2 rounded-full bg-background/90 p-1">
-                <ThumbsDown className="size-3" />
+              <span className="absolute left-1.5 top-1.5 inline-flex items-center gap-1 rounded-sm bg-background/95 px-1.5 py-0.5 text-[11px]">
+                <ThumbsDown className="size-3" aria-hidden /> Less like this
               </span>
             )}
             <button
-              aria-label="Remove"
-              className="absolute right-2 top-2 rounded-full bg-background/90 p-1 opacity-0 transition group-hover:opacity-100"
+              aria-label="Remove this example"
+              className={OVERLAY_BUTTON}
               onClick={async () => {
                 await api.del(`/api/inspiration/${i.id}`);
                 mutate();
               }}
             >
-              <Trash2 className="size-3.5" />
+              <Trash2 className="size-4" />
             </button>
-          </div>
+          </Photo>
         ))}
       </div>
     </div>
@@ -201,20 +206,17 @@ export default function WardrobePage() {
 
   return (
     <div>
-      <div className="flex flex-wrap items-end justify-between gap-4">
-        <div>
-          <p className="label">What you own</p>
-          <h1 className="page-title mt-2">My Wardrobe</h1>
-          <p className="mt-2 max-w-xl text-sm text-muted-foreground">The aim is a cohesive, high-quality wardrobe — fewer, better pieces, not more purchases.</p>
-        </div>
-        <AddItemDialog onAdded={() => mutate()} />
-      </div>
+      <PageHeader
+        title="Wardrobe"
+        description="What you own. The aim is fewer, better pieces that work together, not more purchases."
+        actions={<AddItemDialog onAdded={() => mutate()} />}
+      />
       {error ? (
         <ErrorState error={error} retry={() => mutate()} />
       ) : isLoading || !data ? (
         <Skeleton className="mt-8 h-96" />
       ) : (
-        <Tabs defaultValue="pieces" className="mt-8">
+        <Tabs defaultValue="pieces">
           <TabsList>
             <TabsTrigger value="pieces">Pieces · {data.items.length}</TabsTrigger>
             <TabsTrigger value="plan">Gaps & redundancy</TabsTrigger>
@@ -230,27 +232,19 @@ export default function WardrobePage() {
               <div className="grid grid-cols-2 gap-x-4 gap-y-8 md:grid-cols-4 xl:grid-cols-5">
                 {data.items.map((w) => (
                   <div key={w.id} className="group">
-                    <div className="relative aspect-[4/5] overflow-hidden rounded-xl bg-muted">
-                      {w.image ? (
-                        // eslint-disable-next-line @next/next/no-img-element
-                        <img src={w.image} alt={w.name} className="h-full w-full object-cover" />
-                      ) : (
-                        <div className="flex h-full items-center justify-center text-muted-foreground">
-                          <Shirt className="size-8" strokeWidth={1} />
-                        </div>
-                      )}
+                    <Photo src={w.image} alt={w.name} className="aspect-[4/5]">
                       <button
-                        aria-label="Remove from wardrobe"
-                        className="absolute right-2 top-2 rounded-full bg-background/90 p-1.5 opacity-0 transition group-hover:opacity-100"
+                        aria-label={`Remove ${w.name} from your wardrobe`}
+                        className={OVERLAY_BUTTON}
                         onClick={async () => {
                           if (!confirm(`Remove ${w.name}?`)) return;
                           await api.del(`/api/wardrobe/${w.id}`);
                           mutate();
                         }}
                       >
-                        <Trash2 className="size-3.5" />
+                        <Trash2 className="size-4" />
                       </button>
-                    </div>
+                    </Photo>
                     <p className="label mt-2">{titleCase(w.category ?? "uncategorised")}</p>
                     <p className="mt-0.5 text-sm">{w.name}</p>
                     <div className="mt-1 flex items-center gap-2">
@@ -285,9 +279,9 @@ export default function WardrobePage() {
                           <span className="tabular-nums text-muted-foreground">
                             {g.have} of {g.want}
                           </span>
-                          <a className="text-xs underline-offset-4 hover:underline" href={`/browse${qs({ category: g.category })}`} data-testid="gap-find">
-                            find
-                          </a>
+                          <Link className="inline-flex min-h-9 items-center rounded-md px-2 text-[13px] text-primary hover:bg-secondary [@media(pointer:coarse)]:min-h-11" href={`/browse${qs({ category: g.category })}`} data-testid="gap-find">
+                            Find
+                          </Link>
                         </span>
                       </li>
                     ))}
@@ -299,7 +293,7 @@ export default function WardrobePage() {
                 {data.analysis.redundancy.length ? (
                   <ul className="space-y-2 text-sm">
                     {data.analysis.redundancy.map((r, i) => (
-                      <li key={i} className="rounded-xl bg-caution/10 p-3">
+                      <li key={i} className="rounded-md bg-caution/10 p-3">
                         {r.advice}
                       </li>
                     ))}
@@ -344,12 +338,7 @@ export default function WardrobePage() {
                     <div className="flex gap-2">
                       {o.pieces.map((p) => (
                         <div key={`${p.kind}-${p.id}`} className="w-1/4 min-w-0 flex-1">
-                          <div className={cn("aspect-[4/5] overflow-hidden rounded-lg bg-muted", p.kind === "candidate" && "ring-1 ring-caution")}>
-                            {p.image && (
-                              // eslint-disable-next-line @next/next/no-img-element
-                              <img src={p.image} alt="" className="h-full w-full object-cover" />
-                            )}
-                          </div>
+                          <Photo src={p.image} alt="" className={cn("aspect-[4/5]", p.kind === "candidate" && "ring-1 ring-caution")} />
                           <p className="mt-1 truncate text-[11px]">{p.name}</p>
                         </div>
                       ))}

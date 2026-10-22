@@ -2,7 +2,7 @@
 import { useEffect, useState } from "react";
 import useSWR from "swr";
 import { toast } from "sonner";
-import { AlertTriangle, CheckCircle2, CircleDashed, ExternalLink, FileUp, Link2, MessageSquareQuote, MoreHorizontal, Pause, Play, Plus, RefreshCw, ScanSearch, ShieldQuestion, Trash2, XCircle } from "lucide-react";
+import { AlertTriangle, CheckCircle2, CircleDashed, ExternalLink, FileUp, Link2, MoreHorizontal, Pause, Play, Plus, RefreshCw, ScanSearch, ShieldQuestion, Trash2, XCircle } from "lucide-react";
 import { api, type Job, type Seller } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -11,6 +11,7 @@ import { Dialog, DialogContent, DialogTrigger } from "@/components/ui/dialog";
 import { Field, Input, Select, Textarea } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { AddEvidenceDialog } from "@/components/product/evidence";
+import { PageHeader } from "@/components/app-shell";
 import { useJobWatcher } from "@/components/job-watcher";
 import { ScanPanel } from "@/components/scan-panel";
 import * as DM from "@radix-ui/react-dropdown-menu";
@@ -116,17 +117,17 @@ function SellerRow({ s, refresh }: { s: Seller; refresh: () => void }) {
       <div className="flex flex-wrap items-start gap-x-6 gap-y-3">
         <div className="min-w-0 flex-1 basis-56">
           <div className="flex flex-wrap items-center gap-2">
-            <h3 className="font-serif text-2xl">{s.name}</h3>
+            <h3 className="section-title">{s.name}</h3>
             <Badge variant="outline">{titleCase(s.platform)}</Badge>
             {s.status === "paused" && <Badge variant="muted">Paused</Badge>}
             <Badge variant={s.reputation_status === "trusted" ? "positive" : s.reputation_status === "concerns" ? "destructive" : "muted"}>
               <ShieldQuestion className="size-3" /> {s.reputation_status}
             </Badge>
-            <span className="text-xs text-muted-foreground">priority {s.priority}</span>
+            <span className="meta">Priority {s.priority}</span>
           </div>
           {s.base_url && (
-            <a href={s.base_url} target="_blank" rel="noreferrer" className="mt-1 inline-flex items-center gap-1 text-xs text-muted-foreground hover:underline">
-              {s.base_url.replace(/^https?:\/\//, "")} <ExternalLink className="size-3" />
+            <a href={s.base_url} target="_blank" rel="noreferrer" className="meta mt-1 inline-flex min-h-8 max-w-full items-center gap-1 break-all hover:underline">
+              {s.base_url.replace(/^https?:\/\//, "")} <ExternalLink className="size-3 shrink-0" aria-hidden />
             </a>
           )}
         </div>
@@ -154,17 +155,17 @@ function SellerRow({ s, refresh }: { s: Seller; refresh: () => void }) {
           </Button>
           <DM.Root>
             <DM.Trigger asChild>
-              <Button size="icon" variant="ghost" className="size-8" aria-label="More actions">
+              <Button size="icon" variant="ghost" aria-label={`More actions for ${s.name}`}>
                 <MoreHorizontal />
               </Button>
             </DM.Trigger>
             <DM.Portal>
-              <DM.Content align="end" className="z-50 min-w-[12rem] rounded-xl border bg-popover p-1 text-sm shadow-xl animate-fade-up">
-                <DM.Item className="cursor-pointer rounded-lg px-3 py-2 outline-none data-[highlighted]:bg-secondary" onSelect={() => scan("full")}>
+              <DM.Content align="end" className="overlay-shadow z-50 min-w-[12rem] rounded-md border bg-popover p-1 text-sm animate-fade-up">
+                <DM.Item className="flex min-h-10 cursor-pointer items-center rounded-sm px-3 outline-none data-[highlighted]:bg-secondary" onSelect={() => scan("full")}>
                   Full rescan (detect removals)
                 </DM.Item>
                 <DM.Item
-                  className="cursor-pointer rounded-lg px-3 py-2 outline-none data-[highlighted]:bg-secondary"
+                  className="flex min-h-10 cursor-pointer items-center rounded-sm px-3 outline-none data-[highlighted]:bg-secondary"
                   onSelect={async () => {
                     await api.patch(`/api/sellers/${s.id}`, { status: s.status === "active" ? "paused" : "active" });
                     refresh();
@@ -172,7 +173,7 @@ function SellerRow({ s, refresh }: { s: Seller; refresh: () => void }) {
                 >
                   {s.status === "active" ? <span className="inline-flex items-center gap-2"><Pause className="size-3.5" /> Pause</span> : <span className="inline-flex items-center gap-2"><Play className="size-3.5" /> Resume</span>}
                 </DM.Item>
-                <DM.Item className="cursor-pointer rounded-lg px-3 py-2 outline-none data-[highlighted]:bg-secondary" onSelect={research}>
+                <DM.Item className="flex min-h-10 cursor-pointer items-center rounded-sm px-3 outline-none data-[highlighted]:bg-secondary" onSelect={research}>
                   Search community reviews
                 </DM.Item>
                 <DM.Item
@@ -332,7 +333,6 @@ function ImportPanel({ sellers, onDone }: { sellers: Seller[]; onDone: () => voi
         <TabsContent value="file">
           <p className="mb-3 text-sm text-muted-foreground">
             Columns: seller, title, url, price, currency, description, material_text, brand, category, colours, sizes, image_urls (separated by |).{" "}
-            {/* eslint-disable-next-line @next/next/no-html-link-for-pages -- file download */}
             <a className="underline" href="/api/import/template.csv" download>
               Download template
             </a>
@@ -396,7 +396,7 @@ function LeadsPanel({ sellers }: { sellers: Seller[] }) {
   return (
     <ul className="space-y-3">
       {data.map((l) => (
-        <li key={l.id} className="rounded-xl border p-3 text-sm">
+        <li key={l.id} className="rounded-md border p-3 text-sm">
           <div className="flex flex-wrap items-center gap-2">
             <Badge variant="outline">{l.source}</Badge>
             {l.possible_affiliate && <Badge variant="caution">possible affiliate</Badge>}
@@ -438,29 +438,26 @@ export default function SellersPage() {
 
   return (
     <div>
-      <div className="flex flex-wrap items-end justify-between gap-4">
-        <div>
-          <p className="label">Sources & credibility</p>
-          <h1 className="page-title mt-2">Sellers</h1>
-          <p className="mt-2 text-sm text-muted-foreground">
-            {totals.scraped} products genuinely collected by scans · {totals.manual} imported by you · {totals.seed} seed records
-          </p>
-        </div>
-        <div className="flex gap-2">
-          <Button
-            variant="outline"
-            onClick={async () => {
-              const r = await api.post<{ job_id: number }>("/api/sellers/scan-all", { mode: "incremental" });
-              watch(r.job_id, "Refreshing all active sellers", refresh);
-            }}
-          >
-            <ScanSearch /> Scan all
-          </Button>
-          <SellerDialog onSaved={refresh} trigger={<Button><Plus /> Add seller</Button>} />
-        </div>
-      </div>
+      <PageHeader
+        title="Sellers"
+        description={`${totals.scraped} pieces collected by scans · ${totals.manual} imported by you · ${totals.seed} seed records`}
+        actions={
+          <>
+            <Button
+              variant="outline"
+              onClick={async () => {
+                const r = await api.post<{ job_id: number }>("/api/sellers/scan-all", { mode: "incremental" });
+                watch(r.job_id, "Refreshing all active sellers", refresh);
+              }}
+            >
+              <ScanSearch /> Scan all
+            </Button>
+            <SellerDialog onSaved={refresh} trigger={<Button><Plus /> Add seller</Button>} />
+          </>
+        }
+      />
 
-      <div className="mt-8">
+      <div>
         <ScanPanel onChange={refresh} />
       </div>
 
@@ -476,21 +473,21 @@ export default function SellersPage() {
         )}
       </div>
 
-      <h2 className="mt-14 text-3xl">Import products</h2>
+      <h2 className="section-title mt-12">Import pieces</h2>
       <p className="mt-1 text-sm text-muted-foreground">Reliable alternatives when automated access isn&apos;t available.</p>
       <div className="mt-5">
         <ImportPanel sellers={data ?? []} onDone={refresh} />
       </div>
 
-      <div className="mt-14 grid gap-8 lg:grid-cols-2">
+      <div className="mt-12 grid gap-8 lg:grid-cols-2">
         <div>
           <div className="flex items-center justify-between">
-            <h2 className="text-3xl">Watched links</h2>
+            <h2 className="section-title">Watched links</h2>
             <Button size="sm" variant="outline" onClick={async () => { const r = await api.post<{ job_id: number }>("/api/watched/check"); watch(r.job_id, "Checking watched links", refresh); }}>
               <RefreshCw /> Check now
             </Button>
           </div>
-          <ul className="mt-4 divide-y rounded-2xl border bg-card">
+          <ul className="mt-4 divide-y rounded-md border bg-card">
             {(watched ?? []).map((w) => (
               <li key={w.id} className="flex items-start gap-3 p-3 text-sm">
                 <span className="mt-0.5">{w.last_status === "ok" ? STATUS_ICON.succeeded : w.last_status ? STATUS_ICON.failed : <CircleDashed className="size-4 text-muted-foreground" />}</span>
@@ -503,7 +500,7 @@ export default function SellersPage() {
                     {w.last_message && ` · ${w.last_message}`}
                   </p>
                 </div>
-                <button aria-label="Stop watching" className="text-muted-foreground hover:text-destructive" onClick={async () => { await api.del(`/api/watched/${w.id}`); mutateWatched(); }}>
+                <button aria-label="Stop watching" className="-m-2 inline-flex size-9 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-secondary hover:text-destructive [@media(pointer:coarse)]:size-11" onClick={async () => { await api.del(`/api/watched/${w.id}`); mutateWatched(); }}>
                   <Trash2 className="size-4" />
                 </button>
               </li>
@@ -512,8 +509,8 @@ export default function SellersPage() {
           </ul>
         </div>
         <div>
-          <h2 className="text-3xl">Recent jobs</h2>
-          <ul className="mt-4 divide-y rounded-2xl border bg-card">
+          <h2 className="section-title">Recent jobs</h2>
+          <ul className="mt-4 divide-y rounded-md border bg-card">
             {(jobs ?? []).map((j) => (
               <li key={j.id} className="p-3 text-sm">
                 <div className="flex items-center gap-2">
@@ -529,9 +526,7 @@ export default function SellersPage() {
         </div>
       </div>
 
-      <h2 className="mt-14 flex items-center gap-2 text-3xl">
-        <MessageSquareQuote className="size-6" strokeWidth={1.25} /> Research leads
-      </h2>
+      <h2 className="section-title mt-12">Research leads</h2>
       <p className="mb-4 mt-1 text-sm text-muted-foreground">Community posts found by searches. You decide what counts as evidence; promotional posts are flagged.</p>
       <LeadsPanel sellers={data ?? []} />
     </div>

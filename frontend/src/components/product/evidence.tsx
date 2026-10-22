@@ -37,7 +37,7 @@ export function EvidenceList({ items, onDelete }: { items: Evidence[]; onDelete?
   return (
     <ul className="space-y-3">
       {sorted.map((e) => (
-        <li key={`${e.scope ?? "p"}-${e.id}`} className="rounded-xl border p-3 text-sm">
+        <li key={`${e.scope ?? "p"}-${e.id}`} className="rounded-md border p-3 text-sm">
           <div className="flex flex-wrap items-center gap-1.5">
             <Badge variant={KIND_TONE[e.kind] ?? "outline"}>{e.kind_label}</Badge>
             <Badge variant="outline">{titleCase(e.aspect)}</Badge>

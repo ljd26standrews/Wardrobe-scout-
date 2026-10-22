@@ -6,11 +6,11 @@ import { cn } from "@/lib/utils";
 import { Button } from "./button";
 
 export function Skeleton({ className }: { className?: string }) {
-  return <div className={cn("relative overflow-hidden rounded-lg bg-muted before:absolute before:inset-0 before:-translate-x-full before:animate-shimmer before:bg-gradient-to-r before:from-transparent before:via-white/30 before:to-transparent", className)} />;
+  return <div className={cn("rounded-md bg-muted motion-safe:animate-pulse", className)} />;
 }
 
 export function Card({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) {
-  return <div className={cn("rounded-2xl border bg-card text-card-foreground", className)} {...props} />;
+  return <div className={cn("rounded-lg border bg-card text-card-foreground", className)} {...props} />;
 }
 
 export function Spinner({ className }: { className?: string }) {
@@ -23,7 +23,7 @@ export function Tip({ content, children }: { content: React.ReactNode; children:
       <Tt.Root>
         <Tt.Trigger asChild>{children}</Tt.Trigger>
         <Tt.Portal>
-          <Tt.Content sideOffset={6} className="z-50 max-w-xs rounded-lg bg-primary px-3 py-2 text-xs leading-relaxed text-primary-foreground shadow-lg animate-fade-up">
+          <Tt.Content sideOffset={6} className="overlay-shadow z-50 max-w-xs rounded-md bg-foreground px-3 py-2 text-xs leading-relaxed text-background">
             {content}
           </Tt.Content>
         </Tt.Portal>
@@ -34,9 +34,9 @@ export function Tip({ content, children }: { content: React.ReactNode; children:
 
 export function EmptyState({ title, children, icon, action }: { title: string; children?: React.ReactNode; icon?: React.ReactNode; action?: React.ReactNode }) {
   return (
-    <div className="mx-auto flex max-w-md flex-col items-center px-6 py-16 text-center animate-fade-up">
-      {icon && <div className="mb-5 text-muted-foreground [&_svg]:size-8">{icon}</div>}
-      <h3 className="text-2xl">{title}</h3>
+    <div className="mx-auto flex max-w-md flex-col items-center px-6 py-14 text-center">
+      {icon && <div className="mb-4 text-muted-foreground [&_svg]:size-7">{icon}</div>}
+      <h3 className="section-title">{title}</h3>
       {children && <div className="mt-3 text-sm leading-relaxed text-muted-foreground">{children}</div>}
       {action && <div className="mt-6 flex flex-wrap justify-center gap-2">{action}</div>}
     </div>
@@ -46,7 +46,7 @@ export function EmptyState({ title, children, icon, action }: { title: string; c
 export function ErrorState({ error, retry }: { error: unknown; retry?: () => void }) {
   const msg = error instanceof Error ? error.message : String(error);
   return (
-    <div className="mx-auto my-10 flex max-w-lg items-start gap-3 rounded-2xl border border-destructive/30 bg-destructive/5 p-5 text-sm">
+    <div role="alert" className="mx-auto my-10 flex max-w-lg items-start gap-3 rounded-lg border border-destructive/30 bg-destructive/5 p-5 text-sm">
       <AlertTriangle className="mt-0.5 size-5 shrink-0 text-destructive" />
       <div className="flex-1">
         <p className="font-medium">Something went wrong</p>

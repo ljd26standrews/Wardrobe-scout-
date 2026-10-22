@@ -6,6 +6,7 @@ import type { Comparison } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/misc";
 import { formatPrice } from "@/lib/utils";
+import { Photo } from "./photo";
 
 export function relationTone(rel: string) {
   // Only an identical purchase link or your confirmation is positive; photo-based matches stay cautious.
@@ -21,13 +22,8 @@ export function AlternativesPreview({ productId }: { productId: number }) {
   return (
     <div className="space-y-2">
       {alts.slice(0, 3).map((a) => (
-        <Link key={a.product.id} href={`/product/${a.product.id}`} className="flex items-center gap-3 rounded-xl border p-2 hover:bg-secondary/60">
-          <div className="size-14 shrink-0 overflow-hidden rounded-lg bg-muted">
-            {a.product.images[0]?.src && (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img src={a.product.images[0].src} alt="" className="h-full w-full object-cover" />
-            )}
-          </div>
+        <Link key={a.product.id} href={`/product/${a.product.id}`} className="flex items-center gap-3 rounded-md border p-2 hover:bg-secondary">
+          <Photo src={a.product.images[0]?.src} alt="" className="size-14 shrink-0 rounded-sm" />
           <div className="min-w-0 flex-1">
             <p className="truncate text-sm">{a.product.title}</p>
             <p className="text-xs text-muted-foreground">
@@ -35,7 +31,7 @@ export function AlternativesPreview({ productId }: { productId: number }) {
             </p>
           </div>
           <Badge variant={relationTone(a.relation) as "positive" | "caution" | "muted"} className="hidden sm:inline-flex">
-            {a.relation.replace(/_/g, " ")}
+            {a.relation_label}
           </Badge>
         </Link>
       ))}

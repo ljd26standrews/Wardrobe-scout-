@@ -3,7 +3,7 @@ import { ExternalLink } from "lucide-react";
 import type { Product } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Tip } from "@/components/ui/misc";
-import { COLOUR_SWATCH, cn, formatGBP, formatPrice, titleCase } from "@/lib/utils";
+import { COLOUR_SWATCH, cn, titleCase } from "@/lib/utils";
 
 export function OriginBadge({ product }: { product: Product }) {
   if (product.data_origin === "seed")
@@ -35,36 +35,6 @@ export function Swatches({ colours, className }: { colours: string[]; className?
   );
 }
 
-export function PriceBlock({ product, large }: { product: Product; large?: boolean }) {
-  return (
-    <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-      <span className={cn("font-serif tabular-nums", large ? "text-3xl" : "text-xl")}>{formatPrice(product.price, product.currency)}</span>
-      {product.price_gbp != null && product.conversion && (
-        <Tip content={`Converted at ${product.conversion.from} 1 = £${product.conversion.rate} (${product.conversion.source || "your rate in Settings"}). A conversion, not the landed cost.`}>
-          <span className="cursor-help text-sm text-muted-foreground">≈ {formatGBP(product.price_gbp)}</span>
-        </Tip>
-      )}
-      {product.landed_cost && (
-        <Tip
-          content={
-            <div className="space-y-0.5">
-              <div className="font-medium">Estimated UK landed cost</div>
-              <div>Goods {formatGBP(product.landed_cost.goods_gbp)}</div>
-              <div>Domestic shipping {formatGBP(product.landed_cost.domestic_shipping_gbp)}</div>
-              <div>Agent fee {formatGBP(product.landed_cost.agent_fee_gbp)}</div>
-              <div>International (~{product.landed_cost.estimated_weight_kg} kg) {formatGBP(product.landed_cost.international_shipping_gbp)}</div>
-              <div>Duty {formatGBP(product.landed_cost.duty_gbp)} · VAT {formatGBP(product.landed_cost.vat_gbp)}</div>
-              <div className="pt-1 opacity-80">{product.landed_cost.assumptions}</div>
-            </div>
-          }
-        >
-          <span className="cursor-help border-b border-dotted border-muted-foreground/60 text-sm text-muted-foreground">landed ≈ {formatGBP(product.landed_cost.total_gbp)}</span>
-        </Tip>
-      )}
-    </div>
-  );
-}
-
 const LINK_LABEL: Record<string, string> = { yupoo: "Yupoo", weidian: "Weidian", taobao: "Taobao", seller: "Seller site" };
 
 export function LinkButtons({ product }: { product: Product }) {
@@ -74,9 +44,10 @@ export function LinkButtons({ product }: { product: Product }) {
   return (
     <div className="flex flex-wrap gap-2">
       {all.map(([k, u]) => (
-        <a key={k} href={u} target="_blank" rel="noreferrer noopener" className="inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs hover:bg-secondary">
+        <a key={k} href={u} target="_blank" rel="noreferrer noopener" className="inline-flex min-h-9 items-center gap-1.5 rounded-md border px-3 text-[13px] hover:bg-secondary [@media(pointer:coarse)]:min-h-11">
           {LINK_LABEL[k] ?? titleCase(k)}
-          <ExternalLink className="size-3" />
+          <ExternalLink className="size-3.5" aria-hidden />
+          <span className="sr-only">(opens in a new tab)</span>
         </a>
       ))}
     </div>

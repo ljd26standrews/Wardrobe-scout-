@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from ..config import get_settings
 from ..db import get_db
 from ..models import Feedback, Product, SavedItem, WardrobeItem
-from ..schemas import FeedbackIn, SavedPatch
+from ..schemas import FeedbackIn, ReasonsIn, SavedPatch
 from ..services import calibration, jobs
 from ..services.approval_data import LABEL_VERSION, POSITIVE_REASONS, REJECTION_REASONS, latest_readings
 from ..services.presenter import Context, product_card
@@ -111,6 +111,31 @@ def give_feedback(body: FeedbackIn, db: Session = Depends(get_db)):
     }
 
 
+@router.post("/feedback/{feedback_id}/reasons")
+def add_reasons(feedback_id: int, body: ReasonsIn, db: Session = Depends(get_db)):
+    """Reasons for a dislike, given after it was recorded (Discover never makes you choose before deciding). They
+    complete that same decision, so only your latest decision about the piece can take them."""
+    fb = db.get(Feedback, feedback_id)
+    if fb is None:
+        raise HTTPException(404, "feedback not found")
+    if fb.action != "dislike":
+        raise HTTPException(422, "reasons can only be added to a dislike")
+    _check_reasons("dislike", body.reasons)
+    later = (
+        db.query(Feedback.id)
+        .filter(Feedback.product_id == fb.product_id, Feedback.action != "skip", Feedback.id > fb.id)
+        .first()
+    )
+    if fb.product_id is not None and later is not None:
+        raise HTTPException(409, "you have decided about this piece again since; add reasons to that decision")
+    fb.reasons = list(body.reasons)
+    if body.note:
+        fb.note = body.note
+    db.commit()
+    calibration.maybe_schedule(db)  # a reason can change what the decision says about the look
+    return {"ok": True, "feedback_id": fb.id, "reasons": fb.reasons}
+
+
 @router.get("/feedback")
 def feedback_history(limit: int = Query(100, ge=1, le=1000), db: Session = Depends(get_db)):
     rows = db.query(Feedback).order_by(Feedback.created_at.desc()).limit(limit).all()
@@ -138,6 +163,7 @@ def undo_feedback(feedback_id: int, db: Session = Depends(get_db)):
         raise HTTPException(404, "feedback not found")
     pid = fb.product_id
     undone_action = fb.action
+    kept = (fb.context or {}).get("removed") if fb.action == "unsave" else None
     db.delete(fb)
     db.flush()
     if pid and undone_action == "purchased":
@@ -162,6 +188,16 @@ def undo_feedback(feedback_id: int, db: Session = Depends(get_db)):
                 saved.list_name = lst
         elif saved is not None and saved.list_name != "wishlist":
             db.delete(saved)
+        if kept:
+            # Undoing a removal puts the piece back exactly as it was: its list, priority and purchase notes.
+            db.flush()
+            saved = db.query(SavedItem).filter_by(product_id=pid).one_or_none()
+            if saved is None:
+                saved = SavedItem(product_id=pid, list_name=kept.get("list_name") or "wishlist")
+                db.add(saved)
+            for k in ("list_name", "priority", "note", "target_size"):
+                if k in kept:
+                    setattr(saved, k, kept[k])
     db.commit()
     calibration.maybe_schedule(db)  # an undone decision is no longer evidence
     return {"ok": True}
@@ -225,10 +261,16 @@ def patch_saved(product_id: int, body: SavedPatch, db: Session = Depends(get_db)
 @router.delete("/saved/{product_id}")
 def delete_saved(product_id: int, db: Session = Depends(get_db)):
     s = db.query(SavedItem).filter_by(product_id=product_id).one_or_none()
-    if s:
-        p = db.get(Product, product_id)
-        db.add(Feedback(product_id=product_id, action="unsave", snapshot=snapshot(p) if p else {}))
-        db.delete(s)
-        db.commit()
-        calibration.maybe_schedule(db)  # an unsaved approval is no longer evidence
-    return {"ok": True}
+    if s is None:
+        return {"ok": True, "feedback_id": None}
+    p = db.get(Product, product_id)
+    removed = {"list_name": s.list_name, "priority": s.priority, "note": s.note, "target_size": s.target_size}
+    fb = Feedback(
+        product_id=product_id, action="unsave", context={"removed": removed}, snapshot=snapshot(p) if p else {}
+    )
+    db.add(fb)
+    db.delete(s)
+    db.commit()
+    calibration.maybe_schedule(db)  # an unsaved approval is no longer evidence
+    # Undo is DELETE /api/feedback/{feedback_id}: it restores the list, priority and notes kept above.
+    return {"ok": True, "feedback_id": fb.id}
