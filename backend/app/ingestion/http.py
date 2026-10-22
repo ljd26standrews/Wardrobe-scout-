@@ -302,6 +302,9 @@ class PoliteClient:
             headers["If-None-Match"] = etag
         if last_modified:
             headers["If-Modified-Since"] = last_modified
+        # Checked (and resolved) before booking a slot: a slow address lookup on the first request to a host must
+        # not eat into the delay the host sees before the next one. The request hook still checks each redirect.
+        assert_public_url(url)
         attempt = 0
         while True:
             with h.gate:

@@ -35,7 +35,8 @@ In the order the brief asked for. Each commit's message lists what it changed an
 | `d283a45` | Performance: caches keyed by data revisions, batched loading, the photo analysis in use shown (F10) |
 | `86f1072` | Verification: end-to-end timing, layout and accessibility checks on an offline demo with awkward listings; CI (F11); two fixes the tests found |
 | `6586381` | Design review on the after-screenshots: whole garment in view, honest status lines, select backgrounds; CI failures as annotations |
-| (final) | Measurements, after-screenshots, this handoff, and a test that a restored snapshot is a new cache instance |
+| `86e5ab5` | Measurements, after-screenshots, this handoff, and a test that a restored snapshot is a new cache instance |
+| (final) | Politeness: the address check runs before a host's delay is booked (N11), with a regression test |
 
 ## What changed, in plain English
 
@@ -118,7 +119,7 @@ Found and fixed during this work:
 | N8 | Form fields inside a `Field` (Settings, imports, dialogs) had no accessible name | Found by the accessible-name check; fixed in `86f1072` |
 | N9 | Native selects showed the browser's grey background in both themes (a merged class dropped `bg-card`) | Found in the after-screenshots; fixed in `6586381` |
 | N10 | The rewritten Discover status line had dropped two honest messages: results below a mode's aim, and why estimates were withdrawn | Found in review; restored in `6586381` |
-| N11 | The first CI run's backend tests failed on GitHub and passed on the next run with no backend change | **Open**: the job log could not be read from this environment; CI now reports failing tests as annotations, so the next occurrence names the test |
+| N11 | Backend tests failed intermittently on GitHub (not here): two requests to one host arrived 0.166 s apart for a 0.2 s delay | **Fixed** after CI's annotations named the test. Root cause: the host's delay was booked before the address check, so a slow DNS lookup on the first request (cached for the next) shortened the gap the host saw. A small but real politeness violation. The check now runs before booking; a regression test simulates a slow lookup and failed on the old code (0.080 s apart) |
 
 ## Design rationale, with screenshots
 
@@ -161,7 +162,7 @@ All 36 pairs are in `screens/before/` and `screens/after/` under the same names.
 
 | Check | Result |
 |---|---|
-| Backend tests (`pytest -q`, Python 3.13.16) | **352 passed** (259 at the base). Also run on `86f1072` in a clean clone with a fresh environment installed from `constraints.txt`: 351 passed (the restore test came after) |
+| Backend tests (`pytest -q`, Python 3.13.16) | **353 passed** (259 at the base). Also run on `86f1072` in a clean clone with a fresh environment installed from `constraints.txt`: 351 passed (two tests came after) |
 | `ruff check .`, `pip check` | All checks passed; no broken requirements |
 | Migrations | `alembic upgrade head`, `downgrade -1`, `upgrade head` on an empty database all succeed; the 24 revision triggers are installed |
 | Rollback | On a database upgraded by this branch, the earlier code (`ccca8ad`, same migrations as the base) refuses to start ("Can't locate revision a4c7e2f9b1d3"). After `alembic downgrade f3d2c8a1e6b9` with the new code it starts, with no revision table or triggers left |
@@ -170,7 +171,7 @@ All 36 pairs are in `screens/before/` and `screens/after/` under the same names.
 | Contrast (`frontend/scripts/contrast.mjs`) | 44 of 44 token pairs pass (text 4.5:1, controls and focus ring 3:1), light and dark |
 | `next build` | exit 0 |
 | End-to-end (`scripts/e2e.sh`, Chromium) | **31 of 31 passed**: 29 on desktop (including the layout checks from 320 to 1440 px), 2 on an iPhone viewport |
-| CI on GitHub | `6586381`: backend, frontend and end-to-end jobs passed (end-to-end 31 passed in 1.0 min). The first run, on `86f1072`, failed once in the backend tests; see N11 |
+| CI on GitHub | `6586381`: backend, frontend and end-to-end jobs passed (end-to-end 31 passed in 1.0 min). Runs on `86f1072` and `86e5ab5` failed in one timing test; see N11 for the cause and fix. The result for the last commit is at the end of this file |
 | Screenshots | 36 after-screenshots captured on the demo catalogue and looked at, at 1440, 768 and 390 px, light and dark; three problems found there were fixed (N9, the photo below the fold, the phone header) |
 | Latency, SQL, memory | [03-performance.md](03-performance.md) |
 
