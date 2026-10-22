@@ -5,7 +5,7 @@ import useSWR from "swr";
 import { toast } from "sonner";
 import { Bookmark, FlaskConical, Heart, Hourglass, LayoutGrid, Maximize2, Rows3, ShieldCheck, SkipForward, Store, Undo2, X } from "lucide-react";
 import type { FeedResponse, Gate, Product, SelectiveMode } from "@/lib/api";
-import { api, hasEstimates, MODE_LABEL, MODES, qs } from "@/lib/api";
+import { api, ApiError, hasEstimates, MODE_LABEL, MODES, qs } from "@/lib/api";
 import { PageHeader } from "@/components/app-shell";
 import { Button } from "@/components/ui/button";
 import { EmptyState, ErrorState, Skeleton } from "@/components/ui/misc";
@@ -15,7 +15,7 @@ import { Gallery } from "@/components/product/gallery";
 import { LandedCost, Price } from "@/components/product/price";
 import { PiecePanel, usePiece } from "@/components/product/side-panel";
 import { ProductTile, type TileAction } from "@/components/product/tile";
-import { unmarkDecided, useDecided, useFeedback, type ActionName } from "@/components/product/use-feedback";
+import { guarded, undoDecision, undoFailed, unmarkDecided, useDecided, useFeedback, type ActionName, type Decision } from "@/components/product/use-feedback";
 import { useStoredState } from "@/lib/use-stored-state";
 import { cn, titleCase } from "@/lib/utils";
 
@@ -93,7 +93,10 @@ function Discover() {
     logViews(data.feed_id, "grid", items.map((p) => ({ product_id: p.id, position: seen.current.get(p.id)?.position ?? 0 })));
   }, [view, data?.feed_id, items, logViews]);
 
-  const last = useRef<{ feedbackId: number; productId: number } | null>(null);
+  // Your decisions in the order you made them, not the order the server answered: Undo always takes back the last one
+  // you made (waiting for its save if it is still on its way), never one whose answer merely arrived last.
+  const undoStack = useRef<{ seq: number; productId: number; saved: Promise<Decision | null>; feedbackId?: number }[]>([]);
+  const seq = useRef(0);
   const [canUndo, setCanUndo] = useState(false);
   const restore = useCallback(
     async (productId: number) => {
@@ -110,36 +113,65 @@ function Discover() {
     },
     [mutate, learning],
   );
-  const feedback = useFeedback({ onDone: () => mutate(), onUndo: restore, hide: true });
+  const forget = useCallback((feedbackId?: number, entrySeq?: number) => {
+    undoStack.current = undoStack.current.filter((e) => e.seq !== entrySeq && (feedbackId === undefined || e.feedbackId !== feedbackId));
+    setCanUndo(undoStack.current.length > 0);
+  }, []);
+  const onUndone = useCallback(
+    (productId: number, feedbackId?: number) => {
+      forget(feedbackId); // undone from its message: not again from the Undo button
+      restore(productId);
+    },
+    [forget, restore],
+  );
+  const feedback = useFeedback({ onDone: () => mutate(), onUndo: onUndone, hide: true });
   const act = useCallback(
     async (p: Product, action: ActionName) => {
       const s = seen.current.get(p.id);
+      const saving = feedback(p.id, action, [], undefined, { explore: !!p.recommendation?.explore, surface: view, feed_id: s?.feedId ?? null, position: s?.position ?? null }, p.title);
+      if (action !== "skip") {
+        const entry = { seq: ++seq.current, productId: p.id, saved: saving.catch(() => null) as Promise<Decision | null>, feedbackId: undefined as number | undefined };
+        undoStack.current = [...undoStack.current, entry];
+        setCanUndo(true);
+        entry.saved.then((d) => {
+          if (d) entry.feedbackId = d.feedback_id;
+          else forget(undefined, entry.seq); // not saved (rolled back): nothing to undo
+        });
+      }
       try {
-        const res = await feedback(p.id, action, [], undefined, { explore: !!p.recommendation?.explore, surface: view, feed_id: s?.feedId ?? null, position: s?.position ?? null }, p.title);
-        if (action !== "skip") {
-          last.current = { feedbackId: res.feedback_id, productId: p.id };
-          setCanUndo(true);
-        }
+        await saving;
       } catch {
         /* rolled back by useFeedback: the piece is shown again and an error says so */
       }
     },
-    [feedback, view],
+    [feedback, view, forget],
   );
-  const undoLast = useCallback(async () => {
-    const l = last.current;
-    if (!l) return;
-    last.current = null;
-    setCanUndo(false);
-    try {
-      await api.del(`/api/feedback/${l.feedbackId}`);
-      unmarkDecided(l.productId);
-      toast("Undone");
-      restore(l.productId);
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Could not undo");
-    }
-  }, [restore]);
+  const undoLast = useMemo(
+    () =>
+      guarded(async () => {
+        while (undoStack.current.length) {
+          const entry = undoStack.current[undoStack.current.length - 1];
+          const d = await entry.saved;
+          if (!d) {
+            forget(undefined, entry.seq);
+            continue;
+          }
+          try {
+            await undoDecision(d);
+          } catch (e) {
+            if (e instanceof ApiError && e.status === 409) forget(undefined, entry.seq); // something newer stands
+            undoFailed(e, () => void undoLast());
+            return;
+          }
+          forget(undefined, entry.seq);
+          unmarkDecided(entry.productId);
+          toast("Undone");
+          restore(entry.productId);
+          return;
+        }
+      }),
+    [forget, restore],
+  );
 
   const chooseMode = useCallback(
     async (m: SelectiveMode) => {

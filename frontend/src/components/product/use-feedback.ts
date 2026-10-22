@@ -1,7 +1,7 @@
 "use client";
 import { useCallback, useSyncExternalStore } from "react";
 import { toast } from "sonner";
-import { api } from "@/lib/api";
+import { api, ApiError } from "@/lib/api";
 
 /** "like_later" is Like with "not now": you like the look but won't buy it now (saved to Later). */
 export type ActionName = "love" | "like" | "like_later" | "maybe" | "dislike" | "skip" | "purchased";
@@ -44,6 +44,38 @@ export function useDecided(): ReadonlySet<number> {
   );
 }
 
+// ----------------------------------------------------------------- Undo
+/** A recorded decision, as Undo needs it: the server refuses an Undo that would overwrite a newer decision or a newer
+ *  change in Saved (409), and with the token a repeated or retried Undo changes nothing further. */
+export type Decision = { feedback_id: number; undo_token?: string | null };
+
+export async function undoDecision(d: Decision): Promise<void> {
+  await api.del(`/api/feedback/${d.feedback_id}${d.undo_token ? `?token=${encodeURIComponent(d.undo_token)}` : ""}`);
+}
+
+/** Says why an Undo failed. A conflict (something newer stands) is final; anything else can be retried. */
+export function undoFailed(e: unknown, retry: () => void) {
+  if (e instanceof ApiError && e.status === 409) {
+    toast.error("Not undone", { description: e.message, duration: 8000 });
+    return;
+  }
+  toast.error(e instanceof Error ? `Not undone: ${e.message}` : "Not undone", { action: { label: "Retry", onClick: retry }, duration: 10000 });
+}
+
+/** Undo with a guard against a second click while the first is on its way. */
+export function guarded(fn: () => Promise<void>): () => Promise<void> {
+  let busy = false;
+  return async () => {
+    if (busy) return;
+    busy = true;
+    try {
+      await fn();
+    } finally {
+      busy = false;
+    }
+  };
+}
+
 // ----------------------------------------------------------------- reasons, asked after the decision
 export type ReasonsRequest = { feedbackId: number; productId: number; title?: string; onDone?: () => void };
 let pending: ReasonsRequest | null = null;
@@ -66,8 +98,8 @@ export function useReasonsRequest(): ReasonsRequest | null {
 type Options = {
   /** After the decision is saved (refresh lists, re-rank). */
   onDone?: () => void;
-  /** After Undo removed the decision (e.g. bring the piece back). */
-  onUndo?: (productId: number) => void;
+  /** After Undo removed the decision, or a failed save rolled it back (e.g. bring the piece back). */
+  onUndo?: (productId: number, feedbackId?: number) => void;
   /** Hide the piece from feeds at once (Discover); Browse and the product page keep showing it. */
   hide?: boolean;
 };
@@ -80,17 +112,22 @@ export function useFeedback({ onDone, onUndo, hide = false }: Options = {}) {
       if (hide && action !== "purchased") markDecided(productId);
       const [sent, sentReasons] = action === "like_later" ? (["like", [...reasons, "not_now"]] as const) : ([action, reasons] as const);
       try {
-        const res = await api.post<{ feedback_id: number }>("/api/feedback", { product_id: productId, action: sent, reasons: sentReasons, note, context });
+        const res = await api.post<Decision>("/api/feedback", { product_id: productId, action: sent, reasons: sentReasons, note, context });
         if (hide) markDecided(productId);
         onDone?.();
         if (action !== "skip") {
-          const undo = async () => {
-            await api.del(`/api/feedback/${res.feedback_id}`);
+          const undo = guarded(async () => {
+            try {
+              await undoDecision(res);
+            } catch (e) {
+              undoFailed(e, undo);
+              return;
+            }
             unmarkDecided(productId);
             toast("Undone");
-            onUndo?.(productId);
+            onUndo?.(productId, res.feedback_id);
             onDone?.();
-          };
+          });
           toast(MESSAGES[action], {
             id: `decision-${productId}`,
             description: reasons.some((r) => ["too_expensive", "already_own", "wrong_size", "construction", "quality_unclear"].includes(r))
