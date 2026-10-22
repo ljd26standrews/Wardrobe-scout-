@@ -517,11 +517,12 @@ def import_all(db: Session, data: dict) -> dict:
 
 
 # ----------------------------------------------------------------------------- full snapshot (database + media)
-SNAPSHOT_DIRS = ("images", "uploads")
+SNAPSHOT_DIRS = ("images", "uploads", "evaluation")
 
 
 def write_full_snapshot(database_path: Path, data_dir: Path, out: Path) -> dict:
-    """Zip a consistent SQLite copy (online backup API, safe while the app runs) and the photo folders."""
+    """Zip a consistent SQLite copy, photos and frozen evaluations. Finish any evaluation before taking
+    the snapshot: its multi-file reports are not covered by SQLite's online backup transaction."""
     out.parent.mkdir(parents=True, exist_ok=True)
     tmp = out.with_suffix(".db.tmp")
     with closing(sqlite3.connect(database_path)) as a, closing(sqlite3.connect(tmp)) as b:
@@ -560,6 +561,9 @@ def restore_full_snapshot(snapshot: Path, data_dir: Path) -> dict:
             target.parent.mkdir(parents=True, exist_ok=True)
             with z.open(name) as src:
                 target.write_bytes(src.read())
+            # Keep frozen benchmark records read-only after moving the installation, including on Windows.
+            if name.startswith("evaluation/benchmarks/") and not (z.getinfo(name).external_attr >> 16) & 0o200:
+                target.chmod(0o444)
     db_path = data_dir / "wardrobe_scout.db"
     if db_path.exists():  # a copy is a new instance: nothing cached for the original may be reused for it
         import sqlite3

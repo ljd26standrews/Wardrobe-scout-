@@ -227,3 +227,40 @@ def test_unknown_or_malformed_versions_are_refused(env, db, ref):
     _ok(_freeze(env))
     r = _cli(env, "eval.real", "--benchmark", ref)
     assert r.returncode == 3 and r.stderr.strip()
+
+
+def test_full_snapshot_keeps_frozen_benchmark_bytes_and_restore_migrates(env, db, tmp_path, monkeypatch):
+    """A restored installation can still verify/evaluate its frozen sample, with identical bytes and grades."""
+    from app import db as dbmod
+    from app.config import get_settings
+    from app.services.backup import restore_full_snapshot, write_full_snapshot
+    from eval.benchmark import freeze, load
+
+    _world(db)
+    freeze(env / "test.db", env, "restore-pilot")
+    before = load(env, "restore-pilot@v1")
+    run_log = before.path.parent / "runs.jsonl"
+    run_log.write_text('{"test": "synthetic run history"}\n')
+    snap = tmp_path / "portable.zip"
+    write_full_snapshot(env / "test.db", env, snap)
+    restored = tmp_path / "restored-beta"
+    result = restore_full_snapshot(snap, restored)
+    after = load(restored, before.ref)  # verifies both the records AND snapshot hashes
+    assert after.hash == before.hash and after.records == before.records
+    assert after.snapshot.read_bytes() == before.snapshot.read_bytes()
+    assert (after.path.parent / "runs.jsonl").read_bytes() == run_log.read_bytes()
+    assert not (after.path / "records.jsonl").stat().st_mode & stat.S_IWUSR
+    monkeypatch.setenv("WS_DATA_DIR", str(restored))
+    monkeypatch.setenv("WS_DATABASE_URL", f"sqlite:///{result['database']}")
+    get_settings.cache_clear()
+    dbmod.init_engine(get_settings().database_url)
+    dbmod.migrate()
+    from app.models import Feedback, Judgement
+    from app.services import revisions
+
+    with dbmod.SessionLocal() as session:
+        assert session.query(Judgement).count() == 45
+        assert session.query(Feedback).count() == 12
+        assert revisions.current(session, "products")[0] != revisions.current(db, "products")[0]
+    # The live database can migrate without rewriting a frozen benchmark's database.
+    assert load(restored, before.ref).hash == before.hash
