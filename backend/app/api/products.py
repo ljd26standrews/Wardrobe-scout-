@@ -8,13 +8,14 @@ from collections import Counter
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..ingestion.parsing import materials_to_text, parse_materials
 from ..models import Evidence, Feedback, FeedRequest, Impression, Product
-from ..schemas import EvidenceIn, MatchDecision, ProductPatch, ViewedIn
-from ..services import calibration, dedup, jobs, money, selective
+from ..schemas import EvidenceIn, ExposuresIn, MatchDecision, ProductPatch, ViewedIn
+from ..services import calibration, dedup, exposure, jobs, money, selective
 from ..services import embeddings as emb
 from ..services.presenter import Context, comparison, load_images, product_card
 from ..services.recommender import build_feed, build_profile, collapse_families, feed_candidates, rank_products
@@ -328,10 +329,64 @@ def _prune(db, model, order_col, keep: int) -> None:
             db.query(model).filter(order_col <= cutoff).delete(synchronize_session=False)
 
 
+@router.post("/exposures")
+def record_exposures(body: ExposuresIn, db: Session = Depends(get_db)):
+    """Record pieces you saw, under the current definition of an exposure (services/exposure.py). Each event carries
+    the browser's id, so a retry after a failed delivery is recorded once. Only pieces the named feed served are
+    accepted, at the position it served them."""
+    if body.definition != exposure.DEFINITION:
+        raise HTTPException(422, f"unknown exposure definition {body.definition!r} (current: {exposure.DEFINITION})")
+    ids = [e.event_id for e in body.events]
+    have = {eid for (eid,) in db.query(Impression.event_id).filter(Impression.event_id.in_(ids))} if ids else set()
+    feed_ids = {e.feed_id for e in body.events}
+    feeds = {f.id: f for f in db.query(FeedRequest).filter(FeedRequest.id.in_(feed_ids))} if feed_ids else {}
+    served = {fid: {it["product_id"]: it for it in f.items or []} for fid, f in feeds.items()}
+    out = {"recorded": 0, "duplicates": 0, "rejected": 0, "definition": exposure.DEFINITION}
+    for e in body.events:
+        if e.event_id in have:
+            out["duplicates"] += 1
+            continue
+        s = served.get(e.feed_id, {}).get(e.product_id)
+        if s is None:
+            out["rejected"] += 1
+            continue
+        db.add(Impression(feed_id=e.feed_id, product_id=e.product_id, position=s["position"], surface=e.surface,
+                          explore=bool(s.get("explore")), definition=exposure.DEFINITION, event_id=e.event_id,
+                          dwell_ms=e.dwell_ms))  # fmt: skip
+        have.add(e.event_id)
+        out["recorded"] += 1
+    try:
+        db.flush()
+    except IntegrityError:  # an event of this batch delivered twice at once: nothing kept, the browser retries
+        db.rollback()
+        raise HTTPException(409, "some of these events were being recorded at the same time; send them again") from None
+    _prune(db, Impression, Impression.id, MAX_IMPRESSIONS)
+    db.commit()
+    return out
+
+
+@router.get("/exposures/summary")
+def exposure_summary(since: dt.datetime | None = None, db: Session = Depends(get_db)):
+    """What has been recorded as seen (since ``since``): events under the current definition, by piece, and how many
+    older records predate it."""
+    q = db.query(Impression)
+    if since is not None:
+        q = q.filter(Impression.shown_at >= since.replace(tzinfo=None))
+    rows = q.all()
+    current = [r for r in rows if r.definition == exposure.DEFINITION]
+    by_product: dict[int, int] = {}
+    for r in current:
+        if r.product_id is not None:
+            by_product[r.product_id] = by_product.get(r.product_id, 0) + 1
+    return {"definition": exposure.DEFINITION, "dwell_ms": exposure.DWELL_MS, "visible_fraction": exposure.VISIBLE_FRACTION,
+            "events": len(current), "legacy_records": sum(1 for r in rows if r.definition is None),
+            "by_product": by_product, "feeds": sorted({r.feed_id for r in current if r.feed_id})}  # fmt: skip
+
+
 @router.post("/feed/{feed_id}/viewed")
 def feed_viewed(feed_id: str, body: ViewedIn, db: Session = Depends(get_db)):
-    """Record which served products were actually displayed. Only products that feed served are accepted, at
-    the position the server served them (each once per feed and surface)."""
+    """Earlier clients: record which served products were rendered, visible or not (no exposure definition: kept as
+    legacy records, never used as an exposure denominator). Current clients use POST /api/exposures."""
     fr = db.get(FeedRequest, feed_id)
     if fr is None:
         raise HTTPException(404, "feed not found")

@@ -2,6 +2,7 @@
 import Link from "next/link";
 import { Bookmark, Hourglass, X } from "lucide-react";
 import type { Product } from "@/lib/api";
+import { useExposure } from "@/lib/exposure";
 import { cn } from "@/lib/utils";
 import { approx } from "./confidence";
 import { Photo } from "./photo";
@@ -18,6 +19,7 @@ export function ProductTile({
   status,
   footer,
   href,
+  exposure,
 }: {
   product: Product;
   onOpen?: (p: Product) => void;
@@ -26,7 +28,10 @@ export function ProductTile({
   status?: React.ReactNode;
   footer?: React.ReactNode;
   href?: string;
+  /** The Discover feed this tile came from: seeing it is then recorded as an exposure (lib/exposure.ts). */
+  exposure?: { feedId: string | null | undefined };
 }) {
+  const seen = useExposure(exposure ? { productId: product.id, feedId: exposure.feedId, surface: "grid" } : null);
   const link = href ?? `/product/${product.id}`;
   const line =
     status ??
@@ -36,7 +41,7 @@ export function ProductTile({
       <span data-testid="approval-estimate">Matches your taste {approx(product.confidence.estimate)}</span>
     ) : null);
   return (
-    <article className="group relative" data-testid="product-card" data-product-id={product.id}>
+    <article ref={seen} className="group relative" data-testid="product-card" data-product-id={product.id}>
       <Link
         href={link}
         onClick={(e) => {

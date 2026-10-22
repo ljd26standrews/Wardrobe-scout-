@@ -24,6 +24,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     LargeBinary,
     String,
@@ -284,9 +285,11 @@ class FeedRequest(Base):
 
 
 class Impression(Base):
-    """A product actually displayed to you: a Discover card on screen, or a tile in the Discover grid."""
+    """A product you saw (an exposure, services/exposure.py): a Discover card or grid tile on screen long enough, or
+    decided about while on screen. Records without a ``definition`` predate it: a tile rendered, visible or not."""
 
     __tablename__ = "impressions"
+    __table_args__ = (Index("ix_impressions_event_id", "event_id", unique=True),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     feed_id: Mapped[str | None] = mapped_column(
@@ -299,6 +302,9 @@ class Impression(Base):
     surface: Mapped[str] = mapped_column(String(20))  # card | grid
     explore: Mapped[bool] = mapped_column(Boolean, default=False)
     shown_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    definition: Mapped[str | None] = mapped_column(String(20), nullable=True)  # exposure.DEFINITION; None: rendered
+    event_id: Mapped[str | None] = mapped_column(String(36), nullable=True)  # the browser's id: a retry counts once
+    dwell_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)  # on screen this long before it counted
 
 
 class Calibration(Base):

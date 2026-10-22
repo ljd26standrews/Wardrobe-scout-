@@ -42,6 +42,19 @@ class ViewedItem(BaseModel):
     position: int | None = None  # informational; the server records the position it served
 
 
+class ExposureEvent(BaseModel):
+    event_id: str = Field(min_length=8, max_length=36, pattern=r"^[A-Za-z0-9-]+$")
+    feed_id: str = Field(min_length=1, max_length=32)
+    product_id: int
+    surface: Literal["card", "grid"]
+    dwell_ms: int = Field(ge=0, le=86_400_000)
+
+
+class ExposuresIn(BaseModel):
+    definition: str = Field(max_length=20)
+    events: list[ExposureEvent] = Field(default_factory=list, max_length=200)
+
+
 class ViewedIn(BaseModel):
     surface: Literal["card", "grid"] = "card"
     items: list[ViewedItem] = Field(default_factory=list, max_length=100)

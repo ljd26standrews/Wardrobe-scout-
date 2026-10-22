@@ -16,6 +16,7 @@ import { LandedCost, Price } from "@/components/product/price";
 import { PiecePanel, usePiece } from "@/components/product/side-panel";
 import { ProductTile, type TileAction } from "@/components/product/tile";
 import { guarded, undoDecision, undoFailed, unmarkDecided, useDecided, useFeedback, type ActionName, type Decision } from "@/components/product/use-feedback";
+import { exposeNow, useExposure } from "@/lib/exposure";
 import { useStoredState } from "@/lib/use-stored-state";
 import { cn, titleCase } from "@/lib/utils";
 
@@ -50,7 +51,6 @@ function Discover() {
     if (serverOff !== undefined && selective && serverOff === selective.enabled) mutateSettings();
   }, [serverOff, selective, mutateSettings]);
   const seen = useRef(new Map<number, Seen>());
-  const logged = useRef(new Set<string>());
 
   // Pieces you decided on this session never come back from a response fetched before the decision. The last copy of
   // every piece shown is kept, so Undo can put a piece back at once, before the refreshed feed answers.
@@ -75,23 +75,6 @@ function Discover() {
   useEffect(() => {
     if (current && current.id !== pinned) setPinned(current.id);
   }, [current, pinned]);
-
-  // Impressions: what was actually displayed, from which feed and position (for a fair evaluation later).
-  const logViews = useCallback((feedId: string | null, surface: string, shown: { product_id: number; position: number }[]) => {
-    const fresh = shown.filter((it) => !logged.current.has(`${feedId}:${surface}:${it.product_id}`));
-    if (!feedId || !fresh.length) return;
-    fresh.forEach((it) => logged.current.add(`${feedId}:${surface}:${it.product_id}`));
-    api.post(`/api/feed/${feedId}/viewed`, { surface, items: fresh }).catch(() => {});
-  }, []);
-  useEffect(() => {
-    if (view !== "card" || !current) return;
-    const s = seen.current.get(current.id);
-    if (s) logViews(s.feedId, "card", [{ product_id: current.id, position: s.position }]);
-  }, [view, current, logViews]);
-  useEffect(() => {
-    if (view !== "grid" || !data?.feed_id) return;
-    logViews(data.feed_id, "grid", items.map((p) => ({ product_id: p.id, position: seen.current.get(p.id)?.position ?? 0 })));
-  }, [view, data?.feed_id, items, logViews]);
 
   // Your decisions in the order you made them, not the order the server answered: Undo always takes back the last one
   // you made (waiting for its save if it is still on its way), never one whose answer merely arrived last.
@@ -128,6 +111,7 @@ function Discover() {
   const act = useCallback(
     async (p: Product, action: ActionName) => {
       const s = seen.current.get(p.id);
+      exposeNow(p.id, { feedId: s?.feedId, surface: view }); // deciding about a piece on screen: you saw it
       const saving = feedback(p.id, action, [], undefined, { explore: !!p.recommendation?.explore, surface: view, feed_id: s?.feedId ?? null, position: s?.position ?? null }, p.title);
       if (action !== "skip") {
         const entry = { seq: ++seq.current, productId: p.id, saved: saving.catch(() => null) as Promise<Decision | null>, feedbackId: undefined as number | undefined };
@@ -288,11 +272,11 @@ function Discover() {
       ) : view === "grid" ? (
         <div className="grid grid-cols-2 gap-x-4 gap-y-8 sm:grid-cols-3 lg:grid-cols-4 2xl:grid-cols-5" data-testid="discover-grid">
           {items.map((p) => (
-            <ProductTile key={p.id} product={p} onOpen={openPiece} onAction={tileAction} />
+            <ProductTile key={p.id} product={p} onOpen={openPiece} onAction={tileAction} exposure={{ feedId: seen.current.get(p.id)?.feedId }} />
           ))}
         </div>
       ) : (
-        current && <Focus product={current} onAct={act} onOpen={() => openPiece(current)} onUndo={canUndo ? undoLast : undefined} />
+        current && <Focus product={current} feedId={seen.current.get(current.id)?.feedId} onAct={act} onOpen={() => openPiece(current)} onUndo={canUndo ? undoLast : undefined} />
       )}
       <PiecePanel onChanged={() => mutate()} />
     </div>
@@ -315,10 +299,11 @@ function ViewButton({ on, label, onClick, children }: { on: boolean; label: stri
 }
 
 /** One piece at a time: its photos large, its essentials, and the decisions. */
-function Focus({ product: p, onAct, onOpen, onUndo }: { product: Product; onAct: (p: Product, a: ActionName) => void; onOpen: () => void; onUndo?: () => void }) {
+function Focus({ product: p, feedId, onAct, onOpen, onUndo }: { product: Product; feedId: string | null | undefined; onAct: (p: Product, a: ActionName) => void; onOpen: () => void; onUndo?: () => void }) {
   const reasons = p.recommendation?.reasons.slice(0, 3) ?? [];
+  const seenRef = useExposure({ productId: p.id, feedId, surface: "card" });
   return (
-    <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_380px] lg:gap-10" data-testid="discover-card" data-product-id={p.id}>
+    <div ref={seenRef} className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_380px] lg:gap-10" data-testid="discover-card" data-product-id={p.id}>
       {/* The whole garment in view: square on a phone (above the decision bar), and on a computer no taller than
           the window allows. */}
       <Gallery

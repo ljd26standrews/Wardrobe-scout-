@@ -35,8 +35,10 @@ unfamiliar-seller slice). Comparisons at the same coverage count tied scores at 
 ties were ordered at random, so no method gains from an arbitrary tie order.
 
 3. **Served feeds**, from Discover's own logs: how often a feed request came back empty, approvals per piece you
-   actually saw (useful discoveries per inspection), and how often a piece you had already seen was shown again
-   (repetition), each with counts and intervals.
+   actually saw (useful discoveries per exposure) and how often a piece you had already seen was seen again
+   (repetition), each with counts and intervals. "Saw" is an exposure under app/services/exposure.py's versioned
+   definition (on screen long enough, or decided about while on screen); older records of rendered tiles are
+   reported, never used as a denominator.
 
 Refusals: no calibration metric below MIN_PREDICTIONS predictions or MIN_EACH of either outcome; no precision
 below MIN_SELECTED selected pieces. Nothing here uses synthetic data; tests/test_eval_selective.py checks the
@@ -410,10 +412,17 @@ def served_feeds(db) -> dict:
 
     * Empty feeds: feed requests that returned nothing, by policy and mode. Discover asks for a feed on every visit
       and after every decision, so these are requests, not sessions.
-    * Useful discoveries per inspection: of the garment families you actually saw, the share you then approved
-      (love, like or purchased, decided after first seeing it), once per family, by the feed that first showed it.
-    * Repetition: a family shown again in a later feed after you had already seen it."""
+    * Useful discoveries per exposure: of the garment families you actually saw (an exposure under the current
+      definition, services/exposure.py: on screen long enough, or decided about while on screen), the share you then
+      approved (love, like or purchased, decided after first seeing it), once per family, by the feed that first
+      showed it.
+    * Repetition: a family seen again in a later feed after you had already seen it. One continuous stretch on screen
+      is one exposure however many feed answers arrive meanwhile, so a refresh is not a repeat.
+
+    Records made before the current definition (rendered tiles, visible or not) are counted and reported, never used
+    as a denominator: with no exposure under the current definition both rates are reported as unavailable."""
     from app.models import FeedRequest, Impression, Product
+    from app.services import exposure
     from app.services.approval_data import rated_outcomes
 
     feeds = {f.id: f for f in db.query(FeedRequest)}
@@ -422,18 +431,26 @@ def served_feeds(db) -> dict:
         r = requests.setdefault(f.policy if not f.mode else f"{f.policy}:{f.mode}", [0, 0])
         r[0] += 1
         r[1] += not f.items
+    legacy = db.query(Impression).filter(Impression.definition.is_(None)).count()
+    out = {"empty_feeds": {k: _rate(e, n) for k, (n, e) in sorted(requests.items())},
+           "exposure_definition": exposure.DEFINITION, "legacy_records": legacy}  # fmt: skip
+    query = db.query(Impression).filter(Impression.product_id.isnot(None), Impression.definition == exposure.DEFINITION)
+    events = query.order_by(Impression.shown_at, Impression.id).all()
+    if not events:
+        why = (f"no exposure recorded under {exposure.DEFINITION} yet"
+               + (f"; {legacy} earlier records counted rendered tiles, visible or not, and are not used" if legacy else ""))  # fmt: skip
+        return out | {"discoveries_per_exposure": {"unavailable": why}, "repetition": {"unavailable": why}}
     group_of = dict(db.query(Product.id, Product.group_id))
     labels = {o.family: o for o in rated_outcomes(db)}
     first: dict[str, tuple] = {}  # family -> (first seen, the feed policy that showed it)
     seen_in: dict[str, set] = {}
     displays = repeats = 0
-    query = db.query(Impression).filter(Impression.product_id.isnot(None))
-    for imp in query.order_by(Impression.shown_at, Impression.id):
+    for imp in events:
         gid = group_of.get(imp.product_id)
         family = f"g{gid}" if gid is not None else f"p{imp.product_id}"
         feeds_seen = seen_in.setdefault(family, set())
         if imp.feed_id in feeds_seen:
-            continue  # shown twice by one feed (as a card and in the grid): one display
+            continue  # seen twice within one feed (as a card and in the grid, or scrolled back to): one display
         displays += 1
         repeats += bool(feeds_seen)
         feeds_seen.add(imp.feed_id)
@@ -447,9 +464,8 @@ def served_feeds(db) -> dict:
         f[0] += bool(o is not None and o.y == 1 and o.created_at >= at)
         f[1] += 1
     total = [sum(v[0] for v in found.values()), sum(v[1] for v in found.values())]
-    return {
-        "empty_feeds": {k: _rate(e, n) for k, (n, e) in sorted(requests.items())},
-        "discoveries_per_inspection": {"all": _rate(*total), **{k: _rate(*v) for k, v in sorted(found.items())}},
+    return out | {
+        "discoveries_per_exposure": {"all": _rate(*total), **{k: _rate(*v) for k, v in sorted(found.items())}},
         "repetition": _rate(repeats, displays),
     }
 
@@ -521,13 +537,24 @@ def report(result: dict) -> str:
                       _cal_line("raw σ(m)", u["raw"]), _cal_line("calibrated", u["calibrated"]), ""]  # fmt: skip
     served = result.get("served")
     if served:
-        lines += ["## Served feeds (Discover's logs)", "", "| | Count | Rate [95% CI] |", "|---|---|---|"]
+        lines += ["## Served feeds (Discover's logs)", "",
+                  f"Exposure: `{served.get('exposure_definition', '?')}` (app/services/exposure.py)."
+                  + (f" {served['legacy_records']} earlier records counted rendered tiles and are not used."
+                     if served.get("legacy_records") else ""), "",
+                  "| | Count | Rate [95% CI] |", "|---|---|---|"]  # fmt: skip
         for k, r in served["empty_feeds"].items():
             lines.append(f"| Empty feed requests, {k} | {r['count']} of {r['of']} | {_share(r)} |")
-        for k, r in served["discoveries_per_inspection"].items():
-            lines.append(f"| Approved after first seeing it, {k} | {r['count']} of {r['of']} | {_share(r)} |")
+        disc = served["discoveries_per_exposure"]
+        if "unavailable" in disc:
+            lines.append(f"| Approved after first seeing it | – | unavailable: {disc['unavailable']} |")
+        else:
+            for k, r in disc.items():
+                lines.append(f"| Approved after first seeing it, {k} | {r['count']} of {r['of']} | {_share(r)} |")
         r = served["repetition"]
-        lines += [f"| Shown again after you had seen it | {r['count']} of {r['of']} | {_share(r)} |", ""]
+        if "unavailable" in r:
+            lines += [f"| Seen again after you had seen it | – | unavailable: {r['unavailable']} |", ""]
+        else:
+            lines += [f"| Seen again after you had seen it | {r['count']} of {r['of']} | {_share(r)} |", ""]
     lines += ["Targets are aspirations: a mode meets its target only when the lower end of its interval clears it. "
               "Rates below the minimum sample are shown as counts only."]  # fmt: skip
     return "\n".join(lines)
