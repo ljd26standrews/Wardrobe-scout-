@@ -25,15 +25,18 @@ garment type.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import random
+import threading
 from collections import Counter, defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 import numpy as np
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session
 
 from ..ingestion.vocab import CATEGORY_GROUP, NEUTRAL_COLOURS, PREMIUM_FIBRES, QUIET_LUXURY_BRANDS
 from ..models import Feedback, InspirationImage, Product, Seller, WardrobeItem, utcnow
@@ -193,6 +196,8 @@ class Profile:
     redundant: Counter = field(default_factory=Counter)  # "already own" per category: shown, never a category ban
     owned: list[Owned] = field(default_factory=list)
     owned_threshold: float = 0.96  # photo similarity that counts as "like it" (Settings → near-duplicate threshold)
+    _owned_by_cat: dict[str, list[Owned]] | None = field(default=None, repr=False)
+    _owned_memo: dict[int, Owned | None] = field(default_factory=dict, repr=False)  # per request: ranking, then gate
     construction_concerns: int = 0
     decided_ids: set[int] = field(default_factory=set)
     # Product families (Product.group_id) you have decided on: their other listings are the same garment.
@@ -205,6 +210,14 @@ class Profile:
     n_seed: int = 0
     reason_counts: Counter = field(default_factory=Counter)
     strength: float = 0.0
+
+    def owned_by_category(self) -> dict[str, list[Owned]]:
+        """``owned`` by garment type (built once, after the profile is complete)."""
+        if self._owned_by_cat is None:
+            self._owned_by_cat = {}
+            for o in self.owned:
+                self._owned_by_cat.setdefault(o.category, []).append(o)
+        return self._owned_by_cat
 
     def affinity(self, key: str) -> float:
         n = self.attr_n.get(key, 0.0)
@@ -331,17 +344,21 @@ LISTING_SPECIFIC = frozenset({"too_expensive", "wrong_size", "quality_unclear"})
 def owned_like(prof: Profile, p: Product, backend: str) -> Owned | None:
     """The "already own" objection this piece falls under: the same garment type in the same main colour, or a
     near-identical photo. Never a whole category (hiding a category is an explicit setting: Settings → Discover)."""
-    for o in prof.owned:
-        if o.product_id == p.id:
-            return o
-        if (p.category or "other") != o.category:
-            continue
-        if o.colour and p.colours and p.colours[0] == o.colour:
-            return o
+    if p.id in prof._owned_memo:
+        return prof._owned_memo[p.id]
+    found = None
+    vec = None
+    for o in prof.owned_by_category().get(p.category or "other") or ():
+        if o.product_id == p.id or (o.colour and p.colours and p.colours[0] == o.colour):
+            found = o
+            break
         if o.vec is not None and p.image_embedding is not None and p.embedding_backend == backend:
-            if float(o.vec @ emb.from_bytes(p.image_embedding)) >= prof.owned_threshold:
-                return o
-    return None
+            vec = emb.from_bytes(p.image_embedding) if vec is None else vec
+            if float(o.vec @ vec) >= prof.owned_threshold:
+                found = o
+                break
+    prof._owned_memo[p.id] = found
+    return found
 
 
 def above_judged_price(prof: Profile, category: str, gbp: float | None) -> bool:
@@ -361,6 +378,22 @@ def _money(amount: float, currency: str | None, gbp: float) -> str:
 
 
 # ------------------------------------------------------------------ components
+# The written-profile score of each piece, shared across requests until the products' content or the profile
+# changes (revisions.py): it does not depend on your decisions.
+_rules_lock = threading.Lock()
+_rules_cache: dict = {"key": None, "items": {}}
+
+
+def rules_lookup(db: Session, taste: dict) -> dict[int, tuple[float, list[str]]]:
+    from . import revisions
+
+    key = (revisions.current(db, "products"), hashlib.sha1(json.dumps(taste, sort_keys=True).encode()).hexdigest())
+    with _rules_lock:
+        if _rules_cache["key"] != key:
+            _rules_cache.update(key=key, items={})
+        return _rules_cache["items"]
+
+
 def rules_component(p: Product, taste: dict) -> tuple[float, list[str]]:
     pts = 0.0
     why: list[str] = []
@@ -571,12 +604,14 @@ def rank_products(
         weights = {**weights, "taste": weights.get("taste", 3.0)}
     denom = sum(abs(weights.get(c, 0)) * g for c, g in gates.items()) or 1.0
 
+    rules_seen = rules_lookup(db, taste)
     out: list[Ranked] = []
     for i, p in enumerate(products):
         reasons: list[str] = []
         cautions: list[str] = []
-        rules, rules_why = rules_component(p, taste)
-        learned, contribs = learned_attr_component(p, prof)
+        if (hit := rules_seen.get(p.id)) is None:
+            hit = rules_seen[p.id] = rules_component(p, taste)
+        rules, rules_why = hit[0], list(hit[1])
         q = quality_lookup.get(p.id) if quality_lookup else None
         if q is None:
             q = assess(db, p, price_stats=price_stats, fx=prof.fx)
@@ -631,6 +666,7 @@ def rank_products(
                 )
             )
             continue
+        learned, contribs = learned_attr_component(p, prof)  # the earlier engine only (Bayes models attributes)
         comps = {
             "rules": rules,
             "learned_attributes": learned,
@@ -888,8 +924,9 @@ def feed_candidates(db: Session, prof: Profile, *, include_skipped_after_days: i
         blocked |= {
             g for (g,) in db.query(Product.group_id).filter(Product.id.in_(skipped), Product.group_id.isnot(None))
         }
-    # Evidence is read for every candidate's quality; photos are loaded only for the cards actually shown.
-    q = db.query(Product).options(selectinload(Product.evidence)).filter(Product.status == "active")
+    # Evidence is loaded only for pieces whose quality is not cached yet (presenter.Context.load_evidence), and
+    # photos only for the cards actually shown (presenter.load_images).
+    q = db.query(Product).filter(Product.status == "active")
     out = []
     for p in q:
         if p.id in prof.decided_ids or p.id in skipped:

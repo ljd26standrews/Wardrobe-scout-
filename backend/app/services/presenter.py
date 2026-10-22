@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
-from sqlalchemy.orm import Session
+import threading
 
-from ..models import Evidence, Product, SavedItem, Seller
-from . import dedup
+from sqlalchemy import inspect as sa_inspect
+from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import set_committed_value
+
+from ..models import Evidence, Product, ProductImage, SavedItem, Seller
+from . import dedup, revisions
 from .landed_cost import estimate_landed_cost
 from .money import code, rates
 from .quality import assess, category_price_stats, evidence_view
@@ -19,6 +23,38 @@ RELATION_LABEL = {
     "similar_photo": "One similar photograph — may well be a different product",
     "visually_similar": "Visually similar — may be a different product",
 }
+
+
+# Quality assessments shared across requests, keyed by everything they depend on: products, evidence, relations,
+# settings (revisions.py) and the conversion rates. A decision changes none of those, so the feed refreshed after
+# each decision reuses them; an evidence edit, a match decision, an import or a product update recomputes them.
+_quality_lock = threading.Lock()
+_quality_cache: dict = {"key": None, "items": {}}
+
+
+def _shared_quality(key: tuple) -> dict[int, dict]:
+    with _quality_lock:
+        if _quality_cache["key"] != key:
+            _quality_cache.update(key=key, items={})
+        return _quality_cache["items"]
+
+
+def _load_children(db: Session, products: list[Product], attr: str, model, order) -> None:
+    """Loads one collection (photos, evidence) for many pieces in a few queries instead of one per piece. Pieces
+    whose collection is already loaded are left as they are."""
+    todo = [p for p in products if attr in sa_inspect(p).unloaded]
+    for i in range(0, len(todo), 900):
+        chunk = todo[i : i + 900]
+        found: dict[int, list] = {p.id: [] for p in chunk}
+        for row in db.query(model).filter(model.product_id.in_(list(found))).order_by(order, model.id):
+            found[row.product_id].append(row)
+        for p in chunk:
+            set_committed_value(p, attr, found[p.id])
+
+
+def load_images(db: Session, products: list[Product]) -> None:
+    """Photos for the cards about to be shown (ranking itself needs none)."""
+    _load_children(db, products, "images", ProductImage, ProductImage.position)
 
 
 class Context:
@@ -36,7 +72,14 @@ class Context:
         self._quality: dict[int, dict] = {}
         self._strong: dict[int, list[int]] | None = None
         self.price_filter: dict | None = None  # the feed's price filter as applied (api/products.price_filter)
+        rev = revisions.current(db, "products", "evidence", "relations", "settings")
+        self._shared = _shared_quality((rev, tuple(sorted(self.fx.to_gbp.items()))))
         self.hidden: dict | None = None  # categories you hid from Discover, and how many pieces that left out
+
+    def load_evidence(self, products: list[Product]) -> None:
+        """Evidence for the pieces whose quality assessment is not cached yet; a cached assessment needs none."""
+        cold = [p for p in products if p.id not in self._quality and p.id not in self._shared]
+        _load_children(self.db, cold, "evidence", Evidence, Evidence.id)
 
     def seller_evidence(self, seller_id: int | None) -> list[Evidence]:
         if not seller_id:
@@ -86,19 +129,29 @@ class Context:
         }
 
     def quality(self, p: Product, design: float | None = None, design_conf: float | None = None) -> dict:
-        key = p.id
-        if key not in self._quality or design is not None:
-            self._quality[key] = assess(
-                self.db,
-                p,
-                seller_evidence=self.seller_evidence(p.seller_id),
-                price_stats=self.price_stats,
-                cheaper_equivalent=self.cheaper_equivalent(p),
-                design_score=design,
-                design_confidence=design_conf,
-                fx=self.fx,
-            )
-        return self._quality[key]
+        """The quality assessment (shared across requests until its inputs change), with this request's taste
+        compatibility when given. Never mutate the result: it is shared."""
+        base = self._quality.get(p.id)
+        if base is None:
+            base = self._shared.get(p.id)
+            if base is None:
+                base = assess(
+                    self.db,
+                    p,
+                    seller_evidence=self.seller_evidence(p.seller_id),
+                    price_stats=self.price_stats,
+                    cheaper_equivalent=self.cheaper_equivalent(p),
+                    fx=self.fx,
+                )
+                with _quality_lock:
+                    self._shared[p.id] = base
+            self._quality[p.id] = base
+        if design is None:
+            return base
+        dims = {**base["dimensions"], "design_compatibility": {
+            "score": round(design * 100), "label": "Personal fit with your taste", "confidence": round(design_conf or 0.0, 2),
+        }}  # fmt: skip
+        return {**base, "dimensions": dims}
 
 
 def image_view(img) -> dict:
@@ -136,6 +189,7 @@ def product_card(ctx: Context, p: Product, ranked: Ranked | None = None, detail:
     saved = ctx.saved.get(p.id)
     pros, cons = pros_and_cons(p, q, ranked)
     links = dict(p.links or {})
+    shown, sizing = gallery(p)
     if seller and seller.platform == "yupoo" and "yupoo" not in links and p.data_origin == "scraped":
         links["yupoo"] = p.source_url
     data = {
@@ -168,8 +222,8 @@ def product_card(ctx: Context, p: Product, ranked: Ranked | None = None, detail:
         "landed_cost": landed,
         "source_url": p.source_url if not p.source_url.startswith("manual://") else None,
         "links": links,
-        "images": [image_view(i) for i in gallery(p)[0]],
-        "sizing_images": [image_view(i) for i in gallery(p)[1]],
+        "images": [image_view(i) for i in shown],
+        "sizing_images": [image_view(i) for i in sizing],
         "analysis_state": p.analysis_state,
         "status": p.status,
         "data_origin": p.data_origin,

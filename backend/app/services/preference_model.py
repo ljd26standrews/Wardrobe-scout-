@@ -58,7 +58,6 @@ import numpy as np
 from scipy import sparse
 from scipy.linalg import cho_solve, solve_triangular
 from scipy.optimize import minimize
-from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from ..models import Feedback, InspirationImage, Product, WardrobeItem
@@ -207,15 +206,17 @@ _space_cache: dict[str, FeatureSpace] = {}
 
 
 def build_feature_space(db: Session, taste: dict, backend: str) -> FeatureSpace:
-    """Feature matrix for every product. Cached until products, wardrobe, taste profile or image model change."""
+    """Feature matrix for every product. Cached until products (their content: services/revisions.py), wardrobe,
+    taste profile or image model change; a decision or a piece being marked as seen does not rebuild it."""
+    from . import revisions
     from .recommender import rules_component
 
-    n, last = db.query(func.count(Product.id), func.max(Product.updated_at)).one()
+    products_rev = revisions.current(db, "products")
     wardrobe_keys = sorted({k for w in db.query(WardrobeItem) for k in attr_keys(w)})
     history_keys = sorted({k for fb in _orphaned_feedback(db) for k in attr_keys(fb.snapshot)})
     key = hashlib.sha1(
         json.dumps(
-            [n, str(last), backend, taste, PRIOR_SCALE, INTERACTIONS, wardrobe_keys, history_keys],
+            [products_rev, backend, taste, PRIOR_SCALE, INTERACTIONS, wardrobe_keys, history_keys],
             sort_keys=True,
             default=str,
         ).encode()

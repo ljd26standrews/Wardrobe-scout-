@@ -8,7 +8,7 @@ from collections import Counter
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..ingestion.parsing import materials_to_text, parse_materials
@@ -16,7 +16,7 @@ from ..models import Evidence, Feedback, FeedRequest, Impression, Product
 from ..schemas import EvidenceIn, MatchDecision, ProductPatch, ViewedIn
 from ..services import calibration, dedup, jobs, money, selective
 from ..services import embeddings as emb
-from ..services.presenter import Context, comparison, product_card
+from ..services.presenter import Context, comparison, load_images, product_card
 from ..services.recommender import build_feed, build_profile, collapse_families, feed_candidates, rank_products
 from ..services.settings_store import get_setting
 from ..services.wardrobe import complement_scores
@@ -80,7 +80,7 @@ def _apply_filters(
 
 
 def _load(db: Session, status: str | None = "active"):
-    q = db.query(Product).options(selectinload(Product.images), selectinload(Product.evidence))
+    q = db.query(Product)  # evidence and photos are loaded in batches when needed (presenter)
     if status:
         q = q.filter(Product.status == status)
     return q
@@ -142,6 +142,7 @@ def ranked_candidates(db: Session, prof, ctx: Context, flt: dict) -> tuple[list,
         ctx.hidden = {"categories": sorted(hidden), "pieces": len(candidates) - len(shown)}
         candidates = shown
     filters = {k: v for k, v in flt.items() if k != "include_seed"}
+    ctx.load_evidence(candidates)
     ctx.price_filter = price_filter(db, flt, candidates, ctx)  # as applied, reported with the feed
     candidates = _apply_filters(candidates, **filters, origin=None, ctx=ctx)
     quality_lookup = {p.id: ctx.quality(p) for p in candidates}
@@ -204,6 +205,7 @@ def feed(
         if arm:
             summary.update(trial=arm, message="Trial day: Discover shows the earlier ranking today (with its "
                            "exploration slots), so the two can be compared. You can end the trial in Settings.")  # fmt: skip
+        load_images(db, [r.product for r in chosen])
         return {"feed_id": feed_id, "items": [feed_card(ctx, r, offers) for r in chosen], **base, "gate": summary}
     rate = rcfg.get("exploration_rate", 0.18)
     n_explore = selective.warmup_exploration(gate, limit, rate)
@@ -228,6 +230,7 @@ def feed(
     feed_id = _log_feed(db, rcfg, prof, n_candidates, flt, selective.log_items(gate, chosen, offers),
                         policy="selective", mode=gate.mode, gate=gate, trial=arm, sampling=sampling,
                         exploration=rate if n_explore else 0.0)  # fmt: skip
+    load_images(db, [c.ranked.product for c in chosen])
     items = [feed_card(ctx, c.ranked, offers, selective.card_confidence(gate, c)) for c in chosen]
     return {"feed_id": feed_id, "items": items, **base, "gate": summary}
 
@@ -259,6 +262,7 @@ def learning_feed(
     summary["sampling"] = sampling
     feed_id = _log_feed(db, rcfg, prof, n_candidates, flt, selective.log_items(gate, picks, offers),
                         policy="learning", mode=gate.mode, gate=gate, sampling=sampling)  # fmt: skip
+    load_images(db, [c.ranked.product for c in picks])
     items = [feed_card(ctx, c.ranked, offers, selective.card_confidence(gate, c)) for c in picks]
     return {"feed_id": feed_id, "items": items, **base, "gate": summary}
 
@@ -378,6 +382,7 @@ def list_products(
     products = _load(db, status if status != "all" else None).all()
     if new_only:
         products = [p for p in products if p.is_new]
+    ctx.load_evidence(products)
     price_currency = _filter_currency(price_currency)
     applied = price_filter(db, {"min_price": min_price, "max_price": max_price, "price_currency": price_currency},
                            products, ctx)  # fmt: skip
@@ -406,7 +411,9 @@ def list_products(
             quality_lookup={p.id: ctx.quality(p) for p in products},
             wardrobe_lookup=complement_scores(db, products),
         )
-        items = [product_card(ctx, r.product, r) for r in ranked[start : start + page_size]]
+        page_ranked = ranked[start : start + page_size]
+        load_images(db, [r.product for r in page_ranked])
+        items = [product_card(ctx, r.product, r) for r in page_ranked]
     else:
         key = {
             "newest": lambda p: -(p.first_seen_at.timestamp() if p.first_seen_at else 0),
@@ -416,6 +423,7 @@ def list_products(
             "price_desc": lambda p: (_gbp(ctx, p) is None, -(_gbp(ctx, p) or 0)),
         }[sort]
         products.sort(key=key)
+        load_images(db, products[start : start + page_size])
         items = [product_card(ctx, p) for p in products[start : start + page_size]]
     return {"items": items, "total": total, "page": page, "page_size": page_size, "price_filter": applied}
 

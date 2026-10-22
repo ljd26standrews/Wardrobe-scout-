@@ -18,11 +18,13 @@ Principles
 from __future__ import annotations
 
 import math
+import threading
 from statistics import median
 
 from sqlalchemy.orm import Session
 
 from ..models import Evidence, Product, Seller
+from . import revisions
 from .money import Rates, rates
 from .sources import canonical_source
 
@@ -108,10 +110,26 @@ def score_dimension(items: list[Evidence]) -> dict:
             **counts}  # fmt: skip
 
 
+# Category medians shared across requests until the listings or the conversion rates change (revisions.py).
+_price_stats_lock = threading.Lock()
+_price_stats_cache: dict = {"key": None, "value": None}
+
+
 def category_price_stats(db: Session, fx: Rates | None = None) -> dict[str, float]:
     """Median price in pounds per category, over listings for sale whose currency converts (others are left out:
     an unstated currency is not assumed to be yuan). Seed examples from your notes are not listings."""
     fx = fx or rates(db)
+    key = (revisions.current(db, "products"), tuple(sorted(fx.to_gbp.items())))
+    with _price_stats_lock:
+        if _price_stats_cache["key"] == key:
+            return dict(_price_stats_cache["value"])
+    stats = _category_price_stats(db, fx)
+    with _price_stats_lock:
+        _price_stats_cache.update(key=key, value=stats)
+    return dict(stats)
+
+
+def _category_price_stats(db: Session, fx: Rates) -> dict[str, float]:
     by_cat: dict[str, list[float]] = {}
     for cat, price, currency in db.query(Product.category, Product.price, Product.currency).filter(
         Product.price.isnot(None), Product.status == "active", Product.data_origin != "seed"

@@ -20,6 +20,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import sqlite3
 import zipfile
 from datetime import datetime
@@ -558,4 +559,13 @@ def restore_full_snapshot(snapshot: Path, data_dir: Path) -> dict:
             target.parent.mkdir(parents=True, exist_ok=True)
             with z.open(name) as src:
                 target.write_bytes(src.read())
-    return {"database": str(data_dir / "wardrobe_scout.db"), "files": manifest.get("files", 0)}
+    db_path = data_dir / "wardrobe_scout.db"
+    if db_path.exists():  # a copy is a new instance: nothing cached for the original may be reused for it
+        import sqlite3
+
+        with sqlite3.connect(db_path) as conn:
+            has = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='data_revisions'").fetchone()
+            if has:
+                conn.execute("UPDATE data_revisions SET n = ? WHERE name = 'instance'",
+                             (int.from_bytes(os.urandom(7), "big"),))  # fmt: skip
+    return {"database": str(db_path), "files": manifest.get("files", 0)}

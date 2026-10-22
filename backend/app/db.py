@@ -87,8 +87,10 @@ def session_scope() -> Iterator[Session]:
 
 def create_all() -> None:
     from . import models  # noqa: F401 - register models
+    from .services import revisions
 
     Base.metadata.create_all(get_engine())
+    revisions.install(get_engine())  # counters that key caches by data (services/revisions.py)
 
 
 INITIAL_REVISION = "53601a417a9c"
@@ -126,3 +128,6 @@ def migrate() -> None:
         create_all()  # add any missing tables
         command.stamp(cfg, INITIAL_REVISION if missing else "head")
     command.upgrade(cfg, "head")
+    from .services import revisions
+
+    revisions.install(get_engine())  # again: a migration that rebuilds a table drops its triggers

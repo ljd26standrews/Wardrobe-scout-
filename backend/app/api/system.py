@@ -60,10 +60,22 @@ def status(db: Session = Depends(get_db)):
         "saved": db.query(func.count(SavedItem.id)).scalar(),
         "wardrobe": db.query(func.count(WardrobeItem.id)).scalar(),
         "running_jobs": db.query(func.count(Job.id)).filter(Job.status.in_(["queued", "running"])).scalar(),
-        "embedding": emb.backend_info(),
+        "embedding": {**emb.backend_info(), **_embedding_coverage(db)},
         "ai": ai.status(),
         "playwright_enabled": get_settings().enable_playwright,
     }
+
+
+def _embedding_coverage(db: Session) -> dict:
+    """How many products were analysed by the photo backend in use. Vectors from another backend (say CLIP, when the
+    lightweight features are in use) are not comparable: those products count as unanalysed until re-analysed
+    (Settings: Re-analyse all photos), and approval estimates fitted under the other backend are withdrawn and refitted."""
+    current = emb.get_image_backend().name
+    rows = dict(db.query(Product.embedding_backend, func.count()).filter(Product.status == "active")
+                .group_by(Product.embedding_backend).all())  # fmt: skip
+    other = sum(n for b, n in rows.items() if b and b != current)
+    return {"analysed_current": rows.get(current, 0), "analysed_other": other, "unanalysed": rows.get(None, 0),
+            "recompute_needed": other > 0}  # fmt: skip
 
 
 # ----------------------------------------------------------------- settings

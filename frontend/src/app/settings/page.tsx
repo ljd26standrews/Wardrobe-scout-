@@ -17,7 +17,15 @@ import { timeAgo, titleCase } from "@/lib/utils";
 type Settings = Record<string, any>;
 type Status = {
   products: { total: number; by_origin: Record<string, number> };
-  embedding: { image_backend: string; is_clip: boolean; note: string | null };
+  embedding: {
+    image_backend: string;
+    is_clip: boolean;
+    note: string | null;
+    analysed_current: number;
+    analysed_other: number;
+    unanalysed: number;
+    recompute_needed: boolean;
+  };
   ai: { enabled: boolean; configured_enabled: boolean; api_key_present: boolean; model: string; month_spend_usd: number; monthly_cap_usd: number; remaining_usd: number };
   playwright_enabled: boolean;
 };
@@ -448,18 +456,30 @@ export default function SettingsPage() {
         <Section title="System & data">
           <div className="grid gap-6 md:grid-cols-2">
             <div className="space-y-3 text-sm">
-              <p>
-                <span className="label mr-2">Image model</span>
-                {status?.embedding.image_backend}
+              <p data-testid="photo-backend">
+                <span className="label mr-2">Photo analysis</span>
+                {status?.embedding.is_clip ? "CLIP" : "Lightweight features"} <span className="text-muted-foreground">({status?.embedding.image_backend})</span>
               </p>
+              {status && (
+                <p className="text-xs text-muted-foreground">
+                  {status.embedding.analysed_current} listings analysed with it · {status.embedding.unanalysed} not yet analysed
+                  {status.embedding.analysed_other > 0 && ` · ${status.embedding.analysed_other} analysed with another model`}
+                </p>
+              )}
+              {status?.embedding.recompute_needed && (
+                <p className="rounded-lg bg-caution/10 px-3 py-2 text-xs leading-relaxed text-caution" data-testid="recompute-needed">
+                  Photo analysis has changed. Listings analysed with the other method count as not yet analysed until you choose
+                  Re-analyse all photos, and match estimates fitted with the other method were withdrawn; they are refitted automatically.
+                </p>
+              )}
               {status?.embedding.note && <p className="text-xs leading-relaxed text-muted-foreground">{status.embedding.note}</p>}
               <p>
                 <span className="label mr-2">Products</span>
                 {status?.products.total} ({Object.entries(status?.products.by_origin ?? {}).map(([k, v]) => `${v} ${k}`).join(", ")})
               </p>
               <div className="flex flex-wrap gap-2">
-                <Button size="sm" variant="outline" onClick={async () => { const r = await api.post<{ job_id: number }>("/api/maintenance/recompute"); watch(r.job_id, "Recomputing embeddings", refresh); }}>
-                  <RefreshCw /> Recompute embeddings
+                <Button size="sm" variant="outline" onClick={async () => { const r = await api.post<{ job_id: number }>("/api/maintenance/recompute"); watch(r.job_id, "Re-analysing photos", refresh); }}>
+                  <RefreshCw /> Re-analyse all photos
                 </Button>
                 <Button size="sm" variant="outline" onClick={async () => { const r = await api.post<{ job_id: number }>("/api/maintenance/dedup"); watch(r.job_id, "Re-matching duplicates", refresh); }}>
                   Re-run duplicate matching
