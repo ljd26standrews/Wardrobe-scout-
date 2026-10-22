@@ -210,7 +210,7 @@ def build_feature_space(db: Session, taste: dict, backend: str) -> FeatureSpace:
     """Feature matrix for every product. Cached until products (their content: services/revisions.py), wardrobe,
     taste profile or image model change; a decision or a piece being marked as seen does not rebuild it."""
     from . import revisions
-    from .recommender import photo_matrix, read_listings, rules_component, rules_lookup
+    from .recommender import catalogue_products, photo_matrix, rules_component, rules_lookup
 
     products_rev = revisions.current(db, "products")
     wardrobe_keys = sorted({k for w in db.query(WardrobeItem) for k in attr_keys(w)})
@@ -225,7 +225,7 @@ def build_feature_space(db: Session, taste: dict, backend: str) -> FeatureSpace:
     with _cache_lock:
         if key in _space_cache:
             return _space_cache[key]
-    products = read_listings(db)  # every listing, as plain records
+    products = catalogue_products(db)  # shared with the ranking and equivalent offers
     keys = [attr_keys(p) for p in products]
     vocab_keys = {k for ks in keys for k in ks}
     # Wardrobe attributes, and those of decided products since deleted, extend the vocabulary so owned

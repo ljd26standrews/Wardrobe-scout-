@@ -1001,7 +1001,7 @@ class Listing:
 
 # Every active listing, until the listings' content changes (services/revisions.py).
 _active_lock = threading.Lock()
-_active_cache: dict = {"key": None, "products": []}
+_active_cache: dict = {"key": None, "products": [], "all": []}
 
 
 def read_listings(db: Session, *conditions) -> list[Listing]:
@@ -1015,16 +1015,21 @@ def read_listings(db: Session, *conditions) -> list[Listing]:
     return [Listing.from_row(r) for r in db.execute(query)]
 
 
-def active_products(db: Session) -> list[Listing]:
-    """Every active listing, read once per change of the listings' content and shared by every feed (building
-    20,000 ORM objects took about 2 s of each feed)."""
+def catalogue_products(db: Session, *, active: bool = False) -> list[Listing]:
+    """One shared read of the catalogue for ranking, features and equivalent offers. Content and address
+    revisions invalidate it across processes; presentation still uses fresh session objects."""
     from . import revisions
 
     key = revisions.current(db, "products", "photos", "addresses")
     with _active_lock:
         if _active_cache["key"] != key:
-            _active_cache.update(key=key, products=read_listings(db, Product.status == "active"))
-        return _active_cache["products"]
+            products = read_listings(db)
+            _active_cache.update(key=key, all=products, products=[p for p in products if p.status == "active"])
+        return _active_cache["products" if active else "all"]
+
+
+def active_products(db: Session) -> list[Listing]:
+    return catalogue_products(db, active=True)
 
 
 def feed_candidates(
