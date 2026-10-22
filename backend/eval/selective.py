@@ -18,7 +18,9 @@ Protocols
    describe that population, not the whole catalogue, and no inverse-propensity correction is claimed for it
    (the main feed is deterministic; only Learning picks log inclusion probabilities).
 2. **Representative.** Your Evaluate-page grades: pieces drawn uniformly from readable undecided listings,
-   graded for taste alone (2-3 = approval). Training uses every decision except those about graded families.
+   graded for taste alone (2-3 = approval), one record per garment (eval/heldout.py). Training uses everything
+   except what is linked to a graded garment (decisions under any of its listings or addresses, linked wardrobe
+   pieces, inspiration photos that are its photographs; services/provenance.py).
    Coverage here estimates the share of candidates a mode would show. Thresholds are suggested on one half of
    the graded families and reported on the other.
 
@@ -73,6 +75,7 @@ class Prediction:
     bounds: dict[str, float] = field(default_factory=dict)  # conservative bound per mode
     score: float | None = None  # representative protocol: the full Discover score
     familiar_seller: bool | None = None  # had you rated a piece from its seller before? (None: seller unknown)
+    unit: str | None = None  # split unit: garments that may become one share it (eval/heldout.py)
 
 
 # ----------------------------------------------------------------- metrics
@@ -190,6 +193,7 @@ def rolling_origin(
 ) -> list[Prediction]:
     from app.services import calibration
     from app.services.approval_data import LABEL_VERSION, rated_outcomes
+    from app.services.provenance import Identity
     from app.services.settings_store import get_setting
 
     version = version or LABEL_VERSION
@@ -197,12 +201,13 @@ def rolling_origin(
     outcomes = rated_outcomes(db, version=version)
     space = calibration._space(db)
     seller = _sellers(db, outcomes)
+    ident = Identity(db)  # identity as it is now: a later match or re-import widens what is held out
     preds: list[Prediction] = []
     for b, i in enumerate(range(first, len(outcomes), block)):
         test = outcomes[i : i + block]
         cutoff = test[0].created_at
-        held = frozenset(o.family for o in test)
-        train = [o for o in rated_outcomes(db, before=cutoff, version=version) if o.family not in held]
+        held = ident.resolve(families={o.family for o in test})
+        train = [o for o in rated_outcomes(db, before=cutoff, version=version) if not held.covers_outcome(o)]
         new = predict(db, space, cfg, test, train=train, exclude=held, before=cutoff, block=b, n_train=len(train),
                       version=version)  # fmt: skip
         known = {seller.get(o.feedback_id) for o in train} - {None}
@@ -311,40 +316,46 @@ def unfamiliar_slice(preds: list[Prediction], cfg: dict) -> dict:
 
 # ----------------------------------------------------------------- representative protocol
 def representative(db, seed: int = 0) -> dict:
-    """Train on everything except graded families; test on your uniformly sampled Evaluate grades.
+    """Train on everything not linked to a graded garment; test on your uniformly sampled Evaluate grades, one record
+    per garment (eval/heldout.py).
 
-    Deletes the graded families' decisions from the session's database: run it on a copy, and last."""
-    from app.models import Feedback, Judgement, Product
+    Deletes everything linked to the graded garments from the session's database: run it on a copy, and last."""
+    from app.models import Judgement, Product
     from app.services import calibration
-    from app.services.approval_data import rated_outcomes
+    from app.services.approval_data import RatedOutcome, rated_outcomes
+    from app.services.provenance import Identity
     from app.services.recommender import rank_products
     from app.services.settings_store import get_setting
 
+    from .heldout import graded_garments, held_out, purge_copy
+
     cfg = get_setting(db, "selective")
-    judged = [j for j in db.query(Judgement).order_by(Judgement.id) if j.product_id is not None]
-    products = {p.id: p for p in db.query(Product).filter(Product.id.in_([j.product_id for j in judged]))}
-    judged = [j for j in judged if j.product_id in products]
-    liked = sum(j.taste >= 2 for j in judged)
-    summary = {"judgements": len(judged), "liked": liked}
-    if len(judged) < MIN_JUDGEMENTS or liked < MIN_LIKED:
-        return {"summary": summary | {"refused": f"needs {MIN_JUDGEMENTS} graded pieces including {MIN_LIKED} liked"}}
-    families = frozenset(j.family_key for j in judged)
-    members = {p.id for p in db.query(Product) if (f"g{p.group_id}" if p.group_id else f"p{p.id}") in families}
-    removed = db.query(Feedback).filter(Feedback.product_id.in_(members)).delete(synchronize_session=False)
-    db.commit()  # the copy: nothing about a graded family can reach training, the background or the ranking
-    summary["training_decisions_removed"] = removed
+    judgements = db.query(Judgement).order_by(Judgement.id).all()
+    ident = Identity(db)
+    garments, grouping = graded_garments(db, judgements, ident)
+    scored = [g for g in garments if g.product_id is not None]
+    liked = sum(g.approved for g in scored)
+    summary = {"judgements": len(judgements), "garments": len(scored), "liked": liked,
+               "merged": len(grouping["merged"]), "conflicts": grouping["conflicts"],
+               "missing_products": len(grouping["missing"])}  # fmt: skip
+    if len(scored) < MIN_JUDGEMENTS or liked < MIN_LIKED:
+        return {"summary": summary | {"refused": f"needs {MIN_JUDGEMENTS} graded garments including {MIN_LIKED} liked"}}
+    held = held_out(ident, judgements)
+    removed = purge_copy(db, held)  # the copy: nothing linked to a graded garment can reach any method
+    summary |= {"training_decisions_removed": removed["decisions"], "training_removed": removed,
+                "held_out": held.summary()}  # fmt: skip
+    products = {p.id: p for p in db.query(Product).filter(Product.id.in_([g.product_id for g in scored]))}
     space = calibration._space(db)
     train = rated_outcomes(db)
-    from app.services.approval_data import RatedOutcome
-
-    test = [RatedOutcome(j.family_key, j.product_id, -j.id, int(j.taste >= 2), "graded", [], j.created_at)
-            for j in judged]  # fmt: skip
+    test = [RatedOutcome(g.family, g.product_id, -g.judgement_ids[0], g.approved, "graded", [], g.created_at,
+                         snapshot=g.snapshot) for g in scored]  # fmt: skip
     preds = predict(db, space, cfg, test, train=train, exclude=frozenset(), before=None, block=0, n_train=len(train))
-    ranked = {r.product.id: r.score for r in rank_products(db, [products[j.product_id] for j in judged])}
+    ranked = {r.product.id: r.score for r in rank_products(db, [products[g.product_id] for g in scored])}
     known = set(_sellers(db, train).values())
-    for p, j in zip(preds, judged, strict=True):
-        p.score = ranked.get(j.product_id)
-        seller = products[j.product_id].seller
+    for p, g in zip(preds, scored, strict=True):
+        p.score = ranked.get(g.product_id)
+        p.unit = g.unit
+        seller = products[g.product_id].seller
         p.familiar_seller = None if seller is None else seller.name in known
     out = {"summary": summary, **summarise(preds, cfg)}
     cal = [p for p in preds if p.estimate is not None]
@@ -362,11 +373,11 @@ def suggest_thresholds(preds: list[Prediction], cfg: dict, seed: int = 0) -> dic
     """Per mode: on a validation half (by family), the lowest bound threshold whose precision reaches the
     target with at least MIN_SELECTED pieces; then that threshold's precision on the other half."""
 
-    def half(f: str) -> int:
-        return int(hashlib.sha256(f"{seed}:{f}".encode()).hexdigest(), 16) % 2
+    def half(p: Prediction) -> int:  # by split unit: garments that may become one stay on one side
+        return int(hashlib.sha256(f"{seed}:{p.unit or p.family}".encode()).hexdigest(), 16) % 2
 
-    val = [p for p in preds if half(p.family) == 0]
-    test = [p for p in preds if half(p.family) == 1]
+    val = [p for p in preds if half(p) == 0]
+    test = [p for p in preds if half(p) == 1]
     out = {}
     for mode, (t, _) in _modes(cfg).items():
         found = None

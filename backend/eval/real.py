@@ -11,8 +11,10 @@ What it does
 1. Copies your database (SQLite online backup, source opened read-only) and works only on the copy.
 2. Test set: your judgements - uniformly sampled pieces, one per product family, graded for taste alone
    (0 not for me, 1 unsure, 2 like, 3 love). With a frozen test set, only those judgements are used.
-3. Training data: your Discover decisions, minus every decision about a judged family, so no test label leaks
-   into training.
+3. Training data: everything except what is linked to a graded garment (decisions under any of its listings or
+   addresses, wardrobe pieces linked to it, inspiration photos that are its photographs: services/provenance.py),
+   deleted from the copy before any method is fitted, so no test label leaks into training. Grades about one garment
+   are one record (eval/heldout.py: agreeing grades merged, disagreeing ones left out and reported).
 4. Each method ranks the judged pieces, and the ranking is compared with your grades:
    NDCG@10 (gain 2^grade - 1), precision@10 (share graded like or love) and liked pieces in the top 20.
 5. Uncertainty: 95% bootstrap intervals over test families, and paired differences against the current
@@ -89,14 +91,18 @@ def random_metrics(grades: dict, rng: random.Random | None = None, shuffles: int
     return scored_metrics(dict.fromkeys(grades, 0.0), grades)
 
 
-def evaluate_scores(methods: dict[str, dict], grades: dict, seed: int = 0) -> dict:
-    """Point estimates, bootstrap intervals over families and paired differences against 'bayes'."""
+def evaluate_scores(methods: dict[str, dict], grades: dict, seed: int = 0, units: dict | None = None) -> dict:
+    """Point estimates, bootstrap intervals over garments and paired differences against 'bayes'. ``units``: the
+    resampling unit of each piece (garments that may become one are resampled together); default, each piece."""
     rng = random.Random(seed)
     point = {"random": random_metrics(grades, rng)} | {m: scored_metrics(s, grades) for m, s in methods.items()}
-    keys = list(grades)
+    clusters: dict = {}
+    for k in grades:
+        clusters.setdefault((units or {}).get(k, ("piece", k)), []).append(k)
+    groups = list(clusters.values())
     boot: dict[str, list[dict]] = {m: [] for m in point}
     for _ in range(BOOTSTRAP):
-        sample = [rng.choice(keys) for _ in keys]
+        sample = [k for c in (rng.choice(groups) for _ in groups) for k in c]
         g = {(k, n): grades[k] for n, k in enumerate(sample)}
         boot["random"].append(random_metrics(g, rng, shuffles=20))
         for m, s in methods.items():
@@ -136,57 +142,54 @@ def score_methods(db, products) -> dict[str, dict]:
     return out
 
 
-def _family_members(db, products_by_id: dict, judgement) -> set[int]:
-    from app.models import Product
-
-    p = products_by_id.get(judgement.product_id)
-    if p is None:
-        return set()
-    if p.group_id is None:
-        return {p.id}
-    return {pid for (pid,) in db.query(Product.id).filter(Product.group_id == p.group_id)}
-
-
 def run(db, frozen: dict | None, seed: int = 0) -> dict:
-    """Evaluate on the session's database (a copy: decisions about judged families are deleted from it)."""
+    """Evaluate on the session's database (a copy: everything linked to a graded garment is deleted from it)."""
     from app.models import Feedback, Judgement, Product
     from app.services.preference_model import ENGINE_VERSION
+    from app.services.provenance import Identity
+
+    from .heldout import graded_garments, held_out, purge_copy
 
     judgements = db.query(Judgement).order_by(Judgement.id).all()
     if frozen is not None:
         keep = set(frozen["judgement_ids"])
         judgements = [j for j in judgements if j.id in keep]
-    wanted = [j.product_id for j in judgements if j.product_id is not None]
+    ident = Identity(db)
+    garments, grouping = graded_garments(db, judgements, ident)
+    scored = [g for g in garments if g.product_id is not None]
+    wanted = [g.product_id for g in scored]
     products_by_id = {p.id: p for p in db.query(Product).filter(Product.id.in_(wanted))} if wanted else {}
-    judged = [j for j in judgements if j.product_id in products_by_id]
-    sellers = {products_by_id[j.product_id].seller_id for j in judged}
-    liked = sum(j.taste >= 2 for j in judged)
+    sellers = {products_by_id[g.product_id].seller_id for g in scored}
+    liked = sum(g.approved for g in scored)
     summary = {
-        "judgements": len(judged), "missing_products": len(judgements) - len(judged), "sellers": len(sellers),
+        "judgements": len(judgements), "garments": len(scored), "missing_products": len(grouping["missing"]),
+        "merged": len(grouping["merged"]), "conflicts": grouping["conflicts"], "sellers": len(sellers),
         "liked": liked, "frozen": frozen is not None,
-        "test_set_hash": hashlib.sha256("|".join(sorted(f"{j.family_key}:{j.taste}" for j in judged)).encode())
+        "test_set_hash": hashlib.sha256("|".join(sorted(f"{g.family}:{g.taste}" for g in scored)).encode())
         .hexdigest()[:16],
     }  # fmt: skip
-    if len(judged) < MIN_JUDGEMENTS or len(sellers) < MIN_SELLERS or liked < MIN_LIKED:
+    if len(scored) < MIN_JUDGEMENTS or len(sellers) < MIN_SELLERS or liked < MIN_LIKED:
         return {"summary": summary, "ready": False}
 
-    members = set().union(*(_family_members(db, products_by_id, j) for j in judged))
-    removed = db.query(Feedback).filter(Feedback.product_id.in_(members)).delete(synchronize_session=False)
-    db.commit()
-    summary["training_decisions_removed"] = removed
+    held = held_out(ident, judgements)
+    removed = purge_copy(db, held)  # the copy: nothing linked to a graded garment can reach any method
+    summary |= {"training_decisions_removed": removed["decisions"], "training_removed": removed,
+                "held_out": held.summary()}  # fmt: skip
     trained_sellers = {
         sid
         for (sid,) in db.query(Product.seller_id).join(Feedback, Feedback.product_id == Product.id)
         if sid is not None
     }
-    products = [products_by_id[j.product_id] for j in judged]
-    grades = {j.product_id: j.taste for j in judged}
+    products = [products_by_id[g.product_id] for g in scored]
+    grades = {g.product_id: g.taste for g in scored}
+    units = {g.product_id: g.unit for g in scored}
     methods = score_methods(db, products)
     result = {"summary": summary, "ready": True, "engine_version": ENGINE_VERSION,
-              "all": evaluate_scores(methods, grades, seed)}  # fmt: skip
+              "all": evaluate_scores(methods, grades, seed, units)}  # fmt: skip
     new = {pid: g for pid, g in grades.items() if products_by_id[pid].seller_id not in trained_sellers}
     if len(new) >= 10 and sum(g >= 2 for g in new.values()) >= 2:
-        result["new_sellers"] = evaluate_scores({m: {p: s[p] for p in new} for m, s in methods.items()}, new, seed)
+        result["new_sellers"] = evaluate_scores({m: {p: s[p] for p in new} for m, s in methods.items()}, new, seed,
+                                                units)  # fmt: skip
     summary["new_seller_items"] = len(new)
     return result
 
@@ -210,7 +213,12 @@ def report(result: dict) -> str:
             "liked pieces are needed before any comparison means something. Nothing was measured."
         )
         return "\n".join(lines)
-    lines.append(f"Decisions about judged pieces removed from training: {s['training_decisions_removed']}")
+    r = s.get("training_removed") or {"decisions": s["training_decisions_removed"]}
+    lines.append("Removed from training as linked to graded garments: "
+                 + ", ".join(f"{k.replace('_', ' ')}: {v}" for k, v in r.items()))  # fmt: skip
+    if s.get("conflicts"):
+        lines.append(f"Left out, grades disagree about one garment: {len(s['conflicts'])} "
+                     f"(judgements {', '.join(str(c['judgement_ids']) for c in s['conflicts'])}).")  # fmt: skip
     for title, block in (
         ("All judged pieces", result["all"]),
         ("Sellers you never decided on", result.get("new_sellers")),

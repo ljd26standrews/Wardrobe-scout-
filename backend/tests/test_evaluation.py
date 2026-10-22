@@ -163,7 +163,7 @@ def test_evaluator_measures_on_a_copy_without_training_on_test_labels(env, db):
 
     out = _evaluate(env)
     assert "| bayes |" in out and "| random |" in out and "| profile |" in out
-    assert "Decisions about judged pieces removed from training: 1" in out
+    assert "Removed from training as linked to graded garments: decisions: 1," in out
     saved = json.loads(sorted((env / "evaluation").glob("results-*.json"))[-1].read_text())
     assert saved["ready"] and saved["summary"]["judgements"] == 45
     db.expire_all()

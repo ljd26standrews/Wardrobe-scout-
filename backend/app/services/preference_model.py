@@ -63,6 +63,7 @@ from sqlalchemy.orm import Session
 from ..models import Feedback, InspirationImage, Product, WardrobeItem
 from . import embeddings as emb
 from .approval_data import LABEL_VERSION, WITHDRAW, reading
+from .provenance import HeldOut, Identity, live_families_by_url, norm_url
 
 # Recorded with every feed served (impression log), so evaluations can tell model versions apart.
 # s1: full-covariance posterior, logo-only logo rejections, new reasons; s2: aesthetic-v2 reading of decisions
@@ -377,13 +378,6 @@ def observations(db: Session, space: FeatureSpace) -> tuple[list[np.ndarray], li
     return rows, ys, ws, n_real
 
 
-def _family_of_key(key: int | tuple, group_of: dict[int, int]) -> str:
-    """The approval-label family of a decision key (a product id, or ("deleted", source url))."""
-    if isinstance(key, tuple):
-        return f"d{key[1]}"
-    return f"g{group_of[key]}" if key in group_of else f"p{key}"
-
-
 def family_key(family: tuple) -> str:
     """The garment-family key used by approval labels ("g<group>", "p<product>", "d<url>")."""
     kind, value = family
@@ -398,37 +392,52 @@ def observations_with_families(
     db: Session,
     space: FeatureSpace,
     *,
-    exclude: frozenset[str] = frozenset(),
+    exclude: frozenset[str] | HeldOut = frozenset(),
     before: datetime | None = None,
     version: str = LABEL_VERSION,
 ) -> tuple[list, list, list, int, list]:
     """``observations`` plus, for each row, the garment family of the decision it came from (None for
     inspiration, wardrobe and background rows).
 
-    ``exclude``: garment families (approval-label keys "g…", "p…", "d…") left out entirely, as if never decided:
-    their pieces become undecided, exactly like candidates being served. ``before``: only what was known before
+    ``exclude``: what is held out (a provenance.HeldOut, or garment family keys "g…", "p…", "d…", resolved by
+    services/provenance.py), left out entirely, as if never decided: decisions about those garments (under any of
+    their listings or addresses), wardrobe pieces linked to them and inspiration photos that are their photographs.
+    Their listings become undecided, exactly like candidates being served. ``before``: only what was known before
     that time. Either way the background sample and its weight are built from what remains, so a left-out label
     cannot leak back in through them (out-of-fold calibration, rolling-origin evaluation)."""
+    if isinstance(exclude, HeldOut):
+        held = exclude
+    else:
+        held = Identity(db).resolve(families=exclude) if exclude else HeldOut()
     group_of = dict(db.query(Product.id, Product.group_id).filter(Product.group_id.isnot(None)))
     query = db.query(Feedback)
     if before is not None:
         query = query.filter(Feedback.created_at < before)
     labels = LABEL if version != "approval-v1" else LABEL_V1
     latest: dict[int | tuple, Feedback] = {}
-    for fb in query.order_by(Feedback.created_at):
+    for fb in query.order_by(Feedback.created_at, Feedback.id):
         if fb.product_id is not None:
             key: int | tuple = fb.product_id
         elif fb.snapshot:
             key = ("deleted", fb.snapshot.get("source_url") or fb.id)
         else:
             continue
-        if exclude and _family_of_key(key, group_of) in exclude:
+        if held and held.covers_feedback(fb):
             continue
         said = reading(fb.action, fb.reasons, version)  # the latest decision about the look counts
         if said == WITHDRAW:
             latest.pop(key, None)
         elif said is not None:
             latest[key] = fb
+    # A decision about a deleted listing belongs to the garment now listed at its address, if any (a re-import).
+    relinked = live_families_by_url(db, [k[1] for k in latest if isinstance(k, tuple) and isinstance(k[1], str)])
+
+    def family(key: int | tuple) -> str:
+        if isinstance(key, tuple):
+            url = key[1]
+            return relinked.get(norm_url(url) or "", f"d{url}") if isinstance(url, str) else f"d{url}"
+        return f"g{group_of[key]}" if key in group_of else f"p{key}"
+
     decisions = []  # (family, x, y, w)
     for pid, fb in latest.items():
         if fb.action not in labels or (isinstance(pid, int) and pid not in space.row):
@@ -442,17 +451,19 @@ def observations_with_families(
         if fb.action == "dislike" and specific:
             groups = set().union(*(REASON_GROUPS.get(r, set()) for r in specific))
             x *= space.group_mask(groups)  # learn only about what the reason names
-        decisions.append((("group", group_of[pid]) if pid in group_of else ("item", pid), x, y, w))
+        decisions.append((family(pid), x, y, w))
     # One garment listed by several sellers is one piece of evidence: its listings share one decision's weight.
     family_size = Counter(f for f, *_ in decisions)
     rows, ys, ws, families = [], [], [], []
-    for family, x, y, w in decisions:
+    for fam, x, y, w in decisions:
         rows.append(x)
         ys.append(y)
-        ws.append(w / family_size[family])
-        families.append(family_key(family))
+        ws.append(w / family_size[fam])
+        families.append(fam)
     n_real = len(family_size)
     for img in db.query(InspirationImage).filter(InspirationImage.embedding.isnot(None)):
+        if img.id in held.inspiration_ids:
+            continue
         if img.embedding_backend == space.backend and (before is None or img.added_at < before):
             rows.append(space.vector([], image=emb.from_bytes(img.embedding)))
             ys.append(1 if img.polarity > 0 else 0)
@@ -460,14 +471,15 @@ def observations_with_families(
             n_real += 1
     for item in db.query(WardrobeItem):
         rating = item.rating or 3
-        if rating == 3 or (before is not None and item.added_at >= before):
+        if rating == 3 or (before is not None and item.added_at >= before) or item.id in held.wardrobe_ids:
             continue
         image = emb.from_bytes(item.embedding) if item.embedding_backend == space.backend else None
         rows.append(space.vector(attr_keys(item), image=image))
         ys.append(1 if rating > 3 else 0)
         ws.append(0.5)
         n_real += 1
-    rows, ys, ws, n_real = _with_background(space, latest, group_of, rows, ys, ws, n_real)
+    decided = {family(k) for k in latest}
+    rows, ys, ws, n_real = _with_background(space, decided, group_of, rows, ys, ws, n_real)
     return rows, ys, ws, n_real, families + [None] * (len(rows) - len(families))
 
 
@@ -475,23 +487,20 @@ def _stable_rank(pid: int) -> int:
     return int(hashlib.blake2b(str(pid).encode(), digest_size=8).hexdigest(), 16)
 
 
-def _with_background(space, latest, group_of, rows, ys, ws, n_real):
+def _with_background(space, decided, group_of, rows, ys, ws, n_real):
     """Positive-unlabelled background: weak "typical, not chosen" observations from undecided items.
 
     It only makes sense against something you chose: with no positive decisions it would just teach that
     every common attribute is disliked (a single colour rejection moved trousers and cotton). So its total
     weight grows with your positive evidence, up to BACKGROUND_WEIGHT. The sample is a stable function of
     the undecided set (a hash order), so one more decision changes it by one item, not entirely. Listings of
-    a garment you decided on are never background: they are the same piece."""
+    a garment you decided on (``decided``: family keys) are never background: they are the same piece."""
     positive = sum(w for w, y in zip(ws, ys, strict=True) if y == 1)
     if BACKGROUND_SCALES_WITH_POSITIVES:
         total = min(BACKGROUND_WEIGHT, positive)
     else:  # the earlier rule: full weight as soon as there is any observation
         total = BACKGROUND_WEIGHT if rows else 0.0
-    decided_groups = {group_of[pid] for pid in latest if isinstance(pid, int) and pid in group_of}
-    undecided = [
-        pid for pid in space.row if pid not in latest and group_of.get(pid, -1) not in decided_groups
-    ]  # fmt: skip
+    undecided = [pid for pid in space.row if (f"g{group_of[pid]}" if pid in group_of else f"p{pid}") not in decided]
     pick = sorted(undecided, key=_stable_rank)[:BACKGROUND_SAMPLE]
     if total > 0 and pick:
         for pid in pick:

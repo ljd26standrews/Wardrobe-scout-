@@ -51,11 +51,14 @@ from ..models import Calibration, Feedback, InspirationImage, Job, Product, Ward
 from . import embeddings as emb
 from . import preference_model as pm
 from .approval_data import LABEL_VERSION, RatedOutcome, family_of, rated_outcomes
+from .provenance import HeldOut, Identity
 from .settings_store import get_setting
 
 log = get_logger(__name__)
 
-METHOD = "platt-bayes-v1"
+# v2: held-out folds leave out everything linked to their garments (wardrobe ratings, aliases; services/provenance.py)
+# and keep possible aliases in one fold. A v1 fit may have seen its own labels through those paths, so it is refitted.
+METHOD = "platt-bayes-v2"
 MIN_BRIER_GAIN = 0.001  # Platt must improve the out-of-fold Brier score by at least this much to be used
 FOLDS = 5
 PRIOR_A = (1.0, 0.5)  # slope: mean, s.d. ("trust the model's scale" unless the evidence says otherwise)
@@ -119,24 +122,33 @@ def out_of_fold(
     outcomes: list[RatedOutcome],
     folds: int = FOLDS,
     *,
-    exclude: frozenset[str] = frozenset(),
+    exclude: frozenset[str] | HeldOut = frozenset(),
     before: datetime | None = None,
     version: str = LABEL_VERSION,
 ):
     """(m, s, y, fold) for every rated piece, each scored by a taste model fitted without its fold's decisions.
 
-    A held-out family is left out of training entirely (also from the background sample and its weight), so its
-    pieces are scored exactly as an undecided candidate would be. ``exclude``/``before`` restrict the training
-    data further (rolling-origin evaluation)."""
+    A held-out fold is left out of training entirely, under the shared held-out policy (services/provenance.py):
+    decisions about its garments under any listing or address, wardrobe pieces linked to them and inspiration photos
+    that are their photographs, also from the background sample and its weight, so its pieces are scored exactly as
+    an undecided candidate would be. Families that are, or may become, one garment share a fold. ``exclude``/``before``
+    restrict the training data further (rolling-origin evaluation)."""
     X, y, fams = label_matrix(space, outcomes)
-    k = max(2, min(folds, len(set(fams))))
-    fold = np.array([fold_of(f, k) for f in fams], dtype=int)
+    ident = Identity(db)
+    unit = ident.components(fams)
+    k = max(2, min(folds, len(set(unit.values()))))
+    fold = np.array([fold_of(unit[f], k) for f in fams], dtype=int)
     m, s = np.zeros(len(y)), np.zeros(len(y))
     for i in range(k):
         idx = np.flatnonzero(fold == i)
         if not len(idx):
             continue
-        held = exclude | {fams[j] for j in idx}
+        held_families = {fams[j] for j in idx}
+        if isinstance(exclude, HeldOut):
+            held = ident.resolve(families=exclude.families | held_families, product_ids=exclude.product_ids,
+                                 urls=exclude.urls)  # fmt: skip
+        else:
+            held = ident.resolve(families=set(exclude) | held_families)
         obs = pm.observations_with_families(db, space, exclude=held, before=before, version=version)
         post = pm.fit_rows(space, *obs[:4])
         m[idx] = X[idx] @ post.mean
@@ -258,7 +270,7 @@ def fit_map(
     space: pm.FeatureSpace,
     outcomes: list[RatedOutcome],
     *,
-    exclude: frozenset[str] = frozenset(),
+    exclude: frozenset[str] | HeldOut = frozenset(),
     before: datetime | None = None,
     version: str = LABEL_VERSION,
 ) -> tuple[float, float, np.ndarray, dict, np.ndarray, np.ndarray]:
