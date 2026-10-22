@@ -386,7 +386,7 @@ function FeedStatus({ data, learning, filtered }: { data: FeedResponse; learning
   else if (g.state === "off") text = `${data.total_candidates} pieces you haven't decided on, ranked for your taste.`;
   else if (learning) text = "Pieces the app is unsure about. Not recommendations: how you react teaches it the most.";
   else if (hasEstimates(g.state))
-    text = `${count} piece${count === 1 ? "" : "s"} likely enough to suit your taste for ${g.mode_label}${g.state === "stale" ? " (being updated with your newest decisions)" : ""}.`;
+    text = `${count} piece${count === 1 ? "" : "s"} likely enough to suit your taste for ${g.mode_label}${g.state === "stale" ? " (being updated with your latest changes)" : ""}.`;
   else if (g.state === "pending") text = "Updating match estimates from your decisions. Meanwhile, this is your taste ranking.";
   else if (g.state === "failed") text = "Match estimates couldn't be updated and will be retried shortly. Meanwhile, this is your taste ranking.";
   else if (g.state === "unavailable") text = "Match estimates are unavailable right now. This is your taste ranking.";
@@ -492,7 +492,7 @@ function FeedEmpty({ data, learning, filtered, onClear, onMode, onLearning }: { 
             : learning
               ? "There are no uncertain pieces to learn from at the moment."
               : "Everything that fits has been decided. New pieces appear after the next scan."}
-        {g.state === "stale" && " Estimates are being updated with your newest decisions."}
+        {g.state === "stale" && " Estimates are being updated with your latest changes."}
         {g.withdrawn && ` Earlier estimates were withdrawn: ${g.withdrawn.label}.`}
       </span>
     </EmptyState>

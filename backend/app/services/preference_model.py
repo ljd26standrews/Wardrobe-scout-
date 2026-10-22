@@ -388,32 +388,13 @@ def family_key(family: tuple) -> str:
     return f"p{value}"
 
 
-def observations_with_families(
-    db: Session,
-    space: FeatureSpace,
-    *,
-    exclude: frozenset[str] | HeldOut = frozenset(),
-    before: datetime | None = None,
-    version: str = LABEL_VERSION,
-) -> tuple[list, list, list, int, list]:
-    """``observations`` plus, for each row, the garment family of the decision it came from (None for
-    inspiration, wardrobe and background rows).
-
-    ``exclude``: what is held out (a provenance.HeldOut, or garment family keys "g…", "p…", "d…", resolved by
-    services/provenance.py), left out entirely, as if never decided: decisions about those garments (under any of
-    their listings or addresses), wardrobe pieces linked to them and inspiration photos that are their photographs.
-    Their listings become undecided, exactly like candidates being served. ``before``: only what was known before
-    that time. Either way the background sample and its weight are built from what remains, so a left-out label
-    cannot leak back in through them (out-of-fold calibration, rolling-origin evaluation)."""
-    if isinstance(exclude, HeldOut):
-        held = exclude
-    else:
-        held = Identity(db).resolve(families=exclude) if exclude else HeldOut()
+def _latest_decisions(db: Session, held: HeldOut, before: datetime | None, version: str):
+    """The latest decision about the look per listing (a deleted listing: per address), leaving out what ``held``
+    covers, and a function giving each one's garment family."""
     group_of = dict(db.query(Product.id, Product.group_id).filter(Product.group_id.isnot(None)))
     query = db.query(Feedback)
     if before is not None:
         query = query.filter(Feedback.created_at < before)
-    labels = LABEL if version != "approval-v1" else LABEL_V1
     latest: dict[int | tuple, Feedback] = {}
     for fb in query.order_by(Feedback.created_at, Feedback.id):
         if fb.product_id is not None:
@@ -438,19 +419,101 @@ def observations_with_families(
             return relinked.get(norm_url(url) or "", f"d{url}") if isinstance(url, str) else f"d{url}"
         return f"g{group_of[key]}" if key in group_of else f"p{key}"
 
+    return latest, family
+
+
+def teaches(fb: Feedback, version: str = LABEL_VERSION) -> tuple[int, float, list[str] | None] | None:
+    """What one decision teaches the taste model: (label, weight, the feature groups it may move, None for all), or
+    None (nothing: a non-taste rejection, or an action the reading does not learn from)."""
+    labels = LABEL if version != "approval-v1" else LABEL_V1
+    if fb.action not in labels:
+        return None
+    reasons = set(fb.reasons or [])
+    if fb.action == "dislike" and reasons and reasons <= NON_TASTE_REASONS:
+        return None  # value/redundancy/construction/this-item-only judgements are not taste
+    y, w = labels[fb.action]
+    specific = reasons - NON_TASTE_REASONS - GENERAL_REASONS
+    if fb.action == "dislike" and specific:
+        return y, w, sorted(set().union(*(REASON_GROUPS.get(r, set()) for r in specific)))
+    return y, w, None
+
+
+def _digest(value) -> str:
+    return hashlib.sha1(json.dumps(value, sort_keys=True, default=str).encode()).hexdigest()[:12]
+
+
+def content_fingerprint(obj) -> str:
+    """What a piece contributes as features: its attributes and its photo vector (with how it was computed). Being
+    marked as seen, a price or a description change does not change it."""
+    g = obj.get if isinstance(obj, dict) else (lambda k, _o=obj: getattr(_o, k, None))
+    vec = g("image_embedding") if not isinstance(obj, dict) else None
+    if vec is None and not isinstance(obj, dict):
+        vec = g("embedding")
+    return _digest([sorted(attr_keys(obj)), hashlib.sha1(vec).hexdigest() if vec else None,
+                    g("embedding_backend")])  # fmt: skip
+
+
+def training_fingerprints(db: Session, version: str = LABEL_VERSION) -> list[str]:
+    """For every decision the taste model learns from now: "<decision id>:<fingerprint>:<listing>". The fingerprint
+    covers what it contributes: its label and weight, the features it may move (a reason narrows them), its garment
+    family (listings of one garment share a weight) and the content of the piece. Editing a reason, re-analysing the
+    piece's photo, regrouping it or changing its attributes changes it; a newer decision about the listing replaces
+    the entry; marking a piece as seen changes nothing."""
+    from sqlalchemy.orm import load_only
+
+    latest, family = _latest_decisions(db, HeldOut(), None, version)
+    pids = [k for k in latest if isinstance(k, int)]
+    content: dict[int, str] = {}
+    cols = (Product.id, Product.colours, Product.materials, Product.fit_tags, Product.category, Product.brand,
+            Product.logo_level, Product.image_embedding, Product.embedding_backend)  # fmt: skip
+    for i in range(0, len(pids), 500):
+        for p in db.query(Product).options(load_only(*cols)).filter(Product.id.in_(pids[i : i + 500])):
+            content[p.id] = content_fingerprint(p)
+    out = []
+    for key, fb in latest.items():
+        taught = teaches(fb, version)
+        if taught is None:
+            continue
+        piece = content.get(key) if isinstance(key, int) else content_fingerprint(fb.snapshot or {})
+        listing = f"p{key}" if isinstance(key, int) else f"d{key[1]}"
+        out.append(f"{fb.id}:{_digest([*taught, family(key), piece])}:{listing}")
+    return sorted(out)
+
+
+def observations_with_families(
+    db: Session,
+    space: FeatureSpace,
+    *,
+    exclude: frozenset[str] | HeldOut = frozenset(),
+    before: datetime | None = None,
+    version: str = LABEL_VERSION,
+) -> tuple[list, list, list, int, list]:
+    """``observations`` plus, for each row, the garment family of the decision it came from (None for
+    inspiration, wardrobe and background rows).
+
+    ``exclude``: what is held out (a provenance.HeldOut, or garment family keys "g…", "p…", "d…", resolved by
+    services/provenance.py), left out entirely, as if never decided: decisions about those garments (under any of
+    their listings or addresses), wardrobe pieces linked to them and inspiration photos that are their photographs.
+    Their listings become undecided, exactly like candidates being served. ``before``: only what was known before
+    that time. Either way the background sample and its weight are built from what remains, so a left-out label
+    cannot leak back in through them (out-of-fold calibration, rolling-origin evaluation)."""
+    if isinstance(exclude, HeldOut):
+        held = exclude
+    else:
+        held = Identity(db).resolve(families=exclude) if exclude else HeldOut()
+    latest, family = _latest_decisions(db, held, before, version)
+    group_of = dict(db.query(Product.id, Product.group_id).filter(Product.group_id.isnot(None)))
     decisions = []  # (family, x, y, w)
     for pid, fb in latest.items():
-        if fb.action not in labels or (isinstance(pid, int) and pid not in space.row):
+        if isinstance(pid, int) and pid not in space.row:
             continue
-        reasons = set(fb.reasons or [])
-        if fb.action == "dislike" and reasons and reasons <= NON_TASTE_REASONS:
-            continue  # value/redundancy/construction/this-item-only judgements are not taste
-        y, w = labels[fb.action]
+        taught = teaches(fb, version)
+        if taught is None:
+            continue
+        y, w, groups = taught
         x = space.X[space.row[pid]].copy() if isinstance(pid, int) else space.vector(attr_keys(fb.snapshot))
-        specific = reasons - NON_TASTE_REASONS - GENERAL_REASONS
-        if fb.action == "dislike" and specific:
-            groups = set().union(*(REASON_GROUPS.get(r, set()) for r in specific))
-            x *= space.group_mask(groups)  # learn only about what the reason names
+        if groups is not None:
+            x *= space.group_mask(set(groups))  # learn only about what the reason names
         decisions.append((family(pid), x, y, w))
     # One garment listed by several sellers is one piece of evidence: its listings share one decision's weight.
     family_size = Counter(f for f, *_ in decisions)

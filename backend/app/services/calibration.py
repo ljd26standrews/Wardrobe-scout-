@@ -26,16 +26,21 @@ approval estimate is produced anywhere.
 
 Lifecycle (below): a calibration is used only under the regime it was fitted for (taste model, features, written
 profile, photo representation, label reading) and only while every decision it was fitted on still stands. New
-decisions make it stale and lead to a refit; an undone, unsaved or reversed one, or too few remaining, withdraws it
-at once. A fit is activated only if its evidence still holds when it finishes, and a rollback only if it could be
-used now. Every surface reports the same state (``lifecycle``).
+decisions make it stale and lead to a refit; an amendment to what it was fitted on (a reason edited, a rated piece
+re-analysed or regrouped, a wardrobe rating or inspiration photo changed or removed) makes a refit due at once; an
+undone, unsaved or reversed decision, or too few remaining, withdraws it at once. What each decision contributes to
+training is fingerprinted (preference_model.training_fingerprints), so an edit is never mistaken for "unchanged".
+A fit is activated only if its evidence still holds when it finishes and nothing newer was activated meanwhile, and a
+rollback only if it could be used now. Every surface reports the same state (``lifecycle``).
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+import threading
+from collections import OrderedDict
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from functools import cached_property
 from statistics import NormalDist
@@ -50,6 +55,7 @@ from ..logging_setup import get_logger
 from ..models import Calibration, Feedback, InspirationImage, Job, Product, WardrobeItem, utcnow
 from . import embeddings as emb
 from . import preference_model as pm
+from . import revisions
 from .approval_data import LABEL_VERSION, RatedOutcome, family_of, rated_outcomes
 from .provenance import HeldOut, Identity
 from .settings_store import get_setting
@@ -309,6 +315,9 @@ WITHDRAWN = {
     "labels": "the way your decisions are read has changed since it was fitted",
     "representation": "photo analysis has changed since it was fitted",
     "profile": "your written taste profile has changed since it was fitted",
+    # Reasons a finished fit is not activated (never reasons to withdraw one in use):
+    "amended": "a decision or other evidence it was fitted on changed while it was being fitted",
+    "newer": "another calibration was fitted or chosen while it was being fitted",
 }
 _REGIME_REASON = {"engine": "model", "method": "model", "features": "model", "labels": "labels",
                   "representation": "representation", "profile": "profile"}  # fmt: skip
@@ -342,9 +351,15 @@ class Evidence:
 
     outcomes: list[RatedOutcome]
     regime: dict
-    aux: list[str]  # inspiration photos and rated wardrobe pieces: the taste model learns from them; not labels
+    # Inspiration photos and rated wardrobe pieces ("i<id>:<polarity>:<fingerprint>", "w<id>:<rating>:<fingerprint>"):
+    # the taste model learns from them; they are not labels.
+    aux: list[str]
     n_products: int
     suff: dict
+    # Every decision the taste model learns from, with a fingerprint of what it contributes
+    # (preference_model.training_fingerprints): "<decision id>:<fingerprint>:<listing>".
+    training: list[str] = field(default_factory=list)
+    photo_rev: int = 0  # how many listing photo vectors had been written (revisions "photos")
 
     @cached_property
     def keys(self) -> list[str]:
@@ -359,13 +374,35 @@ class Evidence:
         return frozenset(o.feedback_id for o in self.outcomes)
 
 
+# What evidence() reads. Everything it depends on bumps one of these (services/revisions.py); marking a piece as seen
+# does not, so a feed does not recompute it.
+EVIDENCE_REVISIONS = ("feedback", "products", "photos", "addresses", "wardrobe", "inspiration", "settings")
+_evidence_lock = threading.Lock()
+_evidence_cache: OrderedDict[str, Evidence] = OrderedDict()
+
+
 def evidence(db: Session) -> Evidence:
+    """What a calibration would be fitted on now: labels, the fingerprinted training contributions, inspiration and
+    rated wardrobe pieces, the regime. Computed once per change of the data it reads."""
+    reg = regime(db)
+    revs = revisions.current(db, *EVIDENCE_REVISIONS)
+    key = json.dumps([revs, reg], sort_keys=True)
+    with _evidence_lock:
+        if key in _evidence_cache:
+            _evidence_cache.move_to_end(key)
+            return _evidence_cache[key]
     outcomes = rated_outcomes(db)
-    insp = db.query(InspirationImage.id, InspirationImage.polarity).filter(InspirationImage.embedding.isnot(None))
-    aux = [f"i{i}:{pol}" for i, pol in insp]
-    aux += [f"w{i}:{r}" for i, r in db.query(WardrobeItem.id, WardrobeItem.rating) if (r or 3) != 3]
+    aux = [f"i{i.id}:{i.polarity}:{pm.content_fingerprint(i)}"
+           for i in db.query(InspirationImage).filter(InspirationImage.embedding.isnot(None))]  # fmt: skip
+    aux += [f"w{w.id}:{w.rating}:{pm.content_fingerprint(w)}" for w in db.query(WardrobeItem) if (w.rating or 3) != 3]
     n_products = db.query(func.count(Product.id)).scalar() or 0
-    return Evidence(outcomes, regime(db), sorted(aux), n_products, sufficiency(outcomes, get_setting(db, "selective")))
+    ev = Evidence(outcomes, reg, sorted(aux), n_products, sufficiency(outcomes, get_setting(db, "selective")),
+                  pm.training_fingerprints(db), revs[EVIDENCE_REVISIONS.index("photos") + 1])  # fmt: skip
+    with _evidence_lock:
+        _evidence_cache[key] = ev
+        while len(_evidence_cache) > 4:
+            _evidence_cache.popitem(last=False)
+    return ev
 
 
 def _label_keys(outcomes: list[RatedOutcome]) -> list[str]:
@@ -373,7 +410,31 @@ def _label_keys(outcomes: list[RatedOutcome]) -> list[str]:
 
 
 def _label_hash(ev: Evidence) -> str:
-    return hashlib.sha256(json.dumps([ev.regime, ev.keys, ev.aux], sort_keys=True).encode()).hexdigest()
+    """Identifies everything a fit depends on: the regime, the labels, every training contribution and the other
+    evidence. Equal hashes: refitting would reproduce the same calibration."""
+    return hashlib.sha256(json.dumps([ev.regime, ev.keys, ev.training, ev.aux], sort_keys=True).encode()).hexdigest()
+
+
+def _training_changes(then: list[str] | None, now: list[str]) -> tuple[int, int]:
+    """(new, amended) between two training fingerprint lists. New: decisions the model learns from now and did not
+    (a newer decision about a listing included). Amended: decisions it learnt from whose contribution changed (a
+    reason edited, the piece re-analysed or regrouped), or that no longer teach it with nothing newer about their
+    listing (withdrawn evidence that is not a label: a label's withdrawal withdraws the calibration itself)."""
+    t = {fid: (fp, listing) for fid, fp, listing in (k.split(":", 2) for k in then or [])}
+    n = {fid: (fp, listing) for fid, fp, listing in (k.split(":", 2) for k in now)}
+    listings_now = {listing for _, listing in n.values()}
+    new = sum(1 for fid in n if fid not in t)
+    amended = sum(1 for fid, (fp, listing) in t.items()
+                  if (fid in n and n[fid][0] != fp) or (fid not in n and listing not in listings_now))  # fmt: skip
+    return new, amended
+
+
+def _aux_changes(then: list[str], now: list[str]) -> tuple[int, int]:
+    """(new, amended) for inspiration and rated wardrobe pieces: added ones are new evidence; a changed rating,
+    polarity, photo or attributes, or a removed one, amends what the model was fitted on."""
+    t = {k.split(":", 1)[0]: k for k in then}
+    n = {k.split(":", 1)[0]: k for k in now}
+    return len(n.keys() - t.keys()), sum(1 for i, k in t.items() if n.get(i) != k)
 
 
 def sufficiency(outcomes: list[RatedOutcome], cfg: dict) -> dict:
@@ -426,28 +487,44 @@ def invalid_reason(db: Session, cal: Calibration, ev: Evidence) -> str | None:
 
 
 def drift(cal: Calibration, ev: Evidence, cfg: dict) -> dict:
-    """New evidence since ``cal`` went into service (fitted, or rolled back to): it stays valid, but is refitted once
-    ``recalibrate_every`` new decisions (or as many changes to inspiration and rated wardrobe pieces) have arrived, or
-    the catalogue changed by CATALOGUE_CHANGE_REFIT."""
+    """What changed since ``cal`` went into service (fitted, or rolled back to). It stays valid, and is refitted
+    * at once when evidence it was fitted on was amended: a reason edited, a piece re-analysed or regrouped, a
+      wardrobe rating or an inspiration photo changed or removed, a decision that taught it withdrawn (a withdrawn or
+      reversed label withdraws the calibration itself: ``invalid_reason``);
+    * once ``recalibrate_every`` new decisions (or as many new inspiration photos and rated wardrobe pieces) have
+      arrived;
+    * when the catalogue grew or shrank, or its photos were re-analysed, by CATALOGUE_CHANGE_REFIT."""
     ref = _service(cal)
-    new = len(set(ev.keys) - set(ref["keys"]))
-    aux = len(set(ev.aux) ^ set(ref["aux"]))
+    new_training, amended = _training_changes(ref.get("training"), ev.training)
+    new = max(len(set(ev.keys) - set(ref["keys"])), new_training)
+    aux_new, aux_amended = _aux_changes(ref["aux"], ev.aux)
     catalogue = _catalogue_changed(cal, ev)
+    photos = _photos_changed(cal, ev)
     every = int(cfg["recalibrate_every"])
-    return {"new_decisions": new, "other_evidence": aux, "catalogue_changed": catalogue,
-            "refit_due": new >= every or aux >= every or catalogue}  # fmt: skip
+    return {"new_decisions": new, "other_evidence": aux_new, "amended": amended + aux_amended,
+            "catalogue_changed": catalogue, "photos_reanalysed": photos,
+            "refit_due": new >= every or aux_new >= every or catalogue or photos or amended + aux_amended > 0}  # fmt: skip
 
 
 def _service(cal: Calibration) -> dict:
     """The evidence when ``cal`` went into service (older calibrations: what they were fitted on)."""
     p = cal.params or {}
-    return p.get("service") or {"keys": p.get("label_keys") or [], "aux": p.get("aux_keys") or [],
-                                "n_products": p.get("n_products") or 0}  # fmt: skip
+    return p.get("service") or {"keys": p.get("label_keys") or [], "training": p.get("training_keys"),
+                                "aux": p.get("aux_keys") or [], "n_products": p.get("n_products") or 0}  # fmt: skip
 
 
 def _catalogue_changed(cal: Calibration, ev: Evidence) -> bool:
     before = int(_service(cal)["n_products"] or 0)
     return before > 0 and abs(ev.n_products - before) > before * CATALOGUE_CHANGE_REFIT
+
+
+def _photos_changed(cal: Calibration, ev: Evidence) -> bool:
+    """Photo vectors written since (new listings and re-analysis, same method or not) reach CATALOGUE_CHANGE_REFIT of
+    the catalogue: the photo components every compatibility is computed from have moved."""
+    ref = _service(cal)
+    if ref.get("photo_rev") is None:
+        return False
+    return ev.photo_rev - int(ref["photo_rev"]) >= max(1, int(ref["n_products"] or 0)) * CATALOGUE_CHANGE_REFIT
 
 
 def active(db: Session) -> Calibration | None:
@@ -494,20 +571,29 @@ def active_map(db: Session) -> ApprovalMap | None:
 def recalibrate(db: Session, *, force: bool = False) -> dict:
     """Fit and activate a calibration on your current decisions, unless nothing relevant changed.
 
-    The fit is activated only if what it was fitted on still holds when it finishes. Decisions undone or reversed
-    in the meantime, too few left, or a changed model, photo representation, profile or label reading send it back
-    to be redone (at most MAX_ATTEMPTS times); decisions merely added in the meantime are left to the next refit."""
+    "Nothing relevant" is exact: the regime, the labels, every decision's training contribution (its reason, weight,
+    family and the piece's content) and the other evidence hash the same (``_label_hash``). The fit is activated only
+    if what it was fitted on still holds when it finishes: decisions undone, reversed or amended in the meantime, too
+    few left, or a changed model, photo representation, profile or label reading send it back to be redone (at most
+    MAX_ATTEMPTS times); decisions merely added in the meantime are left to the next refit. A calibration fitted or
+    rolled back to by someone else meanwhile is never replaced by this older fit."""
     now: Evidence | None = None
     for attempt in range(MAX_ATTEMPTS):
         cur, ev = serving(db)
         if not ev.suff["sufficient"]:
             return {"status": "insufficient", **ev.suff}
         label_hash = _label_hash(ev)
-        if cur is not None and not force and cur.label_hash == label_hash and not _catalogue_changed(cur, ev):
+        if (cur is not None and not force and cur.label_hash == label_hash and not _catalogue_changed(cur, ev)
+                and not _photos_changed(cur, ev)):  # fmt: skip
             return {"status": "unchanged", "calibration_id": cur.id, **ev.suff}
+        marker = _marker(db)
         a, b, cov, diag, y, fold = fit_map(db, _space(db), ev.outcomes)
-        db.commit()  # end this read: what follows sees decisions made while fitting
+        db.commit()  # end this read: what follows sees decisions made while fitting,
+        db.expire_all()  # including edits to rows this session had already loaded
         now = evidence(db)
+        if _marker(db) != marker:  # fitted or rolled back meanwhile: that choice stands; whether a refit is due is
+            log.info("calibration_superseded", reason="newer", attempt=attempt + 1)  # decided afresh (lifecycle)
+            return {"status": "superseded", "reason": "newer", "message": WITHDRAWN["newer"], **now.suff}
         reason = _superseded(db, ev, now)
         if reason is None:
             cal = _store(db, ev, label_hash, a, b, cov, diag, y, fold)
@@ -518,23 +604,43 @@ def recalibrate(db: Session, *, force: bool = False) -> dict:
 
 
 def _superseded(db: Session, then: Evidence, now: Evidence) -> str | None:
-    """Why a fit on ``then`` may not be activated given ``now`` (a WITHDRAWN key), or None."""
+    """Why a fit on ``then`` may not be activated given ``now`` (a WITHDRAWN key), or None. Decisions merely added
+    meanwhile do not stop it (they make it stale); anything it was fitted on that changed does."""
     for key, value in now.regime.items():
         if then.regime.get(key) != value:
             return _REGIME_REASON[key]
     if not now.suff["sufficient"]:
         return "insufficient"
-    return label_change(db, then.keys, now)
+    if (reason := label_change(db, then.keys, now)) is not None:
+        return reason
+    if _training_changes(then.training, now.training)[1] or _aux_changes(then.aux, now.aux)[1]:
+        return "amended"
+    return None
+
+
+def _marker(db: Session) -> tuple:
+    """Changes when a calibration is stored or activated (by this process or another): a fit that started before
+    must not replace it."""
+    newest = db.query(func.max(Calibration.id)).scalar()
+    cur = (db.query(Calibration.id, Calibration.params).filter(Calibration.active.is_(True))
+           .order_by(Calibration.id.desc()).first())  # fmt: skip
+    return newest, cur[0] if cur else None, ((cur[1] or {}).get("service") or {}).get("since") if cur else None
+
+
+def _service_of(ev: Evidence) -> dict:
+    """The evidence a calibration is measured against from when it goes into service."""
+    return {"keys": ev.keys, "training": ev.training, "aux": ev.aux, "n_products": ev.n_products,
+            "photo_rev": ev.photo_rev, "since": utcnow().isoformat()}  # fmt: skip
 
 
 def _store(db: Session, ev: Evidence, label_hash: str, a, b, cov, diag, y, fold) -> Calibration:
     db.query(Calibration).filter(Calibration.active.is_(True)).update({Calibration.active: False})
-    service = {"keys": ev.keys, "aux": ev.aux, "n_products": ev.n_products}
+    service = _service_of(ev)
     cal = Calibration(engine_version=pm.ENGINE_VERSION, method=METHOD, n_labels=len(y), n_positive=int(y.sum()),
                       label_hash=label_hash, active=True,
                       params={"a": a, "b": b, "cov": cov.tolist(), "folds": int(fold.max() + 1),
-                              "n_products": ev.n_products, "label_keys": ev.keys, "aux_keys": ev.aux,
-                              "regime": ev.regime, "service": service},
+                              "n_products": ev.n_products, "label_keys": ev.keys, "training_keys": ev.training,
+                              "aux_keys": ev.aux, "regime": ev.regime, "service": service},
                       diagnostics=diag)  # fmt: skip
     db.add(cal)
     db.commit()
@@ -558,7 +664,7 @@ def activate(db: Session, calibration_id: int) -> Calibration:
     )
     params = {k: v for k, v in (cal.params or {}).items() if k != "withdrawn"}
     # New evidence is counted from now: a rollback is not undone by the decisions that preceded it.
-    cal.params = {**params, "service": {"keys": ev.keys, "aux": ev.aux, "n_products": ev.n_products}}
+    cal.params = {**params, "service": _service_of(ev)}
     cal.active = True
     db.commit()
     return cal

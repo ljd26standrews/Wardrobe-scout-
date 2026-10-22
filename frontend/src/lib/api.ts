@@ -53,7 +53,26 @@ export type CalibrationState = "calibrated" | "stale" | "uncalibrated" | "pendin
 /** Approval estimates are in use (a stale calibration is still valid: nothing it rests on was withdrawn). */
 export const hasEstimates = (state: GateState | CalibrationState) => state === "calibrated" || state === "stale";
 /** New evidence since the calibration in use was fitted. */
-export type CalibrationDrift = { new_decisions: number; other_evidence: number; catalogue_changed: boolean; refit_due: boolean };
+/** What changed since the calibration in use was fitted: new evidence (refitted once enough has arrived), evidence it was
+ *  fitted on that was amended (a reason edited, a piece re-analysed, a rating changed: refitted at once), and catalogue-wide
+ *  changes. */
+export type CalibrationDrift = {
+  new_decisions: number;
+  other_evidence: number;
+  amended?: number;
+  catalogue_changed: boolean;
+  photos_reanalysed?: boolean;
+  refit_due: boolean;
+};
+
+/** Why a calibration in use is due for a refit, in words. */
+export function staleReason(d: CalibrationDrift | undefined): string {
+  if (!d) return "newer evidence not yet included";
+  if (d.amended) return `${d.amended === 1 ? "a decision or rating it was fitted on has" : `${d.amended} decisions or ratings it was fitted on have`} changed; refitting`;
+  if (d.photos_reanalysed) return "photos re-analysed since; refitting";
+  if (d.catalogue_changed) return "the catalogue has changed a lot since; refitting";
+  return `${d.new_decisions} newer decisions not yet included`;
+}
 /** Why the last calibration stopped being used. */
 export type CalibrationWithdrawal = { calibration_id: number; reason: string; label: string; at: string };
 export const MODES: SelectiveMode[] = ["balanced", "high", "extreme"];
