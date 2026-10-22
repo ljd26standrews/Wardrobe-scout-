@@ -225,11 +225,12 @@ def after_decision(client, get, undecided, url: str, rounds: int = 12, refits: b
                     break
                 time.sleep(0.1)
                 db.expire_all()
-            refitted = db.query(Job).filter(Job.kind == "recalibrate", Job.status == "done").count()
+            refitted = db.query(Job).filter(Job.kind == "recalibrate", Job.status == "succeeded").count()
     out = {"rounds": rounds, "p50_ms": round(1000 * st.median(times), 1), "p95_ms": round(1000 * _pct(times, 0.95), 1),
            "max_ms": round(1000 * max(times), 1)}  # fmt: skip
     if refits:
         out["refits_done"] = refitted
+        assert refitted > 0, "No background refit completed: this is not a valid refit-contention benchmark"
     return out
 
 
@@ -289,11 +290,21 @@ def during_scan(get, url: str, n: int, requests: int = 20) -> dict:
 
 def profile(n: int, url: str = "/api/feed?limit=24&mode=balanced", top: int = 30) -> str:
     client, ids = build(n)
-    client.post("/api/feedback", json={"product_id": ids[-1], "action": "skip"})  # cold
+    from app.api.products import feed, feed_filters
+    from app.db import SessionLocal
+    from app.models import Product
+
+    # TestClient runs the route in another thread: profiling client.get measures waiting, not the feed.
+    # Call the same route in this thread after changing catalogue content, to profile the actual cold work.
     pr = cProfile.Profile()
-    pr.enable()
-    client.get(url)
-    pr.disable()
+    with SessionLocal() as db:
+        db.get(Product, ids[-1]).price += 1
+        db.commit()
+        flt = feed_filters(brand=None, seller_id=None, category=None, material=None, price_currency="CNY")
+        pr.enable()
+        feed(limit=24, mode="balanced", flt=flt, db=db)
+        pr.disable()
+    client.__exit__(None, None, None)
     s = io.StringIO()
     pstats.Stats(pr, stream=s).sort_stats("cumulative").print_stats(top)
     return s.getvalue()

@@ -92,6 +92,16 @@ jobs:
   e2e:
     needs: [backend, frontend]
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - browser: chromium
+            desktop: desktop
+            mobile: iphone
+          - browser: webkit
+            desktop: webkit
+            mobile: iphone-webkit
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -113,16 +123,16 @@ jobs:
         working-directory: frontend
         run: |
           npm ci
-          npx playwright install --with-deps chromium webkit
+          npx playwright install --with-deps ${{ matrix.browser }}
       - name: End-to-end tests on the synthetic demo catalogue (desktop and iPhone viewports)
         env:
           WS_EMBEDDING_BACKEND: lite
-        run: ./scripts/e2e.sh
+        run: ./scripts/e2e.sh --project=${{ matrix.desktop }} --project=${{ matrix.mobile }}
       - name: Keep logs and failure screenshots
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: e2e-results
+          name: e2e-results-${{ matrix.browser }}
           path: |
             .e2e-data/*.log
             frontend/test-results/
