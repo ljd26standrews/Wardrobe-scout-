@@ -52,18 +52,25 @@ function Discover() {
   const seen = useRef(new Map<number, Seen>());
   const logged = useRef(new Set<string>());
 
-  // Pieces you decided on this session never come back from a response fetched before the decision.
+  // Pieces you decided on this session never come back from a response fetched before the decision. The last copy of
+  // every piece shown is kept, so Undo can put a piece back at once, before the refreshed feed answers.
+  const known = useRef(new Map<number, Product>());
   const items = useMemo(() => {
-    data?.items.forEach((p, i) => seen.current.set(p.id, { feedId: data.feed_id, position: i }));
+    data?.items.forEach((p, i) => {
+      seen.current.set(p.id, { feedId: data.feed_id, position: i });
+      known.current.set(p.id, p);
+    });
     return (data?.items ?? []).filter((p) => !decided.has(p.id));
   }, [data, decided]);
 
   // The focused piece stays put while the ranking behind it refreshes, as long as the latest response still has it.
+  // A piece being put back by Undo is shown from its last copy until the refreshed feed answers.
   const [pinned, setPinned] = useState<number | null>(null);
+  const [restoring, setRestoring] = useState<number | null>(null);
   const queue = useMemo(() => {
-    const pin = pinned != null ? items.find((p) => p.id === pinned) : undefined;
+    const pin = pinned == null ? undefined : (items.find((p) => p.id === pinned) ?? (restoring === pinned ? known.current.get(pinned) : undefined));
     return pin ? [pin, ...items.filter((p) => p.id !== pin.id)] : items;
-  }, [items, pinned]);
+  }, [items, pinned, restoring]);
   const current = queue[0];
   useEffect(() => {
     if (current && current.id !== pinned) setPinned(current.id);
@@ -90,10 +97,15 @@ function Discover() {
   const [canUndo, setCanUndo] = useState(false);
   const restore = useCallback(
     async (productId: number) => {
+      setRestoring(productId);
       setPinned(productId);
-      const fresh = await mutate();
-      if (fresh && !fresh.items.some((p) => p.id === productId)) {
-        toast("It's undecided again, but not in this feed", { description: learning ? "It isn't among today's learning picks." : `It doesn't currently pass ${MODE_LABEL[fresh.gate.mode]}.` });
+      try {
+        const fresh = await mutate();
+        if (fresh && !fresh.items.some((p) => p.id === productId)) {
+          toast("It's undecided again, but not in this feed", { description: learning ? "It isn't among today's learning picks." : `It doesn't currently pass ${MODE_LABEL[fresh.gate.mode]}.` });
+        }
+      } finally {
+        setRestoring((r) => (r === productId ? null : r));
       }
     },
     [mutate, learning],

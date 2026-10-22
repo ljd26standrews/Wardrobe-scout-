@@ -2,10 +2,10 @@
 
 A personal, local-first app for discovering, researching and deciding on clothing from Yupoo catalogues, Weidian listings and independent sellers. It collects real listings, separates evidence from marketing, learns your taste from quick decisions, finds the same or better pieces at other sellers, and helps you build a cohesive wardrobe.
 
-- **Discover** — one piece at a time (or a grid), with swipeable photos, CNY/GBP and UK landed cost, a quality assessment with confidence, why it suits you, its three strengths and three unknowns, links, and comparable listings. Love / Save / Maybe / Dislike (with reasons) / Skip / Compare / Purchased, all with keyboard shortcuts and undo. After each decision the rest of the queue is re-ranked while the card on screen stays put, and Undo puts the card back. A garment listed by several sellers takes one card ("Also listed by 2 other sellers · compare offers").
-- **Browse** — search and filter everything collected (brand, seller, price, claimed material, evidence status, size, season, category, source).
-- **Compare** — cross-seller matches, clearly separated into *confirmed identical*, *same purchase link*, *same photographs (unconfirmed)* and *visually similar*, with a verdict on whether a higher price is justified.
-- **Saved** — Loved / Shortlist / Maybe / Wishlist with priorities and a landed-cost total against your budget.
+- **Discover** — one piece at a time with its photos large, or an image-first grid. *For you*, *Learning picks* and *Browse all* are kept apart, and each feed says in one sentence what it is. Like / Not now / Love / Dislike / Skip by key or tap, with Undo always one key (Z) or tap away. A dislike is recorded at once; reasons are optional and can be added afterwards. After each decision the queue is re-ranked while the piece on screen stays put. A garment listed by several sellers takes one place. Sizing, evidence and offers are one step away, in a side panel on desktop (its address can be shared; Back closes it) or the full page on a phone.
+- **Browse** — search and filter everything collected (brand, seller, price, claimed material, evidence status, size, season, category, source). Filters, sort and page are kept in the address, so Back returns the same results.
+- **Compare** — offers for one piece across sellers, clearly separated into *confirmed identical*, *same purchase link*, *same photographs (unconfirmed)* and *visually similar*, with a verdict on whether a higher price is justified; or up to four pieces you picked in Saved, side by side.
+- **Saved** — Loved / Shortlist / Later / Maybe / Wishlist as filter chips, with category and search filters, large photos, purchase notes (size to check, note, priority) edited in place, Compare, and Remove with Undo. A landed-cost total against your season budget.
 - **My Wardrobe** — what you own (with photos), gaps against seasonal essentials, redundancy warnings, outfit combinations (including saved candidates), inspiration and anti-inspiration photos.
 - **Sellers** — add, pause, prioritise and scan sellers. A live scan panel shows discovery and analysis progress, size charts excluded, duplicates, throughput, a time-remaining range and catalogue coverage. You can pause, resume, cancel or retry a scan, and it keeps running if you close the tab. Also: link / manual / CSV / JSON / bookmarklet imports, watched links, jobs and community research leads.
 - **Insights** — what has been learned (and how confident that is), effective ranking weights, value ceilings, explanations for top picks, and the full decision history with undo.
@@ -69,7 +69,7 @@ If your `.env` was copied from an older `.env.example`, it may say `WS_MAX_PAGES
 
 1. **Sellers → Scan all.** This scans the five starting catalogues politely. Each seller's card then shows the real outcome: products collected, requests made, and any error or block message.
 2. If a site restricts automated access, use **Sellers → Import products**: paste links, use the **bookmarklet** while browsing yourself, or import CSV/JSON.
-3. **Discover** — make quick decisions. Give reasons when you dislike something; they matter (see below).
+3. **Discover** — make quick decisions. After a dislike, "Add a reason" says whether it was the look, the price, the size or something else; it matters (see below), but it is never required.
 4. **My Wardrobe** — add a few pieces you own (photos help), plus inspiration photos.
 
 ---
@@ -235,13 +235,15 @@ confidence filter, in the evaluation and on screen:
 | **Save** a piece to any list | You like the look (recorded as a like) | In that list | – |
 | **Maybe** | Undecided: no taste signal, and an earlier like no longer counts | Saved to Maybe | – |
 | **Dislike** with a reason about the look, or no reason | You don't like the look (scoped to the reason) | – | – |
+| **Add a reason** after a dislike | Replaces what that dislike says: a buying or quality reason means it no longer counts against the look | As the reason says | As the reason says |
 | **Dislike** · too expensive | – | Not at this price (a value judgement, not a budget) | – |
 | **Dislike** · already own something similar | – | Pieces *like it* (same type and main colour, or a near-identical photo) are less useful; never a whole category | – |
 | **Dislike** · not in my size | – | This listing only; other listings of the same garment still appear | – |
 | **Dislike** · poor apparent quality / not enough quality evidence | – | – | Quality, not taste |
 | **Purchased** | Nothing on its own (an earlier like still counts) | Moved to your wardrobe | – |
 | **Skip** / scrolling past | Nothing | Shown again after a while | – |
-| **Unsave** / **Undo** | The decision no longer counts | List restored | – |
+| **Remove** from Saved | The like it carried no longer counts | Removed; Undo puts it back with its list, priority and notes | – |
+| **Undo** a decision | The decision no longer counts | List restored | – |
 
 A later decision that is only about buying or quality (say, *too expensive* after a like) does not cancel what you
 said about the look. Hiding a whole category is a separate, explicit choice (Settings → Discover), shown on every
@@ -420,7 +422,11 @@ cd frontend && npm run typecheck && npm run lint
 ./scripts/e2e.sh                          # Playwright, desktop + iPhone viewport
 ```
 
-`e2e.sh` starts a **synthetic** demo catalogue (`backend/scripts/demo_catalogue_server.py`; every title is prefixed `[DEMO]` and the images are drawn shapes) on a throwaway database in `.e2e-data/`. It scans that catalogue through the real ingestion pipeline and drives the UI. Your real data is never touched. Run `npx playwright install chromium` once in `frontend/` first.
+`e2e.sh` starts a **synthetic** demo catalogue (`backend/scripts/demo_catalogue_server.py`; every title is prefixed `[DEMO]` and the images are drawn shapes) on a throwaway database in `.e2e-data/`. It scans that catalogue through the real ingestion pipeline and drives the UI. One demo seller has awkward listings on purpose (a very long title, no price, a landscape photo, photos that fail to load, one coat listed four times), and two pieces are priced in currencies with no rate set. The starting sellers (real shops) are paused and their watched links removed first, so no request leaves your computer. Your real data is never touched. Run `npx playwright install chromium` once in `frontend/` first.
+
+The specs cover decisions and Undo, reasons added after a dislike, the side panel and its address, Saved (filters, notes, compare, Remove with Undo), timing cases (decisions faster than the network, a late answer, a failed save, a reload during a scan, a setting changed in another tab), and layout and accessibility checks (320 to 1440 px, 200% zoom, dark mode, reduced motion, keyboard focus, accessible names, 44 px touch targets on a phone).
+
+Continuous integration (`.github/workflows/ci.yml`) runs the backend tests and migrations, the frontend type-check, lint, contrast check and build, then `e2e.sh`. Installs use pinned versions (`backend/constraints.txt`, `frontend/package-lock.json`). Nothing in it needs an API key, your data or the internet beyond package downloads.
 
 ## Architecture
 

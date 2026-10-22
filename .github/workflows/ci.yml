@@ -1,0 +1,105 @@
+# Checks every push and pull request. Everything runs offline against synthetic data: no paid APIs (no
+# ANTHROPIC_API_KEY is set, so the optional photo check stays off), no private data and no live crawling (the
+# end-to-end job scans the synthetic demo catalogue served on localhost).
+name: CI
+
+on:
+  push:
+    branches: [main, "feature/**", "audit/**", "perf/**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: backend/constraints.txt
+      - name: Install (known-working versions from constraints.txt)
+        run: pip install -r requirements-dev.txt -c constraints.txt
+      - run: pip check
+      - run: ruff check .
+      - name: Tests
+        env:
+          WS_EMBEDDING_BACKEND: lite
+        run: python -m pytest -q
+      - name: Migrations upgrade, downgrade and upgrade again on an empty database
+        env:
+          WS_DATA_DIR: ${{ runner.temp }}/ws-migrations
+          WS_DATABASE_URL: sqlite:///${{ runner.temp }}/ws-migrations/ws.db
+        run: |
+          mkdir -p "$WS_DATA_DIR"
+          alembic upgrade head
+          alembic downgrade -1
+          alembic upgrade head
+
+  frontend:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npx next lint
+      - name: Colour contrast of the design tokens (light and dark)
+        run: node scripts/contrast.mjs
+      - run: npx next build
+
+  e2e:
+    needs: [backend, frontend]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: backend/constraints.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Backend environment
+        working-directory: backend
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install -r requirements.txt -c constraints.txt
+      - name: Frontend dependencies and Chromium
+        working-directory: frontend
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: End-to-end tests on the synthetic demo catalogue (desktop and iPhone viewports)
+        env:
+          WS_EMBEDDING_BACKEND: lite
+        run: ./scripts/e2e.sh
+      - name: Keep logs and failure screenshots
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-results
+          path: |
+            .e2e-data/*.log
+            frontend/test-results/
+          retention-days: 7

@@ -7,7 +7,10 @@ data directory, e.g.:
     WS_DATA_DIR=./e2e-data python scripts/demo_catalogue_server.py   # ports 8765 + 8766
 
 Two sellers are served (one per port). Some albums deliberately share photos
-across the two sellers so cross-seller comparison can be exercised.
+across the two sellers so cross-seller comparison can be exercised. A third port,
+if given, serves awkward listings for layout and honesty checks: a very long
+title, no price, a landscape photo, photos that fail to load, and one garment
+re-listed several times (many offers).
 """
 
 from __future__ import annotations
@@ -61,7 +64,31 @@ SELLER_B = [
 ]
 
 
-def draw(colour, shape, variant=0) -> bytes:
+# Seller C: (id, title, description, photo keys). "missing-*" photos answer 404 on purpose.
+SELLER_C = [
+    (
+        "4001",
+        "[DEMO] 【C01】超长标题版式测试 Extra-long title for layout checks: 意大利进口双面羊绒羊毛混纺落肩宽松版型长款大衣 "
+        "oversized double-faced wool and cashmere long coat with hand-finished seams, horn buttons and a deep back vent ¥2380",
+        "90%羊毛 10%羊绒 尺码 46-54",
+        ["4001-0", "4001-1"],
+    ),
+    ("4002", "[DEMO] 羊毛针织背心 灰色 询价", "100%羊毛 尺码 S-XL 价格请咨询", ["4002-0"]),  # no price stated
+    ("4003", "[DEMO] 平铺拍摄 羊毛直筒裤 炭灰 P329", "100%羊毛 尺码 46-52", ["4003-0", "4003-1"]),
+    ("4004", "[DEMO] 图片加载失败测试 棉质衬衫 白色 P219", "100%棉 尺码 S-XL", ["missing-0", "missing-1"]),
+    ("4005", "[DEMO] 双面呢大衣 驼色 再上架 ¥1590", "90%羊毛 10%羊绒 尺码 46-52", ["2008-0", "2008-1"]),
+    ("4006", "[DEMO] 双面呢大衣 驼色 现货 ¥1720", "90%羊毛 10%羊绒 尺码 48 50", ["2008-0", "2008-1"]),
+    ("4007", "[DEMO] 双面呢大衣 驼色 补货 ¥1650", "90%羊毛 10%羊绒 尺码 46-52", ["2008-0", "2008-1"]),
+]
+# Photos drawn only for seller C: (colour, shape, landscape)
+DRAWINGS_C = {
+    "4001": ((96, 84, 72), "coat", False),
+    "4002": ((128, 128, 132), "knit", False),
+    "4003": ((55, 55, 58), "trousers", True),  # photographed flat: a wide (landscape) picture
+}
+
+
+def draw(colour, shape, variant=0, landscape=False) -> bytes:
     img = Image.new("RGB", (600, 750), (236, 233, 227) if variant % 2 == 0 else (226, 222, 214))
     d = ImageDraw.Draw(img)
     w, h = img.size
@@ -105,7 +132,10 @@ def draw(colour, shape, variant=0) -> bytes:
         x0, y0, x1, y1 = boxes[(variant - 1) % len(boxes)]
         img = img.crop((int(w * x0), int(h * y0), int(w * x1), int(h * y1))).resize((w, h))
         d = ImageDraw.Draw(img)
-    d.text((18, h - 30), f"SYNTHETIC DEMO IMAGE {variant}", fill=(150, 150, 150))
+    if landscape:
+        img = img.rotate(90, expand=True)
+        d = ImageDraw.Draw(img)
+    d.text((18, img.size[1] - 30), f"SYNTHETIC DEMO IMAGE {variant}", fill=(150, 150, 150))
     buf = io.BytesIO()
     img.save(buf, "JPEG", quality=88)
     return buf.getvalue()
@@ -162,6 +192,11 @@ def make_handler(catalogue: list[dict], label: str):
             if u.path.startswith("/photo/"):
                 key = u.path.split("/")[-1].removesuffix(".jpg")
                 pid, variant = key.rsplit("-", 1)
+                if pid in DRAWINGS_C:
+                    colour, shape, landscape = DRAWINGS_C[pid]
+                    return self.send(draw(colour, shape, int(variant), landscape), "image/jpeg")
+                if pid not in PRODUCTS_BY_ID:
+                    return self.send(b"not found", status=404)  # a photo that fails to load
                 src = PRODUCTS_BY_ID[pid]
                 return self.send(draw(src[3], src[4], int(variant)), "image/jpeg")
             self.send(b"not found", status=404)
@@ -178,20 +213,24 @@ def catalogues():
     for pid, t, d, same in SELLER_B:
         photos = [f"{same}-0", f"{same}-1"] if same else ["2003-1"]
         b.append({"id": pid, "title": t, "desc": d, "photos": photos})
-    return a, b
+    c = [{"id": pid, "title": t, "desc": d, "photos": photos} for pid, t, d, photos in SELLER_C]
+    return a, b, c
 
 
-def main(port_a: int = 8765, port_b: int = 8766) -> None:
-    a, b = catalogues()
+def main(port_a: int = 8765, port_b: int = 8766, port_c: int | None = None) -> None:
+    a, b, c = catalogues()
     servers = [
         ThreadingHTTPServer(("127.0.0.1", port_a), make_handler(a, "seller A")),
         ThreadingHTTPServer(("127.0.0.1", port_b), make_handler(b, "seller B")),
     ]
+    if port_c:
+        servers.append(ThreadingHTTPServer(("127.0.0.1", port_c), make_handler(c, "seller C (edge cases)")))
     for s in servers:
         threading.Thread(target=s.serve_forever, daemon=True).start()
-    print(f"Synthetic demo catalogues on http://127.0.0.1:{port_a} and http://127.0.0.1:{port_b}", flush=True)
+    ports = ", ".join(f"http://127.0.0.1:{s.server_address[1]}" for s in servers)
+    print(f"Synthetic demo catalogues on {ports}", flush=True)
     threading.Event().wait()
 
 
 if __name__ == "__main__":
-    main(*(int(x) for x in sys.argv[1:3]))
+    main(*(int(x) for x in sys.argv[1:4]))

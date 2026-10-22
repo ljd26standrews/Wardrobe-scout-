@@ -11,18 +11,19 @@ test.describe.configure({ mode: "serial" });
 // The demo catalogue has only a handful of decisions, so approval estimates are not yet calibrated.
 test("discover: a strict mode explains why it is empty instead of padding the feed", async ({ page }) => {
   await page.goto("/");
-  await expect(page.getByTestId("gate-status")).toContainText("not yet calibrated");
+  await expect(page.getByTestId("gate-status")).toContainText("Your taste ranking");
   await expect(page.getByTestId("discover-card")).toBeVisible(); // Balanced: the taste ranking, labelled
   await expect(page.getByTestId("approval-estimate")).toHaveCount(0); // no percentages without a calibration
   await shot(page, "discover-balanced-uncalibrated");
 
   await page.getByTestId("mode-high").click();
-  await expect(page.getByTestId("gate-message")).toContainText("High confidence needs calibrated approval estimates");
+  await expect(page.getByText("High confidence needs match estimates first")).toBeVisible();
+  await expect(page.getByTestId("gate-message")).toContainText("needs more of your likes and dislikes");
   await expect(page.getByTestId("discover-card")).toHaveCount(0);
   await shot(page, "discover-high-uncalibrated");
 
   await page.getByTestId("tab-learning").click();
-  await expect(page.getByText(/Pieces the model is unsure about|No learning picks right now/)).toBeVisible();
+  await expect(page.getByText(/Pieces the app is unsure about|No learning picks right now/).first()).toBeVisible();
   await shot(page, "discover-learning");
 
   await page.getByTestId("tab-foryou").click();
