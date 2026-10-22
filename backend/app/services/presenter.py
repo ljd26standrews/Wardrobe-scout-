@@ -13,7 +13,7 @@ from . import dedup, revisions
 from .landed_cost import estimate_landed_cost
 from .money import code, rates
 from .quality import assess, category_price_stats, evidence_view
-from .recommender import Ranked
+from .recommender import LISTING_COLUMNS, Ranked
 from .settings_store import get_setting
 
 RELATION_LABEL = {
@@ -57,6 +57,31 @@ def load_images(db: Session, products: list[Product]) -> None:
     _load_children(db, products, "images", ProductImage, ProductImage.position)
 
 
+def rebind(db: Session, items: list, offers: dict[int, list]) -> tuple[list, dict[int, list[Product]]]:
+    """The items about to be shown (Ranked, or selective Candidates), with their listings and offers replaced by
+    copies from this session, so a card may load photos, the seller and evidence. The originals (shared, read-only
+    listings: recommender.Listing) are left untouched."""
+    import dataclasses
+
+    def product_of(it):
+        return it.ranked.product if hasattr(it, "ranked") else it.product
+
+    shown = [product_of(it).id for it in items]
+    originals = {p.id: p for p in [product_of(it) for it in items] + [o for pid in shown for o in offers.get(pid, [])]}
+    fresh = {p.id: p for p in db.query(Product).filter(Product.id.in_(originals))} if originals else {}
+    for pid in originals.keys() - fresh.keys():  # deleted since it was chosen: shown as it was, with no photos
+        fresh[pid] = Product(**{k: getattr(originals[pid], k) for k in LISTING_COLUMNS})
+    out = []
+    for it in items:
+        if hasattr(it, "ranked"):
+            out.append(
+                dataclasses.replace(it, ranked=dataclasses.replace(it.ranked, product=fresh[it.ranked.product.id]))
+            )
+        else:
+            out.append(dataclasses.replace(it, product=fresh[it.product.id]))
+    return out, {pid: [fresh[o.id] for o in offers.get(pid, [])] for pid in shown}
+
+
 class Context:
     """Per-request caches so list endpoints don't repeat expensive lookups."""
 
@@ -80,6 +105,16 @@ class Context:
         """Evidence for the pieces whose quality assessment is not cached yet; a cached assessment needs none."""
         cold = [p for p in products if p.id not in self._quality and p.id not in self._shared]
         _load_children(self.db, cold, "evidence", Evidence, Evidence.id)
+
+    def prime_quality(self, products: list) -> None:
+        """Assess the pieces whose quality is not cached yet, on copies loaded in this session: ``products`` may be
+        shared read-only listings (recommender.Listing)."""
+        cold = [p.id for p in products if p.id not in self._quality and p.id not in self._shared]
+        for i in range(0, len(cold), 900):
+            fresh = self.db.query(Product).filter(Product.id.in_(cold[i : i + 900])).all()
+            self.load_evidence(fresh)
+            for p in fresh:
+                self.quality(p)
 
     def seller_evidence(self, seller_id: int | None) -> list[Evidence]:
         if not seller_id:
@@ -135,6 +170,8 @@ class Context:
         if base is None:
             base = self._shared.get(p.id)
             if base is None:
+                if not isinstance(p, Product):  # a shared listing (recommender.Listing): assessed on a session copy
+                    p = self.db.get(Product, p.id) or Product(**{k: getattr(p, k) for k in LISTING_COLUMNS})
                 base = assess(
                     self.db,
                     p,

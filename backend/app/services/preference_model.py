@@ -210,7 +210,7 @@ def build_feature_space(db: Session, taste: dict, backend: str) -> FeatureSpace:
     """Feature matrix for every product. Cached until products (their content: services/revisions.py), wardrobe,
     taste profile or image model change; a decision or a piece being marked as seen does not rebuild it."""
     from . import revisions
-    from .recommender import rules_component
+    from .recommender import photo_matrix, read_listings, rules_component, rules_lookup
 
     products_rev = revisions.current(db, "products")
     wardrobe_keys = sorted({k for w in db.query(WardrobeItem) for k in attr_keys(w)})
@@ -225,8 +225,9 @@ def build_feature_space(db: Session, taste: dict, backend: str) -> FeatureSpace:
     with _cache_lock:
         if key in _space_cache:
             return _space_cache[key]
-    products = db.query(Product).all()
-    vocab_keys = {k for p in products for k in attr_keys(p)}
+    products = read_listings(db)  # every listing, as plain records
+    keys = [attr_keys(p) for p in products]
+    vocab_keys = {k for ks in keys for k in ks}
     # Wardrobe attributes, and those of decided products since deleted, extend the vocabulary so owned
     # pieces and past decisions can inform taste.
     vocab_keys = sorted(vocab_keys | set(wardrobe_keys) | set(history_keys))
@@ -234,14 +235,15 @@ def build_feature_space(db: Session, taste: dict, backend: str) -> FeatureSpace:
     d = 1 + len(vocab) + PCA_DIM + 1  # prior, attributes, image PCs, bias
 
     ids = [p.id for p in products]
-    vecs = {
-        p.id: emb.from_bytes(p.image_embedding)
-        for p in products
-        if p.image_embedding is not None and p.embedding_backend == backend
-    }
+    photographed = [
+        r for r, p in enumerate(products) if p.image_embedding is not None and p.embedding_backend == backend
+    ]
+    vecs: dict[int, np.ndarray] = {}
     pca_mean = pca_components = pca_scale = None
+    if photographed:
+        E = photo_matrix(products, photographed)
+        vecs = dict(zip(photographed, E, strict=True))  # row -> its photo vector
     if len(vecs) >= MIN_PCA_PRODUCTS:  # a small catalogue gets fewer components, not none
-        E = np.vstack(list(vecs.values()))
         pca_mean = E.mean(0)
         _, _, vt = np.linalg.svd(E - pca_mean, full_matrices=False)
         pca_components = vt[: min(PCA_DIM, len(vecs) - 1)]
@@ -259,9 +261,11 @@ def build_feature_space(db: Session, taste: dict, backend: str) -> FeatureSpace:
         d,
         key,
     )
+    rules_seen = rules_lookup(db, taste)  # the written-profile scores feeds use, keyed by the same revisions
     for r, p in enumerate(products):
-        rules, _ = rules_component(p, taste)
-        space.X[r] = space.vector(attr_keys(p), prior=(rules - 0.5) * PRIOR_SCALE, image=vecs.get(p.id))
+        if (hit := rules_seen.get(p.id)) is None:
+            hit = rules_seen[p.id] = rules_component(p, taste)
+        space.X[r] = space.vector(keys[r], prior=(hit[0] - 0.5) * PRIOR_SCALE, image=vecs.get(r))
     with _cache_lock:
         _space_cache.clear()  # keep only the current space
         _space_cache[key] = space
@@ -591,9 +595,28 @@ def prior(space: FeatureSpace) -> tuple[np.ndarray, np.ndarray]:
     return m0, q0
 
 
+_fit_memo: OrderedDict[str, Posterior] = OrderedDict()
+
+
 def fit(db: Session, space: FeatureSpace) -> Posterior:
-    """Fit the taste model to your current evidence. A fit is reused while its inputs are unchanged."""
-    return fit_rows(space, *observations(db, space))
+    """Fit the taste model to your current evidence. A fit is reused while its inputs are unchanged: the data it
+    reads (services/revisions.py) and the feature space, so a feed that asks twice (ranking, then the gate) reads
+    your decisions once."""
+    from . import revisions
+
+    key = json.dumps([revisions.current(db, "feedback", "products", "addresses", "wardrobe", "inspiration"),
+                      space.key])  # fmt: skip
+    with _post_lock:
+        if key in _fit_memo:
+            _fit_memo.move_to_end(key)
+            hit = _fit_memo[key]
+            return hit if hit.space is space else dataclasses.replace(hit, space=space)
+    post = fit_rows(space, *observations(db, space))
+    with _post_lock:
+        _fit_memo[key] = post
+        while len(_fit_memo) > 4:
+            _fit_memo.popitem(last=False)
+    return post
 
 
 def fit_rows(space: FeatureSpace, rows: list, ys: list, ws: list, n_real: int) -> Posterior:

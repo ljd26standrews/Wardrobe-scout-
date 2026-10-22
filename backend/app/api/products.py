@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
+import threading
 import uuid
-from collections import Counter
+from collections import Counter, OrderedDict
+from dataclasses import dataclass
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func
@@ -13,11 +16,11 @@ from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..ingestion.parsing import materials_to_text, parse_materials
-from ..models import Evidence, Feedback, FeedRequest, Impression, Product
+from ..models import Evidence, Feedback, FeedRequest, Impression, Product, utcnow
 from ..schemas import EvidenceIn, ExposuresIn, MatchDecision, ProductPatch, ViewedIn
-from ..services import calibration, dedup, exposure, jobs, money, selective
+from ..services import calibration, dedup, exposure, jobs, money, revisions, selective
 from ..services import embeddings as emb
-from ..services.presenter import Context, comparison, load_images, product_card
+from ..services.presenter import Context, comparison, load_images, product_card, rebind
 from ..services.recommender import build_feed, build_profile, collapse_families, feed_candidates, rank_products
 from ..services.settings_store import get_setting
 from ..services.wardrobe import complement_scores
@@ -134,7 +137,7 @@ NO_FILTERS = {k: None for k in ("q", "brand", "seller_id", "category", "material
 def ranked_candidates(db: Session, prof, ctx: Context, flt: dict) -> tuple[list, dict, int, dict]:
     """Undecided pieces matching the filters, ranked, one per garment: (ranked, offers, n candidates, quality)."""
     rcfg = get_setting(db, "recommender")
-    candidates = feed_candidates(db, prof, include_skipped_after_days=rcfg.get("skip_resurface_days", 10))
+    candidates = feed_candidates(db, prof, include_skipped_after_days=rcfg.get("skip_resurface_days", 10), shared=True)
     if not flt.get("include_seed"):
         candidates = [p for p in candidates if p.data_origin != "seed"]
     hidden = set(get_setting(db, "discover").get("hidden_categories") or [])
@@ -143,7 +146,7 @@ def ranked_candidates(db: Session, prof, ctx: Context, flt: dict) -> tuple[list,
         ctx.hidden = {"categories": sorted(hidden), "pieces": len(candidates) - len(shown)}
         candidates = shown
     filters = {k: v for k, v in flt.items() if k != "include_seed"}
-    ctx.load_evidence(candidates)
+    ctx.prime_quality(candidates)  # on fresh copies: the candidates are shared, read-only listings
     ctx.price_filter = price_filter(db, flt, candidates, ctx)  # as applied, reported with the feed
     candidates = _apply_filters(candidates, **filters, origin=None, ctx=ctx)
     quality_lookup = {p.id: ctx.quality(p) for p in candidates}
@@ -174,6 +177,67 @@ def feed_card(ctx: Context, r, offers: dict, confidence: dict | None = None) -> 
     return card
 
 
+# ----------------------------------------------------------------- feed selections, remembered while nothing changes
+# Which pieces a feed chooses depends only on the data below (services/revisions.py), the photo method, the date (the
+# exploration seed, Learning picks' salt, a trial day), which skipped pieces have come back (skip_resurface_days),
+# the latest refit attempt (a failure is reported, and once its back-off has passed computing the feed queues the next
+# attempt), which feeds the log still holds (observed performance), and the request.
+# While all of that is unchanged the same choice is made again, without ranking every listing: it is logged under a
+# new feed id like any other (so exposures and decisions stay attributable), and its cards are built afresh, so the
+# photos, saved details and dates on them are always current.
+SELECTION_REVISIONS = ("products", "photos", "addresses", "evidence", "relations", "feedback", "wardrobe",
+                       "inspiration", "sellers", "settings", "calibrations")  # fmt: skip
+MAX_SELECTIONS = 16
+
+
+@dataclass
+class Selection:
+    """What a feed chose, all but its cards: the feed log's fields (None: not logged), the answer's other fields,
+    the pieces with their confidence blocks (their listings are shared, read-only ones) and their other offers."""
+
+    log: dict | None
+    body: dict
+    shown: list[tuple]  # (Ranked, confidence block or None)
+    offers: dict[int, list[Product]]
+
+
+_selections_lock = threading.Lock()
+_selections: OrderedDict[str, Selection] = OrderedDict()
+
+
+def _selection_key(db: Session, kind: str, request: dict) -> str:
+    days = get_setting(db, "recommender").get("skip_resurface_days", 10)
+    back = (db.query(func.count(Feedback.id))
+            .filter(Feedback.action == "skip", Feedback.created_at <= utcnow() - dt.timedelta(days=days)).scalar())  # fmt: skip
+    oldest_feed = db.query(func.min(FeedRequest.created_at)).scalar()  # changes when the log is pruned
+    return json.dumps([kind, request, revisions.current(db, *SELECTION_REVISIONS), emb.get_image_backend().name,
+                       dt.date.today().isoformat(), back, calibration.attempt_state(db), oldest_feed],
+                      sort_keys=True, default=str)  # fmt: skip
+
+
+def _serve(db: Session, kind: str, select, **request) -> dict:
+    """The feed answer: the remembered selection for this request and data, or a new one, with fresh cards."""
+    key = _selection_key(db, kind, request)
+    with _selections_lock:
+        sel = _selections.get(key)
+        if sel is not None:
+            _selections.move_to_end(key)
+    ctx = None
+    if sel is None:
+        ctx = Context(db)
+        sel = select(db, ctx, **request)
+        with _selections_lock:
+            _selections[key] = sel
+            while len(_selections) > MAX_SELECTIONS:
+                _selections.popitem(last=False)
+    feed_id = _write_log(db, sel.log) if sel.log is not None else None
+    ctx = ctx or Context(db)
+    ranked, offers = rebind(db, [r for r, _ in sel.shown], sel.offers)  # cards need this session's copies
+    load_images(db, [r.product for r in ranked])
+    items = [feed_card(ctx, r, offers, conf) for r, (_, conf) in zip(ranked, sel.shown, strict=True)]
+    return {"feed_id": feed_id, "items": items, **sel.body}
+
+
 @router.get("/feed")
 def feed(
     limit: int = Query(20, ge=1, le=100),
@@ -184,9 +248,12 @@ def feed(
     """Discover's main feed. With selective recommendation on (the default), only pieces that pass the chosen
     mode's gate, best first, and never padded with weaker ones; ``gate`` says what qualified and why the feed
     is what it is. With it off, the earlier ranked feed with exploration slots."""
+    return _serve(db, "feed", _select_feed, limit=limit, mode=mode, flt=flt)
+
+
+def _select_feed(db: Session, ctx: Context, *, limit: int, mode: str | None, flt: dict) -> Selection:
     prof = build_profile(db)
     rcfg = get_setting(db, "recommender")
-    ctx = Context(db)
     ranked, offers, n_candidates, quality_lookup = ranked_candidates(db, prof, ctx, flt)
     gate = selective.evaluate(db, ranked, prof, mode, quality_lookup=quality_lookup, learning="warmup")
     arm = selective.trial_arm(gate.cfg, dt.date.today())
@@ -201,13 +268,12 @@ def feed(
              "family_size": 1 + len(offers.get(r.product.id, []))}
             for i, r in enumerate(chosen)
         ]  # fmt: skip
-        feed_id = _log_feed(db, rcfg, prof, n_candidates, flt, rows, exploration=exploration, trial=arm)
+        log = _log_fields(rcfg, prof, n_candidates, flt, rows, exploration=exploration, trial=arm)
         summary = gate.summary(len(chosen), policy="ranked")
         if arm:
             summary.update(trial=arm, message="Trial day: Discover shows the earlier ranking today (with its "
                            "exploration slots), so the two can be compared. You can end the trial in Settings.")  # fmt: skip
-        load_images(db, [r.product for r in chosen])
-        return {"feed_id": feed_id, "items": [feed_card(ctx, r, offers) for r in chosen], **base, "gate": summary}
+        return Selection(log, {**base, "gate": summary}, [(r, None) for r in chosen], offers)
     rate = rcfg.get("exploration_rate", 0.18)
     n_explore = selective.warmup_exploration(gate, limit, rate)
     chosen = selective.main_feed(gate, limit - n_explore)
@@ -228,12 +294,10 @@ def feed(
         summary["sampling"] = sampling
     if arm:
         summary["trial"] = arm
-    feed_id = _log_feed(db, rcfg, prof, n_candidates, flt, selective.log_items(gate, chosen, offers),
-                        policy="selective", mode=gate.mode, gate=gate, trial=arm, sampling=sampling,
-                        exploration=rate if n_explore else 0.0)  # fmt: skip
-    load_images(db, [c.ranked.product for c in chosen])
-    items = [feed_card(ctx, c.ranked, offers, selective.card_confidence(gate, c)) for c in chosen]
-    return {"feed_id": feed_id, "items": items, **base, "gate": summary}
+    log = _log_fields(rcfg, prof, n_candidates, flt, selective.log_items(gate, chosen, offers), policy="selective",
+                      mode=gate.mode, gate=gate, trial=arm, sampling=sampling, exploration=rate if n_explore else 0.0)  # fmt: skip
+    shown = [(c.ranked, selective.card_confidence(gate, c)) for c in chosen]
+    return Selection(log, {**base, "gate": summary}, shown, offers)
 
 
 @router.get("/feed/learning")
@@ -245,9 +309,12 @@ def learning_feed(
 ):
     """Learning picks: plausible pieces the model is unsure about, kept apart from the main feed. Sampled with
     known inclusion probabilities (logged), so what you think of them can be evaluated without bias."""
+    return _serve(db, "learning", _select_learning, limit=limit, mode=mode, flt=flt)
+
+
+def _select_learning(db: Session, ctx: Context, *, limit: int, mode: str | None, flt: dict) -> Selection:
     prof = build_profile(db)
     rcfg = get_setting(db, "recommender")
-    ctx = Context(db)
     ranked, offers, n_candidates, quality_lookup = ranked_candidates(db, prof, ctx, flt)
     gate = selective.evaluate(db, ranked, prof, mode, quality_lookup=quality_lookup, learning=True)
     base = {"total_candidates": n_candidates, "learning_strength": round(prof.strength, 3),
@@ -255,17 +322,16 @@ def learning_feed(
     if gate.state == "off":
         summary = gate.summary(0, policy="learning")
         summary["message"] = "Learning picks are part of selective recommendation, which is switched off in Settings."
-        return {"feed_id": None, "items": [], **base, "gate": summary}
+        return Selection(None, {**base, "gate": summary}, [], {})
     picks, sampling = selective.learning_feed(db, gate, limit, salt=_learning_salt(db, gate.mode))
     for c in picks:
         _label_learning_pick(c)
     summary = gate.summary(len(picks), policy="learning")
     summary["sampling"] = sampling
-    feed_id = _log_feed(db, rcfg, prof, n_candidates, flt, selective.log_items(gate, picks, offers),
-                        policy="learning", mode=gate.mode, gate=gate, sampling=sampling)  # fmt: skip
-    load_images(db, [c.ranked.product for c in picks])
-    items = [feed_card(ctx, c.ranked, offers, selective.card_confidence(gate, c)) for c in picks]
-    return {"feed_id": feed_id, "items": items, **base, "gate": summary}
+    log = _log_fields(rcfg, prof, n_candidates, flt, selective.log_items(gate, picks, offers), policy="learning",
+                      mode=gate.mode, gate=gate, sampling=sampling)  # fmt: skip
+    shown = [(c.ranked, selective.card_confidence(gate, c)) for c in picks]
+    return Selection(log, {**base, "gate": summary}, shown, offers)
 
 
 def _learning_salt(db: Session, mode: str) -> str:
@@ -285,9 +351,9 @@ MAX_FEED_LOG = 10_000  # feeds kept in the impression log (oldest pruned)
 MAX_IMPRESSIONS = 200_000
 
 
-def _log_feed(db, rcfg, prof, n_candidates, flt, rows, *, exploration=0.0, policy="ranked", mode=None, gate=None,
-              sampling=None, trial=None) -> str:  # fmt: skip
-    """Record what this feed offered and under which model and policy (see models.FeedRequest)."""
+def _log_fields(rcfg, prof, n_candidates, flt, rows, *, exploration=0.0, policy="ranked", mode=None, gate=None,
+                sampling=None, trial=None) -> dict:  # fmt: skip
+    """What a feed offered and under which model and policy, as recorded (see models.FeedRequest)."""
     from ..services import preference_model as pm
 
     engine = rcfg.get("engine", "bayes")
@@ -300,20 +366,24 @@ def _log_feed(db, rcfg, prof, n_candidates, flt, rows, *, exploration=0.0, polic
             details["sampling"] = sampling
     if trial:
         details = {**(details or {}), "trial": trial}
-    fr = FeedRequest(
-        id=uuid.uuid4().hex,
-        engine=engine,
-        engine_version=pm.ENGINE_VERSION if engine == "bayes" else "legacy",
-        decisions=prof.n_informative,
-        candidates=n_candidates,
-        exploration_rate=exploration,
-        filters={k: v for k, v in flt.items() if v not in (None, [], "", False)},
-        items=rows,
-        policy=policy,
-        mode=mode,
-        calibration_id=gate.calibration.id if gate is not None and gate.calibration is not None else None,
-        gate=details,
-    )
+    return {
+        "engine": engine,
+        "engine_version": pm.ENGINE_VERSION if engine == "bayes" else "legacy",
+        "decisions": prof.n_informative,
+        "candidates": n_candidates,
+        "exploration_rate": exploration,
+        "filters": {k: v for k, v in flt.items() if v not in (None, [], "", False)},
+        "items": rows,
+        "policy": policy,
+        "mode": mode,
+        "calibration_id": gate.calibration.id if gate is not None and gate.calibration is not None else None,
+        "gate": details,
+    }
+
+
+def _write_log(db: Session, fields: dict) -> str:
+    """Record one feed answer under a new feed id."""
+    fr = FeedRequest(id=uuid.uuid4().hex, **fields)
     db.add(fr)
     db.flush()
     _prune(db, FeedRequest, FeedRequest.created_at, MAX_FEED_LOG)

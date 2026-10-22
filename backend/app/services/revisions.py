@@ -31,6 +31,10 @@ TRACKED: dict[str, tuple[str, tuple[str, ...] | None]] = {
     "products": ("products", PRODUCT_CONTENT),
     "photos": ("products", ("image_embedding", "embedding_backend")),  # photo vectors written (re-analysis)
     "addresses": ("products", ("source_url",)),  # a listing's address (identity across re-imports)
+    "seen": ("products", ("is_new",)),  # marking a piece as seen: only what shows it (feed answers) depends on it
+    "images": ("product_images", None),  # photos fetched, analysed or chosen: cards show them
+    "saved": ("saved_items", None),
+    "calibrations": ("calibrations", None),  # fitted, withdrawn, rolled back
     "evidence": ("evidence", None),
     "relations": ("product_relations", None),
     "feedback": ("feedback", None),

@@ -684,6 +684,13 @@ def _recently_failed(db: Session) -> bool:
     )  # fmt: skip
 
 
+def attempt_state(db: Session) -> tuple:
+    """The latest refit attempt as far as what a surface says, and whether another is due, can depend on it: (job id,
+    status, whether a failure is still within its back-off). Results remembered across requests are keyed by it."""
+    last = db.query(Job.id, Job.status).filter(Job.kind == "recalibrate").order_by(Job.id.desc()).first()
+    return (None, None, False) if last is None else (last.id, last.status, _recently_failed(db))
+
+
 def maybe_schedule(db: Session, ev: Evidence | None = None) -> None:
     """After anything that can change what approval estimates rest on (a decision, an Undo or unsave, an import, a
     settings change, a scan, a new photo representation): withdraw the calibration at once if it no longer holds, and

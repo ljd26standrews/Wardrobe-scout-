@@ -20,7 +20,7 @@ from ..services import ai, calibration, jobs, selective
 from ..services import embeddings as emb
 from ..services.backup import export_all, import_all
 from ..services.images import ImageError
-from ..services.presenter import Context
+from ..services.presenter import Context, rebind
 from ..services.recommender import build_profile, describe_profile
 from ..services.settings_store import DEFAULTS, all_settings, get_setting, set_setting, validate_setting
 from .uploads import MAX_FILE_UPLOAD, read_capped
@@ -176,9 +176,13 @@ def insights(db: Session = Depends(get_db)):
     ranked, offers, _, quality_lookup = ranked_candidates(db, prof, ctx, NO_FILTERS)
     gate = selective.evaluate(db, ranked, prof, None, quality_lookup=quality_lookup)
     if gate.state == "off":
-        top = [(r, None) for r in ranked if not r.suppressed][:6]
+        shown, offers = rebind(db, [r for r in ranked if not r.suppressed][:6], offers)
+        top = [(r, None) for r in shown]
     else:
-        top = [(c.ranked, selective.card_confidence(gate, c)) for c in selective.main_feed(gate, 6)]
+        chosen = selective.main_feed(gate, 6)
+        confidences = [selective.card_confidence(gate, c) for c in chosen]
+        chosen, offers = rebind(db, chosen, offers)  # cards need fresh copies of the shared listings
+        top = [(c.ranked, conf) for c, conf in zip(chosen, confidences, strict=True)]
     out["top_gate"] = gate.summary(len(top), policy="ranked" if gate.state == "off" else "selective")
     out["top_explained"] = [
         {
