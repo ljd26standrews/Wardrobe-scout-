@@ -1,16 +1,19 @@
 """Measure the recommender against your own judgements (the Evaluate page).
 
 Usage (from backend/):
-    .venv/bin/python -m eval.real              # report on your judgements (or on the frozen test set)
-    .venv/bin/python -m eval.real --freeze     # freeze the current judgements as the test set, before any tuning
-    .venv/bin/python -m eval.real --all        # ignore the frozen set and use every judgement
-    .venv/bin/python -m eval.real --db PATH    # another database file (default: this installation's)
+    .venv/bin/python -m eval.real --benchmark pilot@v1    # measure on a frozen benchmark version (eval/benchmark.py)
+    .venv/bin/python -m eval.real --benchmark pilot@v1 --training live [--cutoff 2026-11-01]
+                                                          # the same frozen garments, today's training data
+    .venv/bin/python -m eval.real                         # your current grades, not frozen (while collecting)
+    .venv/bin/python -m eval.real --freeze [--new-version] # freeze the current grades as benchmark "default"
+    .venv/bin/python -m eval.real --db PATH               # another database file (default: this installation's)
 
 What it does
 ------------
 1. Copies your database (SQLite online backup, source opened read-only) and works only on the copy.
 2. Test set: your judgements - uniformly sampled pieces, one per product family, graded for taste alone
-   (0 not for me, 1 unsure, 2 like, 3 love). With a frozen test set, only those judgements are used.
+   (0 not for me, 1 unsure, 2 like, 3 love). With a benchmark, its frozen records (never the judgements table, so an
+   Undo, a re-grade or a reused id changes nothing) and the version's hash, named in the report.
 3. Training data: everything except what is linked to a graded garment (decisions under any of its listings or
    addresses, wardrobe pieces linked to it, inspiration photos that are its photographs: services/provenance.py),
    deleted from the copy before any method is fitted, so no test label leaks into training. Grades about one garment
@@ -39,6 +42,8 @@ import sys
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
+
+from . import benchmark as bm
 
 K = 10
 MIN_JUDGEMENTS, MIN_SELLERS, MIN_LIKED = 40, 3, 5
@@ -142,36 +147,31 @@ def score_methods(db, products) -> dict[str, dict]:
     return out
 
 
-def run(db, frozen: dict | None, seed: int = 0) -> dict:
-    """Evaluate on the session's database (a copy: everything linked to a graded garment is deleted from it)."""
-    from app.models import Feedback, Judgement, Product
+def run(db, test=None, seed: int = 0) -> dict:
+    """Evaluate on the session's database (a copy: everything linked to a graded garment is deleted from it).
+    ``test``: an eval/heldout.TestSet (a frozen benchmark's records); default, your current grades, unfrozen."""
+    from app.models import Feedback, Product
     from app.services.preference_model import ENGINE_VERSION
     from app.services.provenance import Identity
 
-    from .heldout import graded_garments, held_out, purge_copy
+    from .heldout import describe, purge_copy, unfrozen
 
-    judgements = db.query(Judgement).order_by(Judgement.id).all()
-    if frozen is not None:
-        keep = set(frozen["judgement_ids"])
-        judgements = [j for j in judgements if j.id in keep]
     ident = Identity(db)
-    garments, grouping = graded_garments(db, judgements, ident)
-    scored = [g for g in garments if g.product_id is not None]
+    test = test or unfrozen(db, ident)
+    scored = [g for g in test.garments if g.product_id is not None]
     wanted = [g.product_id for g in scored]
     products_by_id = {p.id: p for p in db.query(Product).filter(Product.id.in_(wanted))} if wanted else {}
     sellers = {products_by_id[g.product_id].seller_id for g in scored}
     liked = sum(g.approved for g in scored)
-    summary = {
-        "judgements": len(judgements), "garments": len(scored), "missing_products": len(grouping["missing"]),
-        "merged": len(grouping["merged"]), "conflicts": grouping["conflicts"], "sellers": len(sellers),
-        "liked": liked, "frozen": frozen is not None,
+    summary = describe(test) | {
+        "sellers": len(sellers), "frozen": test.source["kind"] == "benchmark",
         "test_set_hash": hashlib.sha256("|".join(sorted(f"{g.family}:{g.taste}" for g in scored)).encode())
         .hexdigest()[:16],
     }  # fmt: skip
     if len(scored) < MIN_JUDGEMENTS or len(sellers) < MIN_SELLERS or liked < MIN_LIKED:
         return {"summary": summary, "ready": False}
 
-    held = held_out(ident, judgements)
+    held = ident.resolve(**test.seeds)
     removed = purge_copy(db, held)  # the copy: nothing linked to a graded garment can reach any method
     summary |= {"training_decisions_removed": removed["decisions"], "training_removed": removed,
                 "held_out": held.summary()}  # fmt: skip
@@ -201,12 +201,23 @@ def _fmt(v: float, ci: list[float]) -> str:
 
 def report(result: dict) -> str:
     s = result["summary"]
+    src = s.get("test_set") or {"kind": "unfrozen"}
+    if src["kind"] == "benchmark":
+        origin = (f"benchmark {src['benchmark']} (frozen {src['frozen_at'][:19]}, hash {src['hash'][:16]}); training: "
+                  + ("its snapshot" if src["training"] == "snapshot" else
+                     f"your database now{' before ' + src['cutoff'] if src.get('cutoff') else ''}"))  # fmt: skip
+    else:
+        origin = "your current grades, not frozen (freeze them before tuning: python -m eval.benchmark freeze)"
     lines = [
-        f"Test set: {s['judgements']} judgements across {s['sellers']} sellers, {s['liked']} liked"
-        + (" (frozen)" if s["frozen"] else "") + f" · hash {s['test_set_hash']}",
+        f"Test set: {origin}",
+        f"{s['garments']} graded garments ({s['judgements']} judgements) across {s['sellers']} sellers, "
+        f"{s['liked']} liked · records hash {s['test_set_hash']}",
     ]  # fmt: skip
     if s.get("missing_products"):
-        lines.append(f"{s['missing_products']} judged products no longer exist and were left out.")
+        lines.append(f"{s['missing_products']} graded garments have no listing any more and were left out.")
+    if s.get("merged"):
+        lines.append(f"{s['merged']} garments were graded more than once (as separate listings later matched); "
+                     "each counts once, with its first grade.")  # fmt: skip
     if not result["ready"]:
         lines.append(
             f"Not enough labels yet: at least {MIN_JUDGEMENTS} judgements, {MIN_SELLERS} sellers and {MIN_LIKED} "
@@ -244,9 +255,15 @@ def report(result: dict) -> str:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--db", help="database file (default: this installation's)")
-    ap.add_argument("--data-dir", help="where frozen test sets and results are kept (default: WS_DATA_DIR)")
-    ap.add_argument("--freeze", action="store_true", help="freeze the current judgements as the test set")
-    ap.add_argument("--all", action="store_true", help="ignore a frozen test set")
+    ap.add_argument("--data-dir", help="where benchmarks and results are kept (default: WS_DATA_DIR)")
+    ap.add_argument("--benchmark", help="a frozen benchmark version to measure on, e.g. pilot@v1 (eval/benchmark.py)")
+    ap.add_argument("--training", choices=("snapshot", "live"), default="snapshot",
+                    help="with --benchmark: train on its snapshot (default) or on your database now")
+    ap.add_argument("--cutoff", help="with --training live: only what was known before this time (ISO 8601)")
+    ap.add_argument("--freeze", action="store_true",
+                    help=f"freeze the current grades as benchmark '{bm.DEFAULT_NAME}' (python -m eval.benchmark freeze)")
+    ap.add_argument("--new-version", action="store_true", help="with --freeze: a successor of an existing version")
+    ap.add_argument("--all", action="store_true", help="(kept for compatibility) your current grades, unfrozen")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args(argv)
 
@@ -260,32 +277,55 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     out_dir = Path(args.data_dir) if args.data_dir else get_settings().data_dir
     eval_dir = out_dir / "evaluation"
-    frozen_path = eval_dir / "frozen_test_set.json"
+    cutoff = datetime.fromisoformat(args.cutoff) if args.cutoff else None
+    try:
+        if args.freeze:
+            m = bm.freeze(src, out_dir, bm.DEFAULT_NAME, new_version=args.new_version, seed=args.seed)
+            c = m["counts"]
+            print(f"Froze {c['records']} graded garments ({c['judgements']} judgements) as {m['name']}@v{m['version']} "
+                  f"· hash {m['content_sha256'][:16]}. Measure on it with --benchmark {m['name']}@v{m['version']}.")  # fmt: skip
+            return 0
+        bench = bm.load(out_dir, args.benchmark) if args.benchmark else None
+        with tempfile.TemporaryDirectory(prefix="ws-eval-") as tmp:
+            if bench is not None:
+                db = bm.open_training(bench, args.training, src, Path(tmp), cutoff)
+            else:
+                if cutoff is not None or args.training != "snapshot":
+                    print("--training and --cutoff need --benchmark", file=sys.stderr)
+                    return 2
+                db = open_copy(src, Path(tmp))
+            try:
+                test = None
+                if bench is not None:
+                    test = bm.test_set(db, bench, args.training)
+                    test.source["cutoff"] = cutoff.isoformat() if cutoff else None
+                elif bm.legacy_path(out_dir).is_file():
+                    from app.models import Judgement
 
-    with tempfile.TemporaryDirectory(prefix="ws-eval-") as tmp:
-        db = open_copy(src, Path(tmp))
-        from app.models import Judgement
-
-        try:
-            if args.freeze:
-                ids = [j.id for j in db.query(Judgement).order_by(Judgement.id)]
-                eval_dir.mkdir(parents=True, exist_ok=True)
-                frozen_path.write_text(json.dumps({"created_at": datetime.now(UTC).isoformat(),
-                                                   "judgement_ids": ids}, indent=1))  # fmt: skip
-                print(f"Froze {len(ids)} judgements as the test set: {frozen_path}")
-                return 0
-            frozen = None if args.all or not frozen_path.is_file() else json.loads(frozen_path.read_text())
-            result = run(db, frozen, args.seed)
-        finally:
-            db.close()
+                    st = bm.legacy_status(bm.legacy_path(out_dir), db.query(Judgement).all())
+                    print(f"Note: an ID-only test set frozen {st['created_at'][:19]} ({st['ids']} ids) exists. It holds "
+                          "no records and cannot be verified, so it is not used: "
+                          f"{len(st['reused_after_freeze'])} of its ids now name grades made after it, "
+                          f"{len(st['gone'])} are gone. See python -m eval.benchmark legacy.\n")  # fmt: skip
+                entry_db = bm.run_entry(db, "eval.real", args.training if bench else "live", cutoff, None)
+                result = run(db, test, args.seed)
+            finally:
+                db.close()
+                bm._dispose_engine()
+    except bm.BenchmarkError as e:
+        print(str(e), file=sys.stderr)
+        return 3
 
     print(report(result))
+    path = None
     if result["ready"]:
         eval_dir.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
         path = eval_dir / f"results-{stamp}.json"
-        path.write_text(json.dumps({"created_at": stamp, **result}, indent=1))
+        path.write_text(json.dumps({"created_at": stamp, "run": entry_db, **result}, indent=1, default=str))
         print(f"\nSaved: {path}")
+    if bench is not None:
+        bm.append_run(bench, {**entry_db, "result": str(path) if path else None, "ready": result["ready"]})
     return 0
 
 

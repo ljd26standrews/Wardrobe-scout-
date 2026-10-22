@@ -116,6 +116,14 @@ class TestSet:
     source: dict  # {"kind": "unfrozen"} or the benchmark version, its hash and the training data (eval/benchmark.py)
 
 
+def describe(test: TestSet) -> dict:
+    """The test set as every evaluator reports it."""
+    scored = [g for g in test.garments if g.product_id is not None]
+    return {"judgements": test.report["judgements"], "garments": len(scored), "liked": sum(g.approved for g in scored),
+            "merged": sum(1 for g in test.garments if len(g.judgement_ids) > 1), "conflicts": test.report["conflicts"],
+            "missing_products": len(test.report["missing"]), "test_set": test.source}  # fmt: skip
+
+
 def seeds_of(judgements) -> dict:
     return {
         "families": sorted({j.family_key for j in judgements}),

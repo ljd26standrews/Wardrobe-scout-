@@ -3,6 +3,8 @@ time, and does each mode deliver what it aims for?
 
 Usage (from backend/):
     .venv/bin/python -m eval.selective               # both protocols, on a copy of your database
+    .venv/bin/python -m eval.selective --benchmark pilot@v1   # Evaluate grades from a frozen benchmark version, trained
+                                                              # on its snapshot (or --training live [--cutoff ISO])
     .venv/bin/python -m eval.selective --db PATH     # another database file
     .venv/bin/python -m eval.selective --block 20    # rolling-origin block size (default 10)
     .venv/bin/python -m eval.selective --labels approval-v1   # the earlier reading of decisions, for comparison
@@ -315,41 +317,38 @@ def unfamiliar_slice(preds: list[Prediction], cfg: dict) -> dict:
 
 
 # ----------------------------------------------------------------- representative protocol
-def representative(db, seed: int = 0) -> dict:
+def representative(db, seed: int = 0, test=None) -> dict:
     """Train on everything not linked to a graded garment; test on your uniformly sampled Evaluate grades, one record
-    per garment (eval/heldout.py).
+    per garment (eval/heldout.py). ``test``: an eval/heldout.TestSet (a frozen benchmark's records); default, your
+    current grades, unfrozen.
 
     Deletes everything linked to the graded garments from the session's database: run it on a copy, and last."""
-    from app.models import Judgement, Product
+    from app.models import Product
     from app.services import calibration
     from app.services.approval_data import RatedOutcome, rated_outcomes
     from app.services.provenance import Identity
     from app.services.recommender import rank_products
     from app.services.settings_store import get_setting
 
-    from .heldout import graded_garments, held_out, purge_copy
+    from .heldout import describe, purge_copy, unfrozen
 
     cfg = get_setting(db, "selective")
-    judgements = db.query(Judgement).order_by(Judgement.id).all()
     ident = Identity(db)
-    garments, grouping = graded_garments(db, judgements, ident)
-    scored = [g for g in garments if g.product_id is not None]
-    liked = sum(g.approved for g in scored)
-    summary = {"judgements": len(judgements), "garments": len(scored), "liked": liked,
-               "merged": len(grouping["merged"]), "conflicts": grouping["conflicts"],
-               "missing_products": len(grouping["missing"])}  # fmt: skip
-    if len(scored) < MIN_JUDGEMENTS or liked < MIN_LIKED:
+    test = test or unfrozen(db, ident)
+    scored = [g for g in test.garments if g.product_id is not None]
+    summary = describe(test)
+    if len(scored) < MIN_JUDGEMENTS or summary["liked"] < MIN_LIKED:
         return {"summary": summary | {"refused": f"needs {MIN_JUDGEMENTS} graded garments including {MIN_LIKED} liked"}}
-    held = held_out(ident, judgements)
+    held = ident.resolve(**test.seeds)
     removed = purge_copy(db, held)  # the copy: nothing linked to a graded garment can reach any method
     summary |= {"training_decisions_removed": removed["decisions"], "training_removed": removed,
                 "held_out": held.summary()}  # fmt: skip
     products = {p.id: p for p in db.query(Product).filter(Product.id.in_([g.product_id for g in scored]))}
     space = calibration._space(db)
     train = rated_outcomes(db)
-    test = [RatedOutcome(g.family, g.product_id, -g.judgement_ids[0], g.approved, "graded", [], g.created_at,
-                         snapshot=g.snapshot) for g in scored]  # fmt: skip
-    preds = predict(db, space, cfg, test, train=train, exclude=frozenset(), before=None, block=0, n_train=len(train))
+    graded = [RatedOutcome(g.family, g.product_id, -g.judgement_ids[0], g.approved, "graded", [], g.created_at,
+                           snapshot=g.snapshot) for g in scored]  # fmt: skip
+    preds = predict(db, space, cfg, graded, train=train, exclude=frozenset(), before=None, block=0, n_train=len(train))
     ranked = {r.product.id: r.score for r in rank_products(db, [products[g.product_id] for g in scored])}
     known = set(_sellers(db, train).values())
     for p, g in zip(preds, scored, strict=True):
@@ -365,7 +364,8 @@ def representative(db, seed: int = 0) -> dict:
         n = sum(1 for p in cal if p.bounds[mode] >= t)
         score = [p.score if p.score is not None else -1e9 for p in cal]
         out["modes"][mode]["discover_score_same_coverage"] = precision_of(expected_top(score, [p.y for p in cal], n), n)
-    out["suggested_thresholds"] = suggest_thresholds(cal, cfg, seed)
+    # A benchmark's halves are the ones frozen with it.
+    out["suggested_thresholds"] = suggest_thresholds(cal, cfg, test.source.get("split_seed", seed))
     return out
 
 
@@ -475,7 +475,20 @@ def _cal_line(name: str, c: dict) -> str:
 
 def report(result: dict) -> str:
     lines = ["# Selective recommendation: measured on your own outcomes", "",
-             f"Decisions read as `{result.get('labels', 'aesthetic-v2')}` (approval_data.py).", ""]  # fmt: skip
+             f"Decisions read as `{result.get('labels', 'aesthetic-v2')}` (approval_data.py)."]  # fmt: skip
+    src = ((result.get("representative") or {}).get("summary") or {}).get("test_set") or {"kind": "unfrozen"}
+    if src["kind"] == "benchmark":
+        lines.append(f"Evaluate grades: benchmark {src['benchmark']} (frozen {src['frozen_at'][:19]}, hash "
+                     f"{src['hash'][:16]}); training data: "
+                     + ("its snapshot." if src["training"] == "snapshot" else
+                        f"your database now{' before ' + src['cutoff'] if src.get('cutoff') else ''}."))  # fmt: skip
+    else:
+        lines.append("Evaluate grades: your current grades, not frozen (python -m eval.benchmark freeze).")
+    if (run := result.get("run")) is not None:
+        lines.append(f"Engine {run['engine']}, photo analysis {run['image_backend']} "
+                     f"({', '.join(f'{k}: {v}' for k, v in run['data']['photo_analysis'].items())} listings), "
+                     f"settings {run['settings_sha256'][:12]}, code {run['code'].get('git_commit', '?')[:12]}.")  # fmt: skip
+    lines.append("")
     for key, title in (("logged", "Logged decisions, rolling origin"), ("representative", "Evaluate grades")):
         r = result.get(key) or {}
         lines += [f"## {title}", ""]
@@ -526,7 +539,7 @@ def _share(r: dict) -> str:
     return f"{_pct(r['rate'])} [{_pct(r['interval'][0])}, {_pct(r['interval'][1])}]"
 
 
-def run_all(db, *, block: int = BLOCK, seed: int = 0, labels: str | None = None) -> dict:
+def run_all(db, *, block: int = BLOCK, seed: int = 0, labels: str | None = None, test=None) -> dict:
     from app.services.approval_data import LABEL_VERSION
     from app.services.preference_model import ENGINE_VERSION
     from app.services.settings_store import get_setting
@@ -540,13 +553,17 @@ def run_all(db, *, block: int = BLOCK, seed: int = 0, labels: str | None = None)
     served = served_feeds(db)  # before the representative protocol, which deletes decisions from the copy
     return {"engine_version": ENGINE_VERSION, "labels": labels_version, "settings": cfg, "block": block,
             "label_set_hash": label_hash, "logged": logged, "served": served,
-            "representative": representative(db, seed)}  # fmt: skip
+            "representative": representative(db, seed, test)}  # fmt: skip
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--db", help="database file (default: this installation's)")
-    ap.add_argument("--data-dir", help="where results are saved (default: WS_DATA_DIR)")
+    ap.add_argument("--data-dir", help="where benchmarks and results are kept (default: WS_DATA_DIR)")
+    ap.add_argument("--benchmark", help="a frozen benchmark version for the representative protocol, e.g. pilot@v1")
+    ap.add_argument("--training", choices=("snapshot", "live"), default="snapshot",
+                    help="with --benchmark: train on its snapshot (default) or on your database now")
+    ap.add_argument("--cutoff", help="with --training live: only what was known before this time (ISO 8601)")
     ap.add_argument("--block", type=int, default=BLOCK)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--labels", choices=("approval-v1", "aesthetic-v2"), help="reading of decisions (default: current)")
@@ -554,24 +571,47 @@ def main(argv: list[str] | None = None) -> int:
 
     from app.config import get_settings
 
+    from . import benchmark as bm
     from .dbcopy import open_copy, source_database
 
     src = source_database(args.db)
     if not src.is_file():
         print(f"database not found: {src}", file=sys.stderr)
         return 2
-    out_dir = (Path(args.data_dir) if args.data_dir else get_settings().data_dir) / "evaluation"
-    with tempfile.TemporaryDirectory(prefix="ws-eval-") as tmp:
-        db = open_copy(src, Path(tmp))
-        try:
-            result = run_all(db, block=args.block, seed=args.seed, labels=args.labels)
-        finally:
-            db.close()
+    data_dir = Path(args.data_dir) if args.data_dir else get_settings().data_dir
+    out_dir = data_dir / "evaluation"
+    cutoff = datetime.fromisoformat(args.cutoff) if args.cutoff else None
+    try:
+        bench = bm.load(data_dir, args.benchmark) if args.benchmark else None
+        with tempfile.TemporaryDirectory(prefix="ws-eval-") as tmp:
+            if bench is not None:
+                db = bm.open_training(bench, args.training, src, Path(tmp), cutoff)
+            elif cutoff is not None or args.training != "snapshot":
+                print("--training and --cutoff need --benchmark", file=sys.stderr)
+                return 2
+            else:
+                db = open_copy(src, Path(tmp))
+            try:
+                test = None
+                if bench is not None:
+                    test = bm.test_set(db, bench, args.training)
+                    test.source["cutoff"] = cutoff.isoformat() if cutoff else None
+                entry = bm.run_entry(db, "eval.selective", args.training if bench else "live", cutoff, None)
+                result = run_all(db, block=args.block, seed=args.seed, labels=args.labels, test=test)
+            finally:
+                db.close()
+                bm._dispose_engine()
+    except bm.BenchmarkError as e:
+        print(str(e), file=sys.stderr)
+        return 3
+    result["run"] = entry
     print(report(result))
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"selective-{datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}.json"
     path.write_text(json.dumps(result, indent=1, default=str))
     print(f"\nSaved: {path}")
+    if bench is not None:
+        bm.append_run(bench, {**entry, "result": str(path)})
     return 0
 
 
