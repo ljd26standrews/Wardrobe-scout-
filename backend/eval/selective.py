@@ -80,6 +80,8 @@ class Prediction:
     score: float | None = None  # representative protocol: the full Discover score
     familiar_seller: bool | None = None  # had you rated a piece from its seller before? (None: seller unknown)
     unit: str | None = None  # split unit: garments that may become one share it (eval/heldout.py)
+    profile: float | None = None  # representative protocol: your written profile's score alone (no learning)
+    category: str | None = None  # the piece's garment type, for slices
 
 
 # ----------------------------------------------------------------- metrics
@@ -329,7 +331,7 @@ def representative(db, seed: int = 0, test=None) -> dict:
     from app.services import calibration
     from app.services.approval_data import RatedOutcome, rated_outcomes
     from app.services.provenance import Identity
-    from app.services.recommender import rank_products
+    from app.services.recommender import rank_products, rules_component
     from app.services.settings_store import get_setting
 
     from .heldout import describe, purge_copy, unfrozen
@@ -352,22 +354,45 @@ def representative(db, seed: int = 0, test=None) -> dict:
                            snapshot=g.snapshot) for g in scored]  # fmt: skip
     preds = predict(db, space, cfg, graded, train=train, exclude=frozenset(), before=None, block=0, n_train=len(train))
     ranked = {r.product.id: r.score for r in rank_products(db, [products[g.product_id] for g in scored])}
+    taste = get_setting(db, "taste_profile")
     known = set(_sellers(db, train).values())
     for p, g in zip(preds, scored, strict=True):
+        product = products[g.product_id]
         p.score = ranked.get(g.product_id)
+        p.profile = rules_component(product, taste)[0]
+        p.category = (g.snapshot or {}).get("category") or product.category
         p.unit = g.unit
-        seller = products[g.product_id].seller
-        p.familiar_seller = None if seller is None else seller.name in known
+        p.familiar_seller = None if product.seller is None else product.seller.name in known
     out = {"summary": summary, **summarise(preds, cfg)}
+    out["categories"] = category_slices(preds, cfg)
     cal = [p for p in preds if p.estimate is not None]
     if not cal:
         return out
-    for mode, (t, _) in _modes(cfg).items():  # the full Discover score (taste, quality, value, ...) as baseline
+    for mode, (t, _) in _modes(cfg).items():
+        # At the gate's own coverage: your written profile alone, the learned taste ranking (already reported, within
+        # each block) and the full Discover score (taste, quality, value, ...), each taking as many pieces.
         n = sum(1 for p in cal if p.bounds[mode] >= t)
+        y = [p.y for p in cal]
         score = [p.score if p.score is not None else -1e9 for p in cal]
-        out["modes"][mode]["discover_score_same_coverage"] = precision_of(expected_top(score, [p.y for p in cal], n), n)
+        out["modes"][mode]["discover_score_same_coverage"] = precision_of(expected_top(score, y, n), n)
+        out["modes"][mode]["written_profile_same_coverage"] = precision_of(expected_top([p.profile for p in cal], y, n), n)
     # A benchmark's halves are the ones frozen with it.
     out["suggested_thresholds"] = suggest_thresholds(cal, cfg, test.source.get("split_seed", seed))
+    return out
+
+
+def category_slices(preds: list[Prediction], cfg: dict) -> dict:
+    """Per garment type: how many graded pieces, how many approved, and what each mode's gate selects (with refusals
+    below the minimum sample, as everywhere)."""
+    out: dict = {}
+    for cat in sorted({p.category or "unknown" for p in preds}):
+        ps = [p for p in preds if (p.category or "unknown") == cat]
+        cal = [p for p in ps if p.estimate is not None]
+        row = {"predictions": len(ps), "approvals": int(sum(p.y for p in ps)), "all": precision([p.y for p in ps])}
+        for mode, (t, _) in _modes(cfg).items():
+            chosen = [p.y for p in cal if p.bounds[mode] >= t]
+            row[mode] = precision(chosen) | {"coverage": round(len(chosen) / len(cal), 4) if cal else None}
+        out[cat] = row
     return out
 
 
