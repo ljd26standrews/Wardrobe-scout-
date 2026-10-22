@@ -4,7 +4,7 @@ from .test_caches import _listings
 
 
 def test_scan_reassesses_changed_inputs_and_medians_only(db, monkeypatch):
-    from app.models import Product
+    from app.models import Evidence, Product
     from app.services import presenter, revisions
     from app.services.recommender import active_products
 
@@ -38,8 +38,12 @@ def test_scan_reassesses_changed_inputs_and_medians_only(db, monkeypatch):
     assert answers() == incremental
 
     calls.clear()
-    db.add(Product(seller_id=ps[0].seller_id, external_id="new", title_original="new", source_url="https://cache.example/new",
-                   category=ps[0].category, price=500, currency="CNY", data_origin="manual"))
+    added = Product(seller_id=ps[0].seller_id, external_id="new", title_original="new",
+                    source_url="https://cache.example/new", category=ps[0].category,
+                    price=500, currency="CNY", data_origin="manual")
+    db.add(added)
+    db.flush()
+    db.add(Evidence(product_id=added.id, kind="seller_claim", aspect="material", claim="wool"))
     db.commit()
     incremental = answers()
     assert len(calls) == 1  # inserting a listing doesn't reassess the other six
