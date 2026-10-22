@@ -59,6 +59,7 @@ def test_freezing_again_refuses_unless_a_successor_is_asked_for(env, db):
     v1 = _version_dir(env)
     manifest = json.loads((v1 / "manifest.json").read_text())
     files = {f: (v1 / f).read_bytes() for f in ("manifest.json", "records.jsonl", "snapshot.db")}
+    assert b"\r\n" not in files["records.jsonl"]  # canonical LF bytes, including on Windows
     for f in files:
         assert not os.stat(v1 / f).st_mode & stat.S_IWUSR  # written once, then read-only
 

@@ -50,7 +50,9 @@ def test_token_file_generated_with_private_permissions(env, monkeypatch):
     get_settings.cache_clear()
     tok = get_api_token()
     path = env / "api_token"
-    assert len(tok) >= 32 and path.read_text() == tok and (path.stat().st_mode & 0o777) == 0o600
+    assert len(tok) >= 32 and path.read_text() == tok
+    if __import__("os").name != "nt":  # Windows uses inherited ACLs, not POSIX mode bits
+        assert (path.stat().st_mode & 0o777) == 0o600
     assert get_api_token() == tok  # stable across calls
 
 

@@ -244,7 +244,7 @@ def freeze(src: Path, data_dir: Path, name: str = DEFAULT_NAME, *, new_version: 
         snap = stage / "snapshot.db"
         _single_file(stage / "eval.db", snap)
         lines = "".join(json.dumps(r, sort_keys=True, default=str) + "\n" for r in records)
-        (stage / "records.jsonl").write_text(lines, encoding="utf-8")
+        (stage / "records.jsonl").write_bytes(lines.encode("utf-8"))  # hash these exact bytes on every OS
         created = datetime.now(UTC).isoformat()
         sellers = {(r["listing"] or {}).get("seller_id") for r in records} - {None}
         categories = {(r["snapshot"] or {}).get("category") for r in records} - {None}
@@ -609,4 +609,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    from .console import configure_console
+
+    configure_console()
     sys.exit(main())
