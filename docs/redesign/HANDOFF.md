@@ -171,7 +171,7 @@ All 36 pairs are in `screens/before/` and `screens/after/` under the same names.
 | Contrast (`frontend/scripts/contrast.mjs`) | 44 of 44 token pairs pass (text 4.5:1, controls and focus ring 3:1), light and dark |
 | `next build` | exit 0 |
 | End-to-end (`scripts/e2e.sh`, Chromium) | **31 of 31 passed**: 29 on desktop (including the layout checks from 320 to 1440 px), 2 on an iPhone viewport |
-| CI on GitHub | `6586381`: backend, frontend and end-to-end jobs passed (end-to-end 31 passed in 1.0 min). Runs on `86f1072` and `86e5ab5` failed in one timing test; see N11 for the cause and fix. The result for the last commit is at the end of this file |
+| CI on GitHub | `6586381`: backend, frontend and end-to-end jobs passed (end-to-end 31 passed in 1.0 min). Runs on `86f1072` and `86e5ab5` failed in one timing test; see N11 for the cause and fix. `7b97d9b` (the fix): backend, frontend and end-to-end jobs all passed |
 | Screenshots | 36 after-screenshots captured on the demo catalogue and looked at, at 1440, 768 and 390 px, light and dark; three problems found there were fixed (N9, the photo below the fold, the phone header) |
 | Latency, SQL, memory | [03-performance.md](03-performance.md) |
 
