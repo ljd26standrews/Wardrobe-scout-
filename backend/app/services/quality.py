@@ -5,7 +5,10 @@ Principles
 * Price never raises a quality score.
 * Seller claims and AI visual assessments are shown but never move a score;
   AI is never used for fibre content or durability.
-* Each source counts once: a review reposted or imported twice is one source.
+* Each source counts once: a review reposted, imported twice or linked in another form (tracking parameters, a
+  short link, a mobile page; see sources.py) is one source.
+* A source cannot outvote itself: copies of one excerpt count once, and a source whose excerpts point both ways
+  is mixed (it adds confidence, not direction).
 * Garment quality (construction, material) and seller reliability (service, sizing, track record) are
   separate: good service never makes a garment look verified.
 * If the weighted evidence for a dimension is below a threshold the dimension
@@ -16,11 +19,11 @@ from __future__ import annotations
 
 import math
 from statistics import median
-from urllib.parse import urlsplit
 
 from sqlalchemy.orm import Session
 
 from ..models import Evidence, Product, Seller
+from .sources import canonical_source
 
 KIND_WEIGHT = {
     "verified": 1.0,
@@ -59,23 +62,25 @@ MIN_INDEPENDENT_WEIGHT = 0.3  # e.g. one moderately specific buyer report; below
 
 
 def _source_key(e: Evidence) -> tuple:
-    """Which source an item came from: the same review or post reposted or re-imported counts once."""
-    if e.source_url:
-        p = urlsplit(e.source_url.strip())
-        return ("url", (p.hostname or "").lower().removeprefix("www."), p.path.rstrip("/"), p.query)
+    """Which source an item came from: the same review or post, however its link was copied, counts once."""
+    if key := canonical_source(e.source_url):
+        return ("url", key)
     return ("text", e.kind, e.aspect, " ".join((e.claim or "").lower().split()), e.created_by)
 
 
-def _sources(items: list[Evidence]) -> list[tuple[str, float, int]]:
-    """(kind, weight, polarity) per distinct source: its strongest item's weight, its net direction."""
+def _sources(items: list[Evidence]) -> list[tuple[str, float, int, bool]]:
+    """(kind, weight, direction, mixed) per distinct source: its strongest item's weight, and the direction its
+    excerpts agree on. Copies never add up, and a source whose excerpts point both ways is mixed (direction 0):
+    four copies of a favourable excerpt cannot outvote a contrary excerpt from the same post."""
     groups: dict[tuple, list[Evidence]] = {}
     for e in items:
         groups.setdefault(_source_key(e), []).append(e)
     out = []
     for group in groups.values():
         strongest = max(group, key=_weight)
-        net = sum(_weight(e) * e.polarity for e in group)
-        out.append((strongest.kind, _weight(strongest), (net > 0) - (net < 0)))
+        directions = {(e.polarity > 0) - (e.polarity < 0) for e in group if _weight(e) > 0} - {0}
+        out.append((strongest.kind, _weight(strongest), directions.pop() if len(directions) == 1 else 0,
+                    len(directions) > 1))  # fmt: skip
     return out
 
 
@@ -85,18 +90,21 @@ def score_dimension(items: list[Evidence]) -> dict:
     by_kind: dict[str, int] = {}
     for e in items:
         by_kind[e.kind] = by_kind.get(e.kind, 0) + 1
-    independent = [(w, pol) for kind, w, pol in _sources(items) if kind in INDEPENDENT]
-    total = sum(w for w, _ in independent)
-    signed = sum(w * pol for w, pol in independent)
-    directional = sum(w for w, pol in independent if pol != 0)
+    sources = [s for s in _sources(items) if s[0] in INDEPENDENT]
+    counts = {"sources": len(sources), "mixed_sources": sum(1 for s in sources if s[3])}
+    total = sum(w for _, w, _, _ in sources)
+    signed = sum(w * pol for _, w, pol, _ in sources)
+    directional = sum(w for _, w, pol, _ in sources if pol != 0)
     confidence = 1 - math.exp(-total / 1.2)
     if confidence < UNVERIFIED_BELOW or total < MIN_INDEPENDENT_WEIGHT:
         label = "Seller claim only" if by_kind and set(by_kind) <= {"seller_claim", "ai_visual"} else "Unverified"
-        return {"score": None, "label": label, "confidence": round(confidence, 2), "evidence_counts": by_kind}
+        return {"score": None, "label": label, "confidence": round(confidence, 2), "evidence_counts": by_kind,
+                **counts}  # fmt: skip
     score = 50 + 50 * signed / (directional + 0.8) if directional else 55.0
     score = max(0.0, min(100.0, score))
     label = "Strong" if score >= 75 else "Good" if score >= 60 else "Mixed" if score >= 40 else "Poor"
-    return {"score": round(score), "label": label, "confidence": round(confidence, 2), "evidence_counts": by_kind}
+    return {"score": round(score), "label": label, "confidence": round(confidence, 2), "evidence_counts": by_kind,
+            **counts}  # fmt: skip
 
 
 def category_price_stats(db: Session) -> dict[str, float]:
@@ -209,6 +217,7 @@ def evidence_view(e: Evidence) -> dict:
         "polarity": e.polarity,
         "strength": e.strength,
         "source_url": e.source_url,
+        "source_key": canonical_source(e.source_url),  # excerpts from one source share it (they count once)
         "source_title": e.source_title,
         "is_affiliate": e.is_affiliate,
         "captured_at": e.captured_at.isoformat() if e.captured_at else None,
