@@ -113,6 +113,9 @@ DEFAULTS: dict[str, Any] = {
         "cny_to_gbp": 0.105,
         "rate_source": "default assumption - update in Settings or refresh from ECB",
         "rate_updated_at": None,
+        # Pounds per unit of any other currency you want converted (e.g. {"USD": 0.79}). A currency without a
+        # rate stays unconverted: its prices are shown as listed and left out of medians, filters and judgements.
+        "other_to_gbp": {},
     },
     "landed_cost": {
         "domestic_shipping_cny": 12.0,
@@ -279,6 +282,18 @@ def validate_setting(key: str, value: Any) -> list[str]:
             b, h, e = (merged[f"{m}_{part}"] for m in ("balanced", "high", "extreme"))
             if not b <= h <= e:
                 errors.append(f"{part}s must not decrease from balanced to high to extreme")
+    if key == "currency" and "other_to_gbp" in value:
+        from .money import code
+
+        rates = value["other_to_gbp"]
+        if not isinstance(rates, dict):
+            errors.append("other_to_gbp must map currency codes to pounds per unit")
+        else:
+            for cur, rate in rates.items():
+                if code(cur) is None:
+                    errors.append(f"other_to_gbp: {cur!r} is not a three-letter currency code")
+                elif not _is_number(rate) or not 0.0001 <= rate <= 10000:
+                    errors.append(f"other_to_gbp.{cur} must be between 0.0001 and 10000")
     if key == "landed_cost" and isinstance(value.get("category_weight_kg"), dict):
         for cat, w in value["category_weight_kg"].items():
             if not _is_number(w) or not 0 <= w <= 50:

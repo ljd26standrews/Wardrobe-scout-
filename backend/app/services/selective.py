@@ -36,7 +36,7 @@ from . import calibration
 from . import embeddings as emb
 from . import preference_model as pm
 from .approval_data import rated_outcomes
-from .recommender import Profile, Ranked
+from .recommender import Profile, Ranked, above_judged_price
 from .settings_store import get_setting
 
 log = get_logger(__name__)
@@ -178,9 +178,8 @@ def _strict_exclusion(
     if cfg.get("exclude_seller_concerns", True) and seller is not None and seller.reputation_status == "concerns":
         return "seller_concerns"
     cat = p.category or "other"
-    ceiling = prof.price_ceiling.get(cat)
     qs = (quality or {}).get("quality_score")
-    if ceiling and p.price and p.price >= 0.9 * ceiling and (qs is None or qs < QUALITY_SUPPORTS_PRICE):
+    if above_judged_price(prof, cat, prof.fx.gbp(p.price, p.currency)) and (qs is None or qs < QUALITY_SUPPORTS_PRICE):
         return "price_ceiling"
     if prof.redundant.get(cat, 0) >= ALREADY_OWN_REPEATS:
         return "already_own"

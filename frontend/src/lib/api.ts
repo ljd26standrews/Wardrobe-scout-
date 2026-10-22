@@ -190,7 +190,11 @@ export type Product = {
   logo_level: string;
   price: number | null;
   currency: string;
+  /** The price in pounds at your stated rate; null when the currency is not stated or has no rate. */
   price_gbp: number | null;
+  /** How price_gbp was obtained (absent for pound prices). A conversion, not the landed cost. */
+  conversion?: { gbp: number; rate: number; from: string; source: string; updated_at: string | null } | null;
+  /** The UK landed-cost estimate for buying in yuan through an agent; null for any other price. */
   landed_cost: LandedCost | null;
   source_url: string | null;
   links: Record<string, string>;

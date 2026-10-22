@@ -38,6 +38,7 @@ from sqlalchemy.orm import Session, selectinload
 from ..ingestion.vocab import CATEGORY_GROUP, NEUTRAL_COLOURS, PREMIUM_FIBRES, QUIET_LUXURY_BRANDS
 from ..models import Feedback, InspirationImage, Product, Seller, WardrobeItem, utcnow
 from . import embeddings as emb
+from .money import Rates, code, rates
 from .settings_store import get_setting
 
 ACTION_WEIGHT = {"love": 2.0, "like": 1.0, "purchased": 1.5, "maybe": 0.35, "dislike": -1.0}
@@ -166,8 +167,13 @@ class Profile:
     neg_text: list[Proto] = field(default_factory=list)
     suppressed_ids: set[int] = field(default_factory=set)
     suppressed_vecs: list[np.ndarray] = field(default_factory=list)
+    # Prices in pounds, from decisions whose price converts at your current rates (others cannot count). The
+    # ceiling is a value judgement, not a budget: the highest price you judged too much for an unproven piece of
+    # that kind (several judgements never ratchet down to the cheapest).
     price_ceiling: dict[str, float] = field(default_factory=dict)
+    price_ceiling_source: dict[str, tuple[float, str]] = field(default_factory=dict)  # (price, currency) as listed
     price_tolerance: dict[str, float] = field(default_factory=dict)
+    fx: Rates = field(default_factory=Rates)
     redundant: Counter = field(default_factory=Counter)
     construction_concerns: int = 0
     decided_ids: set[int] = field(default_factory=set)
@@ -190,7 +196,7 @@ class Profile:
 
 
 def build_profile(db: Session, backend_name: str | None = None) -> Profile:
-    prof = Profile()
+    prof = Profile(fx=rates(db))
     cfg = get_setting(db, "recommender")
     backend_name = backend_name or emb.get_image_backend().name
 
@@ -256,10 +262,13 @@ def build_profile(db: Session, backend_name: str | None = None) -> Profile:
                     prof.suppressed_vecs.append(emb.from_bytes(p.image_embedding))
         cat = (source.category if p is not None else source.get("category")) or "other"
         price = p.price if p is not None else source.get("price")
-        if routing.price_ceiling and price:
-            prof.price_ceiling[cat] = min(prof.price_ceiling.get(cat, float("inf")), price)
-        if w > 0 and price:
-            prof.price_tolerance[cat] = max(prof.price_tolerance.get(cat, 0.0), price)
+        currency = p.currency if p is not None else source.get("currency")
+        gbp = prof.fx.gbp(price, currency)
+        if routing.price_ceiling and gbp is not None and gbp > prof.price_ceiling.get(cat, 0.0):
+            prof.price_ceiling[cat] = gbp
+            prof.price_ceiling_source[cat] = (price, currency)
+        if w > 0 and gbp is not None:
+            prof.price_tolerance[cat] = max(prof.price_tolerance.get(cat, 0.0), gbp)
         if routing.redundancy:
             prof.redundant[cat] += 1
         if routing.construction_concern:
@@ -290,6 +299,22 @@ def build_profile(db: Session, backend_name: str | None = None) -> Profile:
     k = cfg.get("cold_start_k", 15)
     prof.strength = prof.n_informative / (prof.n_informative + k) if prof.n_informative else 0.0
     return prof
+
+
+def above_judged_price(prof: Profile, category: str, gbp: float | None) -> bool:
+    """At or near (90%) the highest price you judged too much for an unproven piece of this kind. A price that
+    does not convert is unknown, not above."""
+    ceiling = prof.price_ceiling.get(category)
+    return bool(ceiling and gbp is not None and gbp >= 0.9 * ceiling)
+
+
+def _money(amount: float, currency: str | None, gbp: float) -> str:
+    """A price as listed, with its pound conversion when it is not in pounds."""
+    c = code(currency)
+    if c == "GBP":
+        return f"£{amount:,.0f}"
+    symbol = {"CNY": "¥", "USD": "$", "EUR": "€"}.get(c or "", f"{c} ")
+    return f"{symbol}{amount:,.0f} (about £{gbp:,.0f})"
 
 
 # ------------------------------------------------------------------ components
@@ -443,7 +468,7 @@ def rank_products(
     weights = get_setting(db, "ranking_weights")
     rcfg = get_setting(db, "recommender")
     s = prof.strength
-    price_stats = category_price_stats(db)
+    price_stats = category_price_stats(db, prof.fx)
     sellers = {sl.id: sl for sl in db.query(Seller).all()}
 
     # Vectorised visual / semantic components
@@ -511,20 +536,22 @@ def rank_products(
         learned, contribs = learned_attr_component(p, prof)
         q = quality_lookup.get(p.id) if quality_lookup else None
         if q is None:
-            q = assess(db, p, price_stats=price_stats)
+            q = assess(db, p, price_stats=price_stats, fx=prof.fx)
         qs = q["quality_score"]
         quality_c = 0.45 if qs is None else 0.5 + (qs / 100 - 0.5) * (0.4 + 0.6 * q["overall_confidence"])
         vs = q["dimensions"]["value"]["score"]
         value_c = 0.5 if vs is None else 0.3 + 0.4 * vs / 100
         cat = p.category or "other"
-        ceiling = prof.price_ceiling.get(cat)
-        if ceiling and p.price and p.price >= 0.9 * ceiling and qs is None:
+        gbp = prof.fx.gbp(p.price, p.currency)
+        if above_judged_price(prof, cat, gbp) and qs is None:
             value_c = min(value_c, 0.2)
+            judged, cur = prof.price_ceiling_source[cat]
             cautions.append(
-                f"You previously judged ¥{ceiling:g} too expensive for an unproven {cat}; this is ¥{p.price:g}"
+                f"You previously judged {_money(judged, cur, prof.price_ceiling[cat])} too expensive for an unproven "
+                f"{cat}; this is {_money(p.price, p.currency, gbp)}"
             )
         tol = prof.price_tolerance.get(cat)
-        if tol and p.price and p.price > 1.6 * tol:
+        if tol and gbp is not None and gbp > 1.6 * tol:
             value_c -= 0.1
         wl = (wardrobe_lookup or {}).get(p.id)
         wardrobe_c = wl["score"] if wl else 0.5
@@ -889,8 +916,15 @@ def describe_profile(db: Session, prof: Profile | None = None) -> dict:
         },
         "visual_examples": {"positive": len(prof.pos_visual), "negative": len(prof.neg_visual)},
         "attributes": dict(groups),
-        "price_ceilings": prof.price_ceiling,
-        "price_tolerance": prof.price_tolerance,
+        "price_ceilings": {
+            cat: {
+                "gbp": round(v, 2),
+                "price": prof.price_ceiling_source[cat][0],
+                "currency": prof.price_ceiling_source[cat][1],
+            }
+            for cat, v in prof.price_ceiling.items()
+        },
+        "price_tolerance": {cat: round(v, 2) for cat, v in prof.price_tolerance.items()},
         "redundant_categories": dict(prof.redundant),
         "rejection_reasons": {REASONS.get(k, k): v for k, v in prof.reason_counts.items()},
         "construction_concerns": prof.construction_concerns,

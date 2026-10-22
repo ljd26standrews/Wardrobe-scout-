@@ -17,7 +17,8 @@ type InsightsResponse = {
   decisions: { informative: number; positive: number; negative: number; seed_examples: number };
   visual_examples: { positive: number; negative: number };
   attributes: Record<string, Attr[]>;
-  price_ceilings: Record<string, number>;
+  /** The highest price judged too much for an unproven piece of each kind: in pounds, and as listed. */
+  price_ceilings: Record<string, { gbp: number; price: number; currency: string }>;
   price_tolerance: Record<string, number>;
   redundant_categories: Record<string, number>;
   rejection_reasons: Record<string, number>;
@@ -243,7 +244,9 @@ export default function InsightsPage() {
                 {Object.entries(data.price_ceilings).map(([cat, p]) => (
                   <li key={cat} className="flex justify-between">
                     <span>{titleCase(cat)}</span>
-                    <span className="text-muted-foreground">unproven quality above ~{formatPrice(p)} is penalised</span>
+                    <span className="text-muted-foreground">
+                      unproven quality above ~£{Math.round(p.gbp)} is penalised{p.currency !== "GBP" ? ` (you judged ${formatPrice(p.price, p.currency)} too much)` : ""}
+                    </span>
                   </li>
                 ))}
               </ul>

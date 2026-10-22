@@ -23,6 +23,7 @@ from statistics import median
 from sqlalchemy.orm import Session
 
 from ..models import Evidence, Product, Seller
+from .money import Rates, rates
 from .sources import canonical_source
 
 KIND_WEIGHT = {
@@ -107,12 +108,16 @@ def score_dimension(items: list[Evidence]) -> dict:
             **counts}  # fmt: skip
 
 
-def category_price_stats(db: Session) -> dict[str, float]:
+def category_price_stats(db: Session, fx: Rates | None = None) -> dict[str, float]:
+    """Median price in pounds per category, over listings for sale whose currency converts (others are left out:
+    an unstated currency is not assumed to be yuan). Seed examples from your notes are not listings."""
+    fx = fx or rates(db)
     by_cat: dict[str, list[float]] = {}
-    for cat, price in db.query(Product.category, Product.price).filter(
-        Product.price.isnot(None), Product.status == "active", Product.currency.in_(["CNY", "RMB"])
+    for cat, price, currency in db.query(Product.category, Product.price, Product.currency).filter(
+        Product.price.isnot(None), Product.status == "active", Product.data_origin != "seed"
     ):
-        by_cat.setdefault(cat or "other", []).append(price)
+        if (gbp := fx.gbp(price, currency)) is not None:
+            by_cat.setdefault(cat or "other", []).append(gbp)
     return {k: median(v) for k, v in by_cat.items() if len(v) >= 3}
 
 
@@ -125,6 +130,7 @@ def assess(
     cheaper_equivalent: dict | None = None,
     design_score: float | None = None,
     design_confidence: float | None = None,
+    fx: Rates | None = None,
 ) -> dict:
     ev = list(p.evidence)
     if seller_evidence is None and p.seller_id:
@@ -148,16 +154,20 @@ def assess(
         "price_position": None,
     }
     if p.price:
-        stats = price_stats if price_stats is not None else category_price_stats(db)
+        fx = fx or rates(db)
+        stats = price_stats if price_stats is not None else category_price_stats(db, fx)
         med = stats.get(p.category or "other")
+        gbp = fx.gbp(p.price, p.currency)
         q_scores = [d["score"] for d in (construction, material) if d["score"] is not None]
         q = sum(q_scores) / len(q_scores) if q_scores else None
         notes = []
         ratio = None
-        if med:
-            ratio = p.price / med
+        if med and gbp is not None:  # both in pounds: never a pound price against a yuan median
+            ratio = gbp / med
             value["price_position"] = round(ratio, 2)
             notes.append(f"{ratio:.1f}× the median price for {p.category or 'this category'} in your catalogue")
+        elif gbp is None:
+            notes.append("Price in a currency without a rate (Settings → Currency): not compared")
         score = None
         if q is not None:
             # Quality dominates; price matters, but less (you will pay more when quality justifies it).

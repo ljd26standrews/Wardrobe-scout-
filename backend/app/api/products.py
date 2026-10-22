@@ -14,7 +14,7 @@ from ..db import get_db
 from ..ingestion.parsing import materials_to_text, parse_materials
 from ..models import Evidence, Feedback, FeedRequest, Impression, Product
 from ..schemas import EvidenceIn, MatchDecision, ProductPatch, ViewedIn
-from ..services import calibration, dedup, jobs, selective
+from ..services import calibration, dedup, jobs, money, selective
 from ..services import embeddings as emb
 from ..services.presenter import Context, comparison, product_card
 from ..services.recommender import build_feed, build_profile, collapse_families, feed_candidates, rank_products
@@ -39,8 +39,12 @@ def _apply_filters(
     quality: str | None,
     origin: str | None,
     ctx: Context,
+    price_currency: str = "CNY",
 ) -> list[Product]:
+    """``min_price``/``max_price`` are in ``price_currency``: each listing's price is converted at your rates, and
+    one whose currency has no rate (or is not stated) is left out of a price filter rather than guessed."""
     out = []
+    priced = min_price is not None or max_price is not None
     ql = (q or "").lower().strip()
     for p in products:
         if ql and ql not in f"{p.title_en} {p.title_original} {p.brand or ''} {p.description_en or ''}".lower():
@@ -53,10 +57,12 @@ def _apply_filters(
             continue
         if material and not {m["fibre"] for m in p.materials or []} & set(material):
             continue
-        if min_price is not None and (p.price is None or p.price < min_price):
-            continue
-        if max_price is not None and (p.price is None or p.price > max_price):
-            continue
+        if priced:
+            amount = ctx.fx.convert(p.price, p.currency, price_currency)
+            if amount is None or (min_price is not None and amount < min_price):
+                continue
+            if max_price is not None and amount > max_price:
+                continue
         if season and p.seasons and season not in p.seasons:
             continue
         if size and size.upper() not in [s.upper() for s in p.sizes or []]:
@@ -88,6 +94,7 @@ def feed_filters(
     material: list[str] | None = Query(None),
     min_price: float | None = None,
     max_price: float | None = None,
+    price_currency: str = Query("CNY", description="currency of min_price/max_price (default: yuan)"),
     season: str | None = None,
     size: str | None = None,
     quality: str | None = None,
@@ -95,13 +102,32 @@ def feed_filters(
 ) -> dict:
     return {
         "q": q, "brand": brand, "seller_id": seller_id, "category": category, "material": material,
-        "min_price": min_price, "max_price": max_price, "season": season, "size": size, "quality": quality,
-        "include_seed": include_seed,
+        "min_price": min_price, "max_price": max_price, "price_currency": _filter_currency(price_currency),
+        "season": season, "size": size, "quality": quality, "include_seed": include_seed,
     }  # fmt: skip
 
 
+def _filter_currency(currency: str | None) -> str:
+    c = money.code(currency)
+    if c is None:
+        raise HTTPException(422, f"price_currency {currency!r} is not a currency code")
+    return c
+
+
+def price_filter(db: Session, flt: dict, products: list[Product], ctx: Context) -> dict | None:
+    """The price filter as applied, with how many listings it left out because their price cannot be converted."""
+    if flt.get("min_price") is None and flt.get("max_price") is None:
+        return None
+    cur = flt.get("price_currency") or "CNY"
+    if not ctx.fx.known(cur):
+        raise HTTPException(422, f"no rate for {cur}: add one in Settings → Currency to filter in it")
+    unknown = sum(1 for p in products if p.price is not None and ctx.fx.convert(p.price, p.currency, cur) is None)
+    return {"currency": cur, "min": flt.get("min_price"), "max": flt.get("max_price"),
+            "unknown_currency_left_out": unknown}  # fmt: skip
+
+
 NO_FILTERS = {k: None for k in ("q", "brand", "seller_id", "category", "material", "min_price", "max_price", "season",
-                                "size", "quality")} | {"include_seed": False}  # fmt: skip
+                                "size", "quality")} | {"include_seed": False, "price_currency": "CNY"}  # fmt: skip
 
 
 def ranked_candidates(db: Session, prof, ctx: Context, flt: dict) -> tuple[list, dict, int, dict]:
@@ -111,6 +137,7 @@ def ranked_candidates(db: Session, prof, ctx: Context, flt: dict) -> tuple[list,
     if not flt.get("include_seed"):
         candidates = [p for p in candidates if p.data_origin != "seed"]
     filters = {k: v for k, v in flt.items() if k != "include_seed"}
+    ctx.price_filter = price_filter(db, flt, candidates, ctx)  # as applied, reported with the feed
     candidates = _apply_filters(candidates, **filters, origin=None, ctx=ctx)
     quality_lookup = {p.id: ctx.quality(p) for p in candidates}
     ranked = rank_products(
@@ -157,7 +184,7 @@ def feed(
     gate = selective.evaluate(db, ranked, prof, mode, quality_lookup=quality_lookup, learning="warmup")
     arm = selective.trial_arm(gate.cfg, dt.date.today())
     base = {"total_candidates": n_candidates, "learning_strength": round(prof.strength, 3),
-            "decisions": prof.n_informative}  # fmt: skip
+            "decisions": prof.n_informative, "price_filter": ctx.price_filter}  # fmt: skip
     if gate.state == "off" or arm == "ranked":
         seed = int(dt.date.today().strftime("%Y%m%d"))
         exploration = rcfg.get("exploration_rate", 0.18)
@@ -215,7 +242,7 @@ def learning_feed(
     ranked, offers, n_candidates, quality_lookup = ranked_candidates(db, prof, ctx, flt)
     gate = selective.evaluate(db, ranked, prof, mode, quality_lookup=quality_lookup, learning=True)
     base = {"total_candidates": n_candidates, "learning_strength": round(prof.strength, 3),
-            "decisions": prof.n_informative}  # fmt: skip
+            "decisions": prof.n_informative, "price_filter": ctx.price_filter}  # fmt: skip
     if gate.state == "off":
         summary = gate.summary(0, policy="learning")
         summary["message"] = "Learning picks are part of selective recommendation, which is switched off in Settings."
@@ -334,6 +361,7 @@ def list_products(
     material: list[str] | None = Query(None),
     min_price: float | None = None,
     max_price: float | None = None,
+    price_currency: str = Query("CNY", description="currency of min_price/max_price (default: yuan)"),
     season: str | None = None,
     size: str | None = None,
     quality: str | None = None,
@@ -345,6 +373,9 @@ def list_products(
     products = _load(db, status if status != "all" else None).all()
     if new_only:
         products = [p for p in products if p.is_new]
+    price_currency = _filter_currency(price_currency)
+    applied = price_filter(db, {"min_price": min_price, "max_price": max_price, "price_currency": price_currency},
+                           products, ctx)  # fmt: skip
     products = _apply_filters(
         products,
         q=q,
@@ -359,6 +390,7 @@ def list_products(
         quality=quality,
         origin=origin,
         ctx=ctx,
+        price_currency=price_currency,
     )
     total = len(products)
     start = (page - 1) * page_size
@@ -374,12 +406,17 @@ def list_products(
         key = {
             "newest": lambda p: -(p.first_seen_at.timestamp() if p.first_seen_at else 0),
             "updated": lambda p: -(p.updated_at.timestamp() if p.updated_at else 0),
-            "price_asc": lambda p: (p.price is None, p.price or 0),
-            "price_desc": lambda p: (p.price is None, -(p.price or 0)),
+            # in pounds at your rates; prices that cannot be converted come last, never mixed in as yuan
+            "price_asc": lambda p: (_gbp(ctx, p) is None, _gbp(ctx, p) or 0),
+            "price_desc": lambda p: (_gbp(ctx, p) is None, -(_gbp(ctx, p) or 0)),
         }[sort]
         products.sort(key=key)
         items = [product_card(ctx, p) for p in products[start : start + page_size]]
-    return {"items": items, "total": total, "page": page, "page_size": page_size}
+    return {"items": items, "total": total, "page": page, "page_size": page_size, "price_filter": applied}
+
+
+def _gbp(ctx: Context, p: Product) -> float | None:
+    return ctx.fx.gbp(p.price, p.currency)
 
 
 @router.get("/facets")

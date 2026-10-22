@@ -45,7 +45,8 @@ def test_seed_data_is_labelled_and_never_scraped(client):
 
 def test_white_tee_seed_sets_value_ceiling_not_dislike(client):
     ins = client.get("/api/insights").json()
-    assert ins["price_ceilings"].get("t-shirt") == 510
+    # The seed's ¥510 judgement, held in pounds at the default rate (¥1 = £0.105), with the price as listed.
+    assert ins["price_ceilings"].get("t-shirt") == {"gbp": 53.55, "price": 510, "currency": "CNY"}
     colour_affinities = {a["label"]: a["affinity"] for a in ins["attributes"].get("colour", [])}
     assert colour_affinities.get("white", 0) >= 0
 

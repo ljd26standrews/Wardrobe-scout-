@@ -15,13 +15,15 @@ export type Filters = {
   material?: string[];
   min_price?: number;
   max_price?: number;
+  /** The currency min_price/max_price are in; prices in other currencies are converted at your rates. */
+  price_currency?: "CNY" | "GBP";
   season?: string;
   size?: string;
   quality?: "" | "evidence" | "unverified";
 };
 
 export function activeFilterCount(f: Filters) {
-  return Object.entries(f).filter(([k, v]) => k !== "q" && v != null && v !== "" && !(Array.isArray(v) && !v.length)).length;
+  return Object.entries(f).filter(([k, v]) => k !== "q" && k !== "price_currency" && v != null && v !== "" && !(Array.isArray(v) && !v.length)).length;
 }
 
 function Chips<T extends string | number>({ options, value, onChange }: { options: { value: T; label: string; count: number }[]; value: T[]; onChange: (v: T[]) => void }) {
@@ -48,6 +50,8 @@ export function FilterSheet({ filters, onChange }: { filters: Filters; onChange:
   const { data } = useSWR<Facets>("/api/facets");
   const n = activeFilterCount(filters);
   const set = (patch: Partial<Filters>) => onChange({ ...filters, ...patch });
+  const currency = filters.price_currency ?? "CNY";
+  const symbol = currency === "GBP" ? "£" : "¥";
   return (
     <Dialog>
       <DialogTrigger asChild>
@@ -69,14 +73,21 @@ export function FilterSheet({ filters, onChange }: { filters: Filters; onChange:
           <Field label="Material (claimed)">
             <Chips options={(data?.materials ?? []).map((c) => ({ ...c, label: titleCase(c.value) }))} value={filters.material ?? []} onChange={(v) => set({ material: v })} />
           </Field>
-          <div className="grid grid-cols-2 gap-3">
-            <Field label="Min price ¥">
-              <Input type="number" inputMode="numeric" value={filters.min_price ?? ""} onChange={(e) => set({ min_price: e.target.value ? Number(e.target.value) : undefined })} />
+          <div className="grid grid-cols-3 gap-3">
+            <Field label="Price in">
+              <Select value={currency} onChange={(e) => set({ price_currency: e.target.value as "CNY" | "GBP" })} data-testid="price-currency">
+                <option value="CNY">Yuan (¥)</option>
+                <option value="GBP">Pounds (£)</option>
+              </Select>
             </Field>
-            <Field label="Max price ¥">
-              <Input type="number" inputMode="numeric" value={filters.max_price ?? ""} onChange={(e) => set({ max_price: e.target.value ? Number(e.target.value) : undefined })} />
+            <Field label={`Min ${symbol}`}>
+              <Input type="number" inputMode="numeric" value={filters.min_price ?? ""} onChange={(e) => set({ min_price: e.target.value ? Number(e.target.value) : undefined, price_currency: currency })} />
+            </Field>
+            <Field label={`Max ${symbol}`}>
+              <Input type="number" inputMode="numeric" value={filters.max_price ?? ""} onChange={(e) => set({ max_price: e.target.value ? Number(e.target.value) : undefined, price_currency: currency })} />
             </Field>
           </div>
+          <p className="-mt-3 text-xs text-muted-foreground">Other prices are converted at your rates in Settings. A price whose currency is not stated is left out of a price filter.</p>
           <div className="grid grid-cols-2 gap-3">
             <Field label="Season">
               <Select value={filters.season ?? ""} onChange={(e) => set({ season: e.target.value || undefined })}>

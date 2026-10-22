@@ -1,5 +1,7 @@
 """Recommender, quality scoring and deduplication."""
 
+import pytest
+
 from app.ingestion.base import RawListing
 from app.ingestion.pipeline import process_images, upsert_listing
 from app.models import Evidence, Feedback, Product, Seller
@@ -83,7 +85,8 @@ def test_profile_white_tee_value_rejection(db):
     prof = build_profile(db)
     assert prof.affinity("colour:white") == 0  # no negative preference for white
     assert prof.affinity("category:t-shirt") == 0
-    assert prof.price_ceiling["t-shirt"] == 510
+    assert prof.price_ceiling["t-shirt"] == pytest.approx(510 * 0.105)  # in pounds at the default rate
+    assert prof.price_ceiling_source["t-shirt"] == (510, "CNY")
     assert prof.n_informative == 0  # not counted as taste learning
 
 

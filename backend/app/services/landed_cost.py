@@ -12,21 +12,18 @@ rules summarised (check gov.uk for your situation):
 
 from __future__ import annotations
 
+from .money import code
+
 
 def estimate_landed_cost(
     price: float | None, currency: str, category: str | None, rate_cny_gbp: float, cfg: dict
 ) -> dict | None:
-    if price is None or price <= 0:
+    """The estimate for a price in yuan bought through an agent. None for any other price: a pound or dollar price
+    is bought another way (its shipping and charges are unknown here), and an unstated currency is never assumed.
+    Such prices are converted (money.py), not landed."""
+    if price is None or price <= 0 or code(currency) != "CNY":
         return None
-    if not currency:
-        return None  # currency not stated: better to show nothing than a wrong number
-    if currency.upper() not in ("CNY", "RMB"):
-        if currency.upper() == "GBP":
-            goods_gbp = price
-        else:
-            return None  # unknown conversion; better to show nothing than a wrong number
-    else:
-        goods_gbp = price * rate_cny_gbp
+    goods_gbp = price * rate_cny_gbp
 
     domestic = cfg.get("domestic_shipping_cny", 0) * rate_cny_gbp
     agent_fee = goods_gbp * cfg.get("agent_service_fee_pct", 0) / 100

@@ -39,7 +39,11 @@ export function PriceBlock({ product, large }: { product: Product; large?: boole
   return (
     <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
       <span className={cn("font-serif tabular-nums", large ? "text-3xl" : "text-xl")}>{formatPrice(product.price, product.currency)}</span>
-      {product.price_gbp != null && product.currency !== "GBP" && <span className="text-sm text-muted-foreground">≈ {formatGBP(product.price_gbp)}</span>}
+      {product.price_gbp != null && product.conversion && (
+        <Tip content={`Converted at ${product.conversion.from} 1 = £${product.conversion.rate} (${product.conversion.source || "your rate in Settings"}). A conversion, not the landed cost.`}>
+          <span className="cursor-help text-sm text-muted-foreground">≈ {formatGBP(product.price_gbp)}</span>
+        </Tip>
+      )}
       {product.landed_cost && (
         <Tip
           content={

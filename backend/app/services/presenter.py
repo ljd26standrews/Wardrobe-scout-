@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from ..models import Evidence, Product, SavedItem, Seller
 from . import dedup
 from .landed_cost import estimate_landed_cost
+from .money import code, rates
 from .quality import assess, category_price_stats, evidence_view
 from .recommender import Ranked
 from .settings_store import get_setting
@@ -25,14 +26,16 @@ class Context:
 
     def __init__(self, db: Session) -> None:
         self.db = db
-        self.rate = get_setting(db, "currency")["cny_to_gbp"]
+        self.fx = rates(db)
+        self.rate = self.fx.to_gbp.get("CNY")
         self.landed_cfg = get_setting(db, "landed_cost")
-        self.price_stats = category_price_stats(db)
+        self.price_stats = category_price_stats(db, self.fx)
         self.sellers = {s.id: s for s in db.query(Seller).all()}
         self.saved = {s.product_id: s for s in db.query(SavedItem).all()}
         self._seller_ev: dict[int, list[Evidence]] = {}
         self._quality: dict[int, dict] = {}
         self._strong: dict[int, list[int]] | None = None
+        self.price_filter: dict | None = None  # the feed's price filter as applied (api/products.price_filter)
 
     def seller_evidence(self, seller_id: int | None) -> list[Evidence]:
         if not seller_id:
@@ -55,8 +58,10 @@ class Context:
         return self._strong.get(product_id, [])
 
     def cheaper_equivalent(self, p: Product) -> dict | None:
-        """A cheaper listing that is very likely the same item (purchase link, confirmed, or several shared photos)."""
-        if not p.price:
+        """A cheaper listing that is very likely the same item (purchase link, confirmed, or several shared photos),
+        still for sale, in the same stated currency: a price in another currency is bought another way (shipping,
+        fees and import charges differ), so converting it would not say which costs less."""
+        if not p.price or code(p.currency) is None:
             return None
         best = None
         for other_id in self._strong_neighbours(p.id):
@@ -65,8 +70,7 @@ class Context:
                 o
                 and o.price
                 and o.status == "active"
-                and p.currency
-                and _currency_key(o.currency) == _currency_key(p.currency)
+                and code(o.currency) == code(p.currency)
                 and o.price < p.price * 0.9
             ):
                 if best is None or o.price < best.price:
@@ -91,6 +95,7 @@ class Context:
                 cheaper_equivalent=self.cheaper_equivalent(p),
                 design_score=design,
                 design_confidence=design_conf,
+                fx=self.fx,
             )
         return self._quality[key]
 
@@ -120,12 +125,13 @@ def product_card(ctx: Context, p: Product, ranked: Ranked | None = None, detail:
     seller = ctx.sellers.get(p.seller_id) if p.seller_id else None
     design = ranked.design_score if ranked else None
     q = ctx.quality(p, design, None if ranked is None else max(0.15, ranked.strength))
-    price_gbp = (
-        round(p.price * ctx.rate, 2)
-        if p.price and p.currency in ("CNY", "RMB")
-        else (p.price if p.currency == "GBP" else None)
-    )
-    landed = estimate_landed_cost(p.price, p.currency, p.category, ctx.rate, ctx.landed_cfg)
+    gbp = ctx.fx.gbp(p.price, p.currency)
+    price_gbp = None if gbp is None else round(gbp, 2)
+    conversion = None
+    if price_gbp is not None and code(p.currency) != "GBP":  # how the pound figure was obtained
+        conversion = {"gbp": price_gbp, "rate": ctx.fx.to_gbp[code(p.currency)], "from": code(p.currency),
+                      "source": ctx.fx.source, "updated_at": ctx.fx.updated_at}  # fmt: skip
+    landed = estimate_landed_cost(p.price, p.currency, p.category, ctx.rate, ctx.landed_cfg) if ctx.rate else None
     saved = ctx.saved.get(p.id)
     pros, cons = pros_and_cons(p, q, ranked)
     links = dict(p.links or {})
@@ -157,6 +163,7 @@ def product_card(ctx: Context, p: Product, ranked: Ranked | None = None, detail:
         "price": p.price,
         "currency": p.currency,
         "price_gbp": price_gbp,
+        "conversion": conversion,
         "landed_cost": landed,
         "source_url": p.source_url if not p.source_url.startswith("manual://") else None,
         "links": links,
@@ -284,9 +291,29 @@ def comparison(ctx: Context, p: Product) -> dict:
     return {"product": base, "alternatives": rows, "verdict": verdict}
 
 
-def _currency_key(c: str | None) -> str:
-    c = (c or "").upper()
-    return "CNY" if c == "RMB" else c
+def _not_compared(r: dict, currency: str | None) -> str | None:
+    """Why a listing of the same product is not price-compared with this one, or None."""
+    o = r["product"]
+    if o.get("status", "active") != "active":
+        return "sold"
+    if not o.get("price"):
+        return "unpriced"
+    if code(o.get("currency")) is None:
+        return "unstated"
+    if code(o.get("currency")) != currency:
+        return "other"
+    return None
+
+
+NOT_COMPARED = {
+    "sold": "{n} that appear to be the same product are no longer for sale",
+    "unpriced": "{n} that appear to be the same product show no price",
+    "unstated": "{n} that appear to be the same product have a price whose currency is not stated",
+}
+
+
+def _seller_name(card: dict) -> str:
+    return card["seller"]["name"] if card.get("seller") else "Another seller"
 
 
 def price_verdict(base: dict, rows: list[dict]) -> dict:
@@ -295,20 +322,26 @@ def price_verdict(base: dict, rows: list[dict]) -> dict:
     price = base["price"]
     notes = []
     recommendation = "insufficient_data"
-    currency = _currency_key(base.get("currency"))
-    # Prices are only compared like for like: the same, stated currency and a listing still for sale.
-    comparable = [
-        r
-        for r in same
-        if currency and _currency_key(r["product"].get("currency")) == currency
-        and r["product"].get("status", "active") == "active"
-    ]  # fmt: skip
-    if price and same and not comparable:
-        notes.append(
-            "Listings that appear to be the same product are in another or unstated currency, or no longer for "
-            "sale, so prices were not compared."
-        )
-    elif price and comparable:
+    currency = code(base.get("currency"))
+    # Prices are judged like for like only: the same stated currency (one way of buying) and still for sale.
+    why = {id(r): _not_compared(r, currency) for r in same}
+    comparable = [r for r in same if why[id(r)] is None] if price and currency else []
+    if price and same and not currency:
+        notes.append("This listing's currency is not stated, so its price was not compared with other listings.")
+    elif price and same:
+        for reason, text in NOT_COMPARED.items():
+            if n := sum(1 for r in same if why[id(r)] == reason):
+                notes.append(text.format(n=f"{n} listing{'s' if n > 1 else ''}") + ", so they were not compared.")
+        for r in (r for r in same if why[id(r)] == "other"):
+            o = r["product"]
+            gbp = o.get("price_gbp")
+            converted = f"; at your rate that is about £{gbp:,.0f}" if gbp is not None else ""
+            if "price_gbp" in o and gbp is None:
+                converted = ", a currency without a rate in Settings → Currency"
+            notes.append(f"{_seller_name(o)} lists what appears to be the same product at {o['price']:g} "
+                         f"{code(o.get('currency'))}{converted}. Bought in another currency, shipping, fees and import "
+                         "charges differ, so the prices are not compared.")  # fmt: skip
+    if price and comparable:
         same = comparable
         cheaper = [r for r in same if r["product"]["price"] and r["product"]["price"] < price * 0.95]
         if cheaper:
@@ -349,6 +382,6 @@ def price_verdict(base: dict, rows: list[dict]) -> dict:
         else:
             notes.append("Only visually similar (not identical) alternatives were found; compare specs carefully.")
             recommendation = "similar_only"
-    else:
+    elif not same:
         notes.append("No alternatives found in your collected catalogues yet.")
     return {"recommendation": recommendation, "notes": notes}
