@@ -16,7 +16,10 @@ import math
 
 import numpy as np
 
-from .test_calibration_lifecycle import calibration_status, catalogue, decide, everywhere, held, rate, surfaces  # noqa: F401
+from . import test_calibration_lifecycle as lifecycle
+from .test_calibration_lifecycle import calibration_status, catalogue, everywhere, rate, surfaces
+
+held = lifecycle.held  # the fixture: background jobs are recorded, and run by held.run()
 
 
 def _calibrated(held, db, n=36):
@@ -104,7 +107,6 @@ def test_re_analysing_much_of_the_catalogue_makes_a_refit_due(held, db):
     """Unrated pieces re-analysed with the same method move the photo components every score is computed from."""
     from app.models import Feedback, Product
     from app.services import embeddings as emb
-
     from app.services.calibration import CATALOGUE_CHANGE_REFIT
 
     ids, _ = _calibrated(held, db)

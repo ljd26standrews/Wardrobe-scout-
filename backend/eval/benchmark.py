@@ -216,7 +216,7 @@ def freeze(src: Path, data_dir: Path, name: str = DEFAULT_NAME, *, new_version: 
     from app.services import preference_model as pm
     from app.services.approval_data import LABEL_VERSION
 
-    from .dbcopy import open_copy
+    from .dbcopy import close_copy, open_copy
 
     parse_ref(name)
     have = versions(data_dir, name)
@@ -239,8 +239,7 @@ def freeze(src: Path, data_dir: Path, name: str = DEFAULT_NAME, *, new_version: 
             regime = calibration.regime(db)
             data = _data_identity(db)
         finally:
-            db.close()
-        _dispose_engine()
+            close_copy(db)
         snap = stage / "snapshot.db"
         _single_file(stage / "eval.db", snap)
         lines = "".join(json.dumps(r, sort_keys=True, default=str) + "\n" for r in records)
@@ -279,13 +278,6 @@ def freeze(src: Path, data_dir: Path, name: str = DEFAULT_NAME, *, new_version: 
     finally:
         if stage.exists():
             _rmtree(stage)
-
-
-def _dispose_engine() -> None:
-    from app import db as appdb
-
-    if appdb._engine is not None:
-        appdb._engine.dispose()
 
 
 def _single_file(src: Path, dst: Path) -> None:
@@ -599,14 +591,13 @@ def main(argv: list[str] | None = None) -> int:
             with tempfile.TemporaryDirectory(prefix="ws-bench-") as tmp:
                 from app.models import Judgement
 
-                from .dbcopy import open_copy
+                from .dbcopy import close_copy, open_copy
 
                 db = open_copy(src, Path(tmp))
                 try:
                     print(json.dumps(legacy_status(path, db.query(Judgement).all()), indent=1))
                 finally:
-                    db.close()
-                    _dispose_engine()
+                    close_copy(db)
             print("An ID-only freeze cannot be verified and is not used as a benchmark. To rebuild it as one: "
                   "python -m eval.benchmark freeze --name <name> --from-legacy")  # fmt: skip
             return 0

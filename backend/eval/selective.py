@@ -572,7 +572,7 @@ def main(argv: list[str] | None = None) -> int:
     from app.config import get_settings
 
     from . import benchmark as bm
-    from .dbcopy import open_copy, source_database
+    from .dbcopy import close_copy, open_copy, source_database
 
     src = source_database(args.db)
     if not src.is_file():
@@ -599,8 +599,7 @@ def main(argv: list[str] | None = None) -> int:
                 entry = bm.run_entry(db, "eval.selective", args.training if bench else "live", cutoff, None)
                 result = run_all(db, block=args.block, seed=args.seed, labels=args.labels, test=test)
             finally:
-                db.close()
-                bm._dispose_engine()
+                close_copy(db)
     except bm.BenchmarkError as e:
         print(str(e), file=sys.stderr)
         return 3
