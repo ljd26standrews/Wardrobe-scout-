@@ -226,6 +226,12 @@ def _serve(db: Session, kind: str, select, **request) -> dict:
     if sel is None:
         ctx = Context(db)
         sel = select(db, ctx, **request)
+        # A lazy explainer retains the entire fitted model and its catalogue feature matrix. Keep only the
+        # displayed explanations and offers in remembered answers, not old 20,000-listing model snapshots.
+        for ranked, _ in sel.shown:
+            ranked._explain()
+        shown_ids = {ranked.product.id for ranked, _ in sel.shown}
+        sel.offers = {pid: offers for pid, offers in sel.offers.items() if pid in shown_ids}
         with _selections_lock:
             _selections[key] = sel
             while len(_selections) > MAX_SELECTIONS:

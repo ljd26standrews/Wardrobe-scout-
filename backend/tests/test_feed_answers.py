@@ -317,3 +317,23 @@ def test_cards_never_touch_the_shared_listings_even_for_a_piece_deleted_meanwhil
         with pytest.raises(AttributeError):
             p.price = 1.0
         assert not hasattr(p, "images")
+
+
+def test_remembered_answer_does_not_keep_the_catalogue_feature_matrix_alive(client, db):
+    import gc
+    import weakref
+
+    from app.services import preference_model as pm
+
+    ids = catalogue(db)
+    rate(client, ids[:6], approvals=3)
+    first = answer(client)
+    assert first["items"]
+    matrix_owner = weakref.ref(next(iter(pm._space_cache.values())))
+    # Simulate model caches evicting an old catalogue while its feed answer is still remembered.
+    pm._space_cache.clear()
+    pm._fit_memo.clear()
+    pm._post_cache.clear()
+    gc.collect()
+    assert matrix_owner() is None
+    assert body(answer(client)) == body(first)

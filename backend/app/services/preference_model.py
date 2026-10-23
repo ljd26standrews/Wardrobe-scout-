@@ -613,6 +613,9 @@ def fit(db: Session, space: FeatureSpace) -> Posterior:
             return hit if hit.space is space else dataclasses.replace(hit, space=space)
     post = fit_rows(space, *observations(db, space))
     with _post_lock:
+        for old_key in list(_fit_memo):
+            if _fit_memo[old_key].space.key != space.key:
+                del _fit_memo[old_key]
         _fit_memo[key] = post
         while len(_fit_memo) > 4:
             _fit_memo.popitem(last=False)
@@ -635,6 +638,11 @@ def fit_rows(space: FeatureSpace, rows: list, ys: list, ws: list, n_real: int) -
             return hit if hit.space is space else dataclasses.replace(hit, space=space)
     post = _fit(space, m0, q0, A, y, c, n_real)
     with _post_lock:
+        # A catalogue change creates a new matrix. Old fits cannot be reused at that revision, and retaining
+        # eight different catalogue matrices during a scan costs far more than retaining eight sets of weights.
+        for old_key in list(_post_cache):
+            if _post_cache[old_key].space.key != space.key:
+                del _post_cache[old_key]
         _post_cache[key] = post
         while len(_post_cache) > 8:
             _post_cache.popitem(last=False)
