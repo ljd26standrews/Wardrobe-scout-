@@ -31,7 +31,7 @@ def main(argv: list[str] | None = None) -> int:
     ex.add_argument("path")
     im = sub.add_parser("import-backup", help="merge a JSON backup")
     im.add_argument("path")
-    bf = sub.add_parser("backup-full", help="zip the database and all photos (exact restore, incl. media)")
+    bf = sub.add_parser("backup-full", help="zip the database, photos and frozen evaluations")
     bf.add_argument("path")
     rf = sub.add_parser("restore-full", help="restore a backup-full zip into a NEW, empty data folder")
     rf.add_argument("path")
@@ -50,7 +50,7 @@ def main(argv: list[str] | None = None) -> int:
         except ValueError as e:
             print(f"not restored: {e}")
             return 1
-        print(f"restored {res['files']} photos and the database into {args.data_dir}")
+        print(f"restored {res['files']} files and the database into {args.data_dir}")
         print(f"start the app with WS_DATA_DIR={args.data_dir}")
         return 0
     bootstrap()
@@ -107,7 +107,7 @@ def main(argv: list[str] | None = None) -> int:
                 print("backup-full supports SQLite; for PostgreSQL use pg_dump plus a copy of the data folder")
                 return 1
             res = write_full_snapshot(Path(s.database_url.removeprefix("sqlite:///")), s.data_dir, Path(args.path))
-            print(f"wrote {res['path']}: database + {res['files']} photos, {res['bytes'] / 1e6:.1f} MB")
+            print(f"wrote {res['path']}: database + {res['files']} files, {res['bytes'] / 1e6:.1f} MB")
         elif args.cmd == "import-backup":
             from .services.backup import import_all
 

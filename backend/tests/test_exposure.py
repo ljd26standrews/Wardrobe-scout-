@@ -123,4 +123,7 @@ def test_upgrading_keeps_earlier_records_as_legacy(tmp_path, monkeypatch):
         cols = {r[1] for r in conn.execute(sa.text("PRAGMA table_info(impressions)"))}
         assert conn.execute(sa.text("SELECT count(*) FROM impressions")).scalar() == 3
     assert "definition" not in cols
+    dbmod.migrate()  # upgrading again preserves legacy records and reinstalls revision triggers
+    with eng.begin() as conn:
+        assert conn.execute(sa.text("SELECT definition, event_id FROM impressions")).all() == [(None, None)] * 3
     get_settings.cache_clear()

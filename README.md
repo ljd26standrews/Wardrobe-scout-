@@ -383,7 +383,7 @@ Two kinds of backup, for different jobs:
   - every product any of these refer to, plus products you entered yourself, with their uploaded photos.
 
   Photos that scans downloaded are referenced by link and fetched again when needed. **Import backup** merges the file into the current database and is idempotent: importing the same file again changes nothing. Older (version 1) files still import.
-- **Full snapshot (database plus every photo).** Use this to move a whole installation or restore it exactly:
+- **Full snapshot (database, photos and frozen evaluations).** Use this to move a whole installation or restore it exactly:
 
   ```bash
   cd backend
@@ -391,6 +391,8 @@ Two kinds of backup, for different jobs:
   .venv/bin/python -m app.cli restore-full ~/wardrobe-scout-snapshot.zip --data-dir ~/ws-restored
   WS_DATA_DIR=~/ws-restored ./scripts/start.sh                                          # or set it in .env
   ```
+
+  Frozen benchmarks, their run history and pilot reports are included. Finish any evaluation before taking a snapshot: SQLite protects the live database copy, but cannot make separately written reports atomic.
 
   `restore-full` only restores into a new, empty folder. It never overwrites an existing installation.
 - **Settings → Download database** gives a consistent SQLite copy, without photos.
@@ -406,7 +408,7 @@ cd backend
 .venv/bin/python -m app.cli reanalyse       # classify photos stored by older versions (runs automatically too)
 .venv/bin/python -m app.cli import-url "https://weidian.com/item.html?itemID=7707075268"
 .venv/bin/python -m app.cli import-csv products.csv
-.venv/bin/python -m app.cli backup-full snapshot.zip   # database + all photos
+.venv/bin/python -m app.cli backup-full snapshot.zip   # database + photos + frozen evaluations
 .venv/bin/python -m app.cli restore-full snapshot.zip --data-dir NEW_FOLDER
 .venv/bin/python -m app.cli recompute
 .venv/bin/python -m eval.real               # measure the recommender on your Evaluate grades (see above)
