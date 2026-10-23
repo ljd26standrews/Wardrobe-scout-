@@ -46,13 +46,17 @@ def test_the_sample_size_table_matches_clopper_pearson():
     assert t[72] >= 0.95 > t[60]
 
 
-def test_the_report_on_a_frozen_benchmark(env, db):
+@pytest.mark.parametrize("console_encoding", [None, "ascii"])
+def test_the_report_on_a_frozen_benchmark(env, db, monkeypatch, console_encoding):
+    if console_encoding:
+        monkeypatch.setenv("PYTHONIOENCODING", console_encoding)
     timed_world(db, per=30, rated=18, judged=8)
     r = _cli(env, "eval.benchmark", "freeze", "--name", "pilot")
     assert r.returncode == 0, r.stderr[-2000:]
     r = _cli(env, "eval.pilot", "report", "--benchmark", "pilot@v1")
     assert r.returncode == 0, r.stderr[-3000:]
-    out = r.stdout
+    assert "# Pilot report" in r.stdout  # legacy consoles may escape unsupported mathematical symbols
+    out = sorted((env / "evaluation" / "pilot").glob("pilot-v1-*.md"))[-1].read_text(encoding="utf-8")
     for section in ("## The pilot's requirements", "## How much a result can show", "## Your graded garments",
                     "## What Discover served and you saw", "## Taste and quality", "## What this does not show"):  # fmt: skip
         assert section in out, section
