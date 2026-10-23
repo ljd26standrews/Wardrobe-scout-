@@ -36,6 +36,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 import numpy as np
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.orm import Session
 
 from ..ingestion.vocab import CATEGORY_GROUP, NEUTRAL_COLOURS, PREMIUM_FIBRES, QUIET_LUXURY_BRANDS
@@ -361,6 +362,46 @@ def owned_like(prof: Profile, p: Product, backend: str) -> Owned | None:
     return found
 
 
+def photo_matrix(products: list, rows: list[int]) -> np.ndarray:
+    """The photo vectors of ``products[i]`` for i in ``rows`` (all from one photo method), one per row: read from the
+    stored bytes in one pass (as ``np.vstack`` of each vector, without an array per listing)."""
+    return np.frombuffer(b"".join([products[i].image_embedding for i in rows]), dtype=np.float32).reshape(len(rows), -1)
+
+
+def prime_owned(prof: Profile, products: list[Product], backend: str) -> None:
+    """``owned_like`` for many pieces at once: the same rule (the first "already own" piece of the same garment type
+    with the same main colour, or a near-identical photo), by garment type with one matrix product instead of a
+    photo comparison per pair. Fills the per-request memo that ``owned_like`` reads."""
+    by_cat = prof.owned_by_category()
+    memo = prof._owned_memo
+    groups: dict[str, list[Product]] = defaultdict(list)
+    for p in products:
+        if p.id not in memo:
+            groups[p.category or "other"].append(p)
+    for cat, ps in groups.items():
+        owned = by_cat.get(cat) or []
+        if not owned:
+            memo.update(dict.fromkeys((p.id for p in ps), None))
+            continue
+        match = np.zeros((len(ps), len(owned)), dtype=bool)
+        ids = np.array([p.id for p in ps])
+        colour0 = np.array([p.colours[0] if p.colours else "" for p in ps], dtype=object)
+        for j, o in enumerate(owned):
+            if o.product_id is not None:
+                match[:, j] |= ids == o.product_id
+            if o.colour:
+                match[:, j] |= colour0 == o.colour
+        with_vec = [j for j, o in enumerate(owned) if o.vec is not None]
+        rows = [i for i, p in enumerate(ps) if p.image_embedding is not None and p.embedding_backend == backend]
+        if with_vec and rows:
+            E = photo_matrix(ps, rows)
+            near = (E @ np.vstack([owned[j].vec for j in with_vec]).T) >= prof.owned_threshold
+            match[np.ix_(rows, with_vec)] |= near
+        first = np.where(match.any(axis=1), match.argmax(axis=1), -1)
+        for p, f in zip(ps, first, strict=True):
+            memo[p.id] = owned[f] if f >= 0 else None
+
+
 def above_judged_price(prof: Profile, category: str, gbp: float | None) -> bool:
     """At or near (90%) the highest price you judged too much for an unproven piece of this kind. A price that
     does not convert is unknown, not above."""
@@ -525,6 +566,7 @@ class Ranked:
 
 
 UNCERTAINTY_TOP = 1000
+_REPUTATION = {"trusted": 0.8, "mixed": 0.5, "concerns": 0.15}  # a seller's reputation as a component value
 
 
 def rank_products(
@@ -547,25 +589,30 @@ def rank_products(
     price_stats = category_price_stats(db, prof.fx)
     sellers = {sl.id: sl for sl in db.query(Seller).all()}
 
-    # Vectorised visual / semantic components
+    bayes = rcfg.get("engine", "bayes") == "bayes"
+    # Vectorised visual / semantic components. The Bayesian engine models photos itself: of these it uses only the
+    # nearest example you liked (for explanations) and near-duplicates of rejected pieces.
     vis_idx = [i for i, p in enumerate(products) if p.image_embedding is not None and p.embedding_backend == backend]
     visual = np.full(len(products), 0.5)
     vis_best = np.full(len(products), -1)
     near_dup = np.zeros(len(products), dtype=bool)
     if vis_idx:
-        M = np.vstack([emb.from_bytes(products[i].image_embedding) for i in vis_idx])
-        ps, best = _proto_sims(M, prof.pos_visual)
-        ns, _ = _proto_sims(M, prof.neg_visual)
-        comp = _zscore_component(ps, ns, bool(prof.pos_visual), bool(prof.neg_visual))
-        for j, i in enumerate(vis_idx):
-            visual[i] = comp[j] if (prof.pos_visual or prof.neg_visual) else 0.5
-            vis_best[i] = best[j]
+        M = photo_matrix(products, vis_idx)
+        if bayes:
+            best = (M @ np.vstack([pr.vec for pr in prof.pos_visual]).T).argmax(1) if prof.pos_visual else None
+            if best is not None:
+                vis_best[vis_idx] = best
+        else:
+            ps, best = _proto_sims(M, prof.pos_visual)
+            ns, _ = _proto_sims(M, prof.neg_visual)
+            comp = _zscore_component(ps, ns, bool(prof.pos_visual), bool(prof.neg_visual))
+            for j, i in enumerate(vis_idx):
+                visual[i] = comp[j] if (prof.pos_visual or prof.neg_visual) else 0.5
+                vis_best[i] = best[j]
         if prof.suppressed_vecs:
             sup = M @ np.vstack(prof.suppressed_vecs).T
-            thr = rcfg.get("near_duplicate_threshold", 0.96)
-            for j, i in enumerate(vis_idx):
-                near_dup[i] = bool((sup[j] >= thr).any())
-    txt_idx = [i for i, p in enumerate(products) if p.text_embedding is not None]
+            near_dup[vis_idx] = (sup >= rcfg.get("near_duplicate_threshold", 0.96)).any(axis=1)
+    txt_idx = [] if bayes else [i for i, p in enumerate(products) if p.text_embedding is not None]
     semantic = np.full(len(products), 0.5)
     if txt_idx and (prof.pos_text or prof.neg_text):
         T = np.vstack([emb.from_bytes(products[i].text_embedding) for i in txt_idx])
@@ -575,7 +622,6 @@ def rank_products(
         for j, i in enumerate(txt_idx):
             semantic[i] = comp[j]
 
-    bayes = rcfg.get("engine", "bayes") == "bayes"
     if bayes:
         from . import preference_model as pm
 
@@ -586,7 +632,7 @@ def rank_products(
         zmean = post.mean_logit(known)
         rng = np.random.default_rng(int(utcnow().strftime("%Y%m%d")) * 1000 + post.n_obs)
         zsamp = post.sample_z(known, rng) if known else np.zeros(0)
-        model_by_id = {pid: (float(zmean[j]), None, float(zsamp[j])) for j, pid in enumerate(known)}
+        model_by_id = {pid: (zm, None, zs) for pid, zm, zs in zip(known, zmean.tolist(), zsamp.tolist(), strict=True)}
         s = post.n_obs / (post.n_obs + rcfg.get("cold_start_k", 15)) if post.n_obs else 0.0
 
     gates = {
@@ -605,14 +651,24 @@ def rank_products(
     denom = sum(abs(weights.get(c, 0)) * g for c, g in gates.items()) or 1.0
 
     rules_seen = rules_lookup(db, taste)
+    prime_owned(prof, products, backend)
+    owned_of = prof._owned_memo
+    wardrobe_lookup = wardrobe_lookup or {}
+    seller_c_of = {sid: 0.5 * _REPUTATION.get(sl.reputation_status, 0.5) + 0.5 * (0.5 + (3 - sl.priority) * 0.06)
+                   for sid, sl in sellers.items()}  # fmt: skip
+    gbp_of: dict[tuple, float | None] = {}  # a price in pounds, per (price, currency): many listings share one
+    ceiling_note: dict[tuple, str] = {}
+    wg = {c: weights.get(c, 0) * g for c, g in gates.items()}  # each component's weight, gated
+    best_list, dup_list = vis_best.tolist(), near_dup.tolist()
     out: list[Ranked] = []
     for i, p in enumerate(products):
         reasons: list[str] = []
         cautions: list[str] = []
-        if (hit := rules_seen.get(p.id)) is None:
-            hit = rules_seen[p.id] = rules_component(p, taste)
+        pid = p.id
+        if (hit := rules_seen.get(pid)) is None:
+            hit = rules_seen[pid] = rules_component(p, taste)
         rules, rules_why = hit[0], list(hit[1])
-        q = quality_lookup.get(p.id) if quality_lookup else None
+        q = quality_lookup.get(pid) if quality_lookup else None
         if q is None:
             q = assess(db, p, price_stats=price_stats, fx=prof.fx)
         qs = q["quality_score"]
@@ -620,48 +676,52 @@ def rank_products(
         vs = q["dimensions"]["value"]["score"]
         value_c = 0.5 if vs is None else 0.3 + 0.4 * vs / 100
         cat = p.category or "other"
-        gbp = prof.fx.gbp(p.price, p.currency)
-        if above_judged_price(prof, cat, gbp) and qs is None:
+        price, currency = p.price, p.currency
+        if (price, currency) in gbp_of:
+            gbp = gbp_of[price, currency]
+        else:
+            gbp = gbp_of[price, currency] = prof.fx.gbp(price, currency)
+        if qs is None and above_judged_price(prof, cat, gbp):
             value_c = min(value_c, 0.2)
-            judged, cur = prof.price_ceiling_source[cat]
-            cautions.append(
-                f"You previously judged {_money(judged, cur, prof.price_ceiling[cat])} too expensive for an unproven "
-                f"{cat}; this is {_money(p.price, p.currency, gbp)}"
-            )
+            if (cat, price, currency) not in ceiling_note:
+                judged, cur = prof.price_ceiling_source[cat]
+                ceiling_note[cat, price, currency] = (
+                    f"You previously judged {_money(judged, cur, prof.price_ceiling[cat])} too expensive for an "
+                    f"unproven {cat}; this is {_money(price, currency, gbp)}"
+                )
+            cautions.append(ceiling_note[cat, price, currency])
         tol = prof.price_tolerance.get(cat)
         if tol and gbp is not None and gbp > 1.6 * tol:
             value_c -= 0.1
-        wl = (wardrobe_lookup or {}).get(p.id)
+        wl = wardrobe_lookup.get(pid)
         wardrobe_c = wl["score"] if wl else 0.5
         if wl and wl.get("note"):
             (reasons if wardrobe_c > 0.5 else cautions).append(wl["note"])
-        if owned := owned_like(prof, p, backend):
+        owned = owned_of[pid] if pid in owned_of else owned_like(prof, p, backend)
+        if owned:
             wardrobe_c = min(wardrobe_c, 0.35)
             cautions.append(f"You said you already own something like this ({owned.title})")
-        sl = sellers.get(p.seller_id) if p.seller_id else None
-        rep = {"trusted": 0.8, "mixed": 0.5, "concerns": 0.15}.get(sl.reputation_status if sl else "", 0.5)
-        prio = 0.5 + (3 - (sl.priority if sl else 3)) * 0.06
-        seller_c = 0.5 * rep + 0.5 * prio
+        seller_c = seller_c_of.get(p.seller_id, 0.5) if p.seller_id else 0.5
 
         if bayes:
             out.append(
                 _bayes_ranked(
                     p,
                     post,
-                    model_by_id.get(p.id),
+                    model_by_id.get(pid),
                     rules_why,
                     quality_c,
                     value_c,
                     wardrobe_c,
                     seller_c,
                     weights,
-                    gates,
+                    wg,
                     denom,
                     reasons,
                     cautions,
                     prof,
-                    vis_best[i],
-                    p.id in prof.suppressed_ids or bool(near_dup[i]),
+                    best_list[i],
+                    pid in prof.suppressed_ids or dup_list[i],
                     s,
                 )
             )
@@ -778,7 +838,7 @@ def _bayes_ranked(
     wardrobe_c,
     seller_c,
     weights,
-    gates,
+    wg,
     denom,
     reasons,
     cautions,
@@ -788,13 +848,15 @@ def _bayes_ranked(
     strength,
 ) -> Ranked:
     """Score one product with the Bayesian taste model (see preference_model). Its explanation is built only if
-    it is read (the feed shows a few dozen of the pieces it ranks)."""
+    it is read (the feed shows a few dozen of the pieces it ranks). ``wg``: each component's weight times its gate."""
     zm, zsd, zs = model if model else (0.0, None, 0.0)
-    taste_c = float(1 / (1 + math.exp(-zm)))
+    taste_c = 1 / (1 + math.exp(-zm))
     comps = {"taste": taste_c, "quality": quality_c, "value": value_c, "wardrobe": wardrobe_c, "seller": seller_c}
-    contrib = {c: weights.get(c, 0) * gates[c] * (v - 0.5) for c, v in comps.items()}
+    contrib = {"taste": wg["taste"] * (taste_c - 0.5), "quality": wg["quality"] * (quality_c - 0.5),
+               "value": wg["value"] * (value_c - 0.5), "wardrobe": wg["wardrobe"] * (wardrobe_c - 0.5),
+               "seller": wg["seller"] * (seller_c - 0.5)}  # fmt: skip
     score = 0.5 + sum(contrib.values()) / denom
-    sampled_taste = float(1 / (1 + math.exp(-zs)))
+    sampled_taste = 1 / (1 + math.exp(-zs))
     sample_score = score + weights.get("taste", 0) * (sampled_taste - taste_c) / denom
     if suppressed:
         score -= 0.5
@@ -914,9 +976,71 @@ def build_feed(
     return feed[:limit]
 
 
-def feed_candidates(db: Session, prof: Profile, *, include_skipped_after_days: int = 10) -> list[Product]:
+# ------------------------------------------------------------------- the listings feeds rank
+LISTING_COLUMNS = tuple(a.key for a in sa_inspect(Product).column_attrs)
+
+
+class Listing:
+    """One active listing's columns, shared read-only by every feed (``active_products``). It is not an ORM object:
+    it has no photos, seller or evidence to load, and assigning to it fails, so no request can change what another
+    reads. Quality is assessed and cards are built on session copies (presenter.Context.prime_quality,
+    presenter.rebind)."""
+
+    __slots__ = LISTING_COLUMNS
+
+    def __setattr__(self, name: str, value) -> None:
+        raise AttributeError(f"shared listings are read-only (tried to set {name})")
+
+    @classmethod
+    def from_row(cls, row) -> Listing:
+        item = object.__new__(cls)
+        for k, v in zip(LISTING_COLUMNS, row, strict=True):
+            object.__setattr__(item, k, v)
+        return item
+
+
+# Every active listing, until the listings' content changes (services/revisions.py).
+_active_lock = threading.Lock()
+_active_cache: dict = {"key": None, "products": [], "all": []}
+
+
+def read_listings(db: Session, *conditions) -> list[Listing]:
+    """Listings (all, or those matching ``conditions``) as plain read-only records, in table order: no ORM objects
+    to build, which took most of the time of reading 20,000 listings."""
+    from sqlalchemy import select
+
+    query = select(*[a.columns[0] for a in sa_inspect(Product).column_attrs])
+    if conditions:
+        query = query.where(*conditions)
+    return [Listing.from_row(r) for r in db.execute(query)]
+
+
+def catalogue_products(db: Session, *, active: bool = False) -> list[Listing]:
+    """One shared read of the catalogue for ranking, features and equivalent offers. Content and address
+    revisions invalidate it across processes; presentation still uses fresh session objects."""
+    from . import revisions
+
+    key = revisions.current(db, "products", "photos", "addresses")
+    with _active_lock:
+        if _active_cache["key"] != key:
+            products = read_listings(db)
+            _active_cache.update(key=key, all=products, products=[p for p in products if p.status == "active"])
+        return _active_cache["products" if active else "all"]
+
+
+def active_products(db: Session) -> list[Listing]:
+    return catalogue_products(db, active=True)
+
+
+def feed_candidates(
+    db: Session, prof: Profile, *, include_skipped_after_days: int = 10, shared: bool = False
+) -> list[Product] | list[Listing]:
     """Undecided active listings. Listings of a garment you decided on, or recently skipped, are left out:
-    they are the same piece from another seller (the product and compare pages show those offers)."""
+    they are the same piece from another seller (the product and compare pages show those offers).
+
+    ``shared``: the shared, read-only ``Listing`` records of ``active_products`` (feeds: no 20,000 objects per
+    request); the caller must then assess quality and build cards on session copies. Otherwise listings of this
+    session."""
     cutoff = utcnow() - timedelta(days=include_skipped_after_days)
     skipped = {pid for pid, at in prof.skipped_at.items() if at > cutoff}
     blocked = set(prof.decided_groups)
@@ -924,11 +1048,8 @@ def feed_candidates(db: Session, prof: Profile, *, include_skipped_after_days: i
         blocked |= {
             g for (g,) in db.query(Product.group_id).filter(Product.id.in_(skipped), Product.group_id.isnot(None))
         }
-    # Evidence is loaded only for pieces whose quality is not cached yet (presenter.Context.load_evidence), and
-    # photos only for the cards actually shown (presenter.load_images).
-    q = db.query(Product).filter(Product.status == "active")
     out = []
-    for p in q:
+    for p in active_products(db) if shared else db.query(Product).filter(Product.status == "active"):
         if p.id in prof.decided_ids or p.id in skipped:
             continue
         if p.group_id is not None and p.group_id in blocked:

@@ -179,7 +179,11 @@ def _strict_exclusion(
         return "seller_concerns"
     cat = p.category or "other"
     qs = (quality or {}).get("quality_score")
-    if above_judged_price(prof, cat, prof.fx.gbp(p.price, p.currency)) and (qs is None or qs < QUALITY_SUPPORTS_PRICE):
+    if (
+        cat in prof.price_ceiling  # (no judged price for this kind: nothing to convert)
+        and above_judged_price(prof, cat, prof.fx.gbp(p.price, p.currency))
+        and (qs is None or qs < QUALITY_SUPPORTS_PRICE)
+    ):
         return "price_ceiling"
     if owned_like(prof, p, backend) is not None:
         return "already_own"
@@ -216,12 +220,13 @@ def evaluate(
         post = pm.fit(db, space)
         known = [r for r in ranked if r.product.id in space.row]
         m = post.mean_logit([r.product.id for r in known])
-        for r, mi in zip(known, m, strict=True):
-            q = quality_lookup.get(r.product.id)
+        for r, mi in zip(known, m.tolist(), strict=True):
+            p = r.product
+            q = quality_lookup.get(p.id)
             base = _base_exclusion(r, cfg, q)
-            seller = sellers.get(r.product.seller_id) if r.product.seller_id else None
+            seller = sellers.get(p.seller_id) if p.seller_id else None
             strict = base or _strict_exclusion(r, cfg, prof, q, backend, seller)
-            cands.append(Candidate(r, float(mi), excluded={"balanced": base, "high": strict, "extreme": strict}))
+            cands.append(Candidate(r, mi, excluded={"balanced": base, "high": strict, "extreme": strict}))
         cal, state, ev, details = calibration.lifecycle(db)
         amap = None if cal is None else calibration.to_map(cal)
     except Exception as e:  # noqa: BLE001 - the feed must stay usable when the model or calibration fails
@@ -240,14 +245,14 @@ def evaluate(
 
     gate = Gate(mode, state, cfg, cands, calibration=amap, lifecycle=details)
     m = np.array([c.logit for c in cands])
-    est = _sigmoid(amap.a * m + amap.b)
+    est = _sigmoid(amap.a * m + amap.b).tolist()
     lowest = min(thresholds(cfg, md)[0] for md in MODES)
     # Uncertainty only where a bound could reach a target, or (Learning picks) for every eligible piece.
     pool = learning is True
     need = [c for c, e in zip(cands, est, strict=True) if e >= lowest or (pool and c.excluded["balanced"] is None)]
     _attach_sd(post, need)
     for c, e in zip(cands, est, strict=True):
-        c.estimate = float(e)
+        c.estimate = e
     for md in MODES:
         t, g = thresholds(cfg, md)
         if not need:

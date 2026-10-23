@@ -13,10 +13,14 @@ import { EmptyState, ErrorState, Skeleton } from "@/components/ui/misc";
 import { Input, Select, Textarea } from "@/components/ui/input";
 import { ProductTile } from "@/components/product/tile";
 import { PiecePanel, usePiece } from "@/components/product/side-panel";
+import { guarded, undoDecision, undoFailed } from "@/components/product/use-feedback";
 import { formatGBP, titleCase } from "@/lib/utils";
 
 type SavedResponse = { items: Product[]; totals: Record<string, { count: number; landed_gbp: number; with_estimate: number }> };
 type Saved = NonNullable<Product["saved"]>;
+/** A piece's saved details as the server reports them (PATCH /api/saved). */
+type SavedState = { list_name: string; priority: number | null; note: string | null; target_size: string | null; added_at?: string | null };
+const strip = (s: SavedState) => ({ list_name: s.list_name, priority: s.priority, note: s.note, target_size: s.target_size });
 
 const LISTS = SAVED_LISTS;
 const LIST_LABEL = SAVED_LIST_LABEL;
@@ -65,18 +69,21 @@ function SavedLists() {
 
   const save = async (p: Product, patch: Partial<Record<"list_name" | "priority" | "note" | "target_size", string | number | null>>) => {
     const before: Saved | null = p.saved;
-    await api.patch(`/api/saved/${p.id}`, patch);
+    const r = await api.patch<{ saved: SavedState | null }>(`/api/saved/${p.id}`, patch);
     await mutate();
     if (patch.list_name && before && patch.list_name !== before.list) {
-      toast(`Moved to ${LIST_LABEL[patch.list_name as string]}`, {
-        action: {
-          label: "Undo",
-          onClick: async () => {
-            await api.patch(`/api/saved/${p.id}`, { list_name: before.list });
-            mutate();
-          },
-        },
+      // Undo puts every detail back, and only if nothing changed since the move: a newer change is never overwritten.
+      const back = { list_name: before.list, priority: before.priority, note: before.note, target_size: before.target_size ?? null };
+      const undo = guarded(async () => {
+        try {
+          await api.patch(`/api/saved/${p.id}`, { ...back, expect: r.saved && strip(r.saved), expect_set: true });
+          toast("Undone");
+        } catch (e) {
+          undoFailed(e, undo);
+        }
+        mutate();
       });
+      toast(`Moved to ${LIST_LABEL[patch.list_name as string]}`, { action: { label: "Undo", onClick: undo } });
     } else {
       toast("Notes saved");
     }
@@ -88,19 +95,18 @@ function SavedLists() {
     await mutate((cur) => cur && { ...cur, items: cur.items.filter((i) => i.id !== p.id) }, { revalidate: false });
     setPicked((x) => x.filter((id) => id !== p.id));
     try {
-      const r = await api.del<{ ok: boolean; feedback_id: number | null }>(`/api/saved/${p.id}`);
+      const r = await api.del<{ ok: boolean; feedback_id: number | null; undo_token?: string }>(`/api/saved/${p.id}`);
       mutate();
-      toast(`Removed “${short(p.title)}” from ${from}`, {
-        action: r.feedback_id
-          ? {
-              label: "Undo",
-              onClick: async () => {
-                await api.del(`/api/feedback/${r.feedback_id}`); // restores its list, priority and notes
-                mutate();
-              },
-            }
-          : undefined,
+      const undo = guarded(async () => {
+        try {
+          await undoDecision({ feedback_id: r.feedback_id!, undo_token: r.undo_token }); // restores its list, priority and notes
+          toast("Undone");
+        } catch (e) {
+          undoFailed(e, undo);
+        }
+        mutate();
       });
+      toast(`Removed “${short(p.title)}” from ${from}`, { action: r.feedback_id ? { label: "Undo", onClick: undo } : undefined });
     } catch (e) {
       mutate();
       toast.error(`Not removed: ${e instanceof Error ? e.message : "the server did not answer"}`);

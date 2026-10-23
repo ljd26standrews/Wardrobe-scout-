@@ -25,7 +25,8 @@ stays available for comparison.
 "approval-v1" (earlier): Y = 1 for love, like or purchased; Y = 0 for any dislike or maybe; unsave withdraws.
 
 Either way: one label per garment family, from its latest labelled decision (listings of one garment are never
-independent evidence), and seed examples from your notes are not rated recommendations.
+independent evidence; a decision about a deleted listing counts with the listing now at its address, see
+services/provenance.py), and seed examples from your notes are not rated recommendations.
 """
 
 from __future__ import annotations
@@ -36,6 +37,7 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 
 from ..models import Feedback, Product
+from .provenance import live_families_by_url, norm_url
 
 LABEL_VERSION = "aesthetic-v2"
 VERSIONS = ("approval-v1", "aesthetic-v2")
@@ -118,9 +120,14 @@ def rated_outcomes(db: Session, before: datetime | None = None, version: str = L
     latest = latest_readings(query.order_by(Feedback.created_at, Feedback.id), version)
     ids = [k for k in latest if isinstance(k, int)]
     products = {p.id: p for p in db.query(Product).filter(Product.id.in_(ids))} if ids else {}
+    # A decision about a deleted listing belongs to the garment now listed at its address, if any (a re-import).
+    relinked = live_families_by_url(db, [(fb.snapshot or {}).get("source_url") for fb, _ in latest.values()
+                                         if fb.product_id is None])  # fmt: skip
     per_family: dict[str, tuple[Feedback, int]] = {}
     for fb, y in latest.values():
         fam = family_of(products.get(fb.product_id) if fb.product_id else None, fb.snapshot, fb.product_id)
+        if fb.product_id is None:
+            fam = relinked.get(norm_url((fb.snapshot or {}).get("source_url")) or "", fam)
         cur = per_family.get(fam)
         if cur is None or (fb.created_at, fb.id) > (cur[0].created_at, cur[0].id):
             per_family[fam] = (fb, y)

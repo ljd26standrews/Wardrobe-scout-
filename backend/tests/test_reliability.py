@@ -531,7 +531,7 @@ def test_existing_database_at_the_old_location_is_kept_not_orphaned(monkeypatch,
     (tmp_path / "mydata").mkdir()
     (tmp_path / "mydata" / "wardrobe_scout.db").write_bytes(b"")
     s = _settings_for(monkeypatch, tmp_path, tmp_path / "mydata")
-    assert s.database_url.endswith("mydata/wardrobe_scout.db")
+    assert Path(s.database_url.removeprefix("sqlite:///")) == tmp_path / "mydata" / "wardrobe_scout.db"
 
 
 def test_explicit_database_url_wins(monkeypatch, tmp_path):

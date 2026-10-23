@@ -8,6 +8,7 @@ every held-out seed (eval/RESULTS.md), so a failure here is a real signal.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -26,7 +27,9 @@ def test_bayes_engine_beats_baselines_on_simulated_user():
     proc = subprocess.run(
         [sys.executable, "-c", SCRIPT],
         cwd=BACKEND,
-        env={"PYTHONPATH": str(BACKEND), "PATH": "/usr/bin:/bin"},
+        env={**{k: v for k, v in os.environ.items()
+                if k.upper() in {"PATH", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "COMSPEC", "PATHEXT"}},
+             "PYTHONPATH": str(BACKEND)},
         capture_output=True,
         text=True,
         timeout=600,

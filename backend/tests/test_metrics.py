@@ -153,18 +153,27 @@ def test_served_feed_metrics_count_empty_feeds_discoveries_and_repeats(env, db):
     feed("f2", "selective", "high", [], 1)  # empty
     feed("f3", "selective", "balanced", ps[1:3], 2)
     db.flush()
-    for fid, p, minutes, surface in (("f1", ps[0], 0, "card"), ("f1", ps[0], 0, "grid"), ("f1", ps[1], 0, "card"),
-                                     ("f3", ps[1], 2, "card")):  # fmt: skip
-        db.add(Impression(feed_id=fid, product_id=p.id, surface=surface, shown_at=t0 + timedelta(minutes=minutes)))
+    from app.services import exposure
+
+    # Records of the earlier definition (rendered tiles, visible or not): reported, never a denominator.
+    for p in ps:
+        db.add(Impression(feed_id="f1", product_id=p.id, surface="grid", shown_at=t0))
     db.add(Feedback(product_id=ps[0].id, action="like", created_at=t0 + timedelta(minutes=5)))  # after seeing it
     db.add(Feedback(product_id=ps[1].id, action="dislike", created_at=t0 + timedelta(minutes=5)))
     db.commit()
     out = served_feeds(db)
     assert out["empty_feeds"]["selective:high"] | {} == {"count": 1, "of": 1, "rate": None, "interval": None}
     assert out["empty_feeds"]["selective:balanced"]["count"] == 0
-    assert (
-        out["discoveries_per_inspection"]["all"]["count"] == 1 and out["discoveries_per_inspection"]["all"]["of"] == 2
-    )
-    assert (
-        out["repetition"]["count"] == 1 and out["repetition"]["of"] == 3
-    )  # ps[1] again in f3; the grid is not a repeat
+    assert out["legacy_records"] == 4
+    assert "unavailable" in out["discoveries_per_exposure"] and "unavailable" in out["repetition"]
+
+    for i, (fid, p, minutes, surface) in enumerate((("f1", ps[0], 0, "card"), ("f1", ps[0], 0, "grid"),
+                                                    ("f1", ps[1], 0, "card"), ("f3", ps[1], 2, "card"))):  # fmt: skip
+        db.add(Impression(feed_id=fid, product_id=p.id, surface=surface, shown_at=t0 + timedelta(minutes=minutes),
+                          definition=exposure.DEFINITION, event_id=f"event-{i:04d}", dwell_ms=1200))  # fmt: skip
+    db.commit()
+    out = served_feeds(db)
+    assert out["exposure_definition"] == exposure.DEFINITION and out["legacy_records"] == 4
+    disc = out["discoveries_per_exposure"]["all"]
+    assert disc["count"] == 1 and disc["of"] == 2  # the legacy records of ps[2] and ps[3] are not exposures
+    assert out["repetition"]["count"] == 1 and out["repetition"]["of"] == 3  # ps[1] again in f3; the grid is not

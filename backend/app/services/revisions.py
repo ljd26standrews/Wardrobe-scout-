@@ -29,6 +29,9 @@ PRODUCT_CONTENT = ("seller_id", "title_original", "title_en", "description_en", 
 # revision name -> (table, columns whose update counts; None: any)
 TRACKED: dict[str, tuple[str, tuple[str, ...] | None]] = {
     "products": ("products", PRODUCT_CONTENT),
+    "photos": ("products", ("image_embedding", "embedding_backend")),  # photo vectors written (re-analysis)
+    "addresses": ("products", ("source_url",)),  # a listing's address (identity across re-imports)
+    "calibrations": ("calibrations", None),  # fitted, withdrawn, rolled back
     "evidence": ("evidence", None),
     "relations": ("product_relations", None),
     "feedback": ("feedback", None),

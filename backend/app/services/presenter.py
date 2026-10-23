@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import threading
+from collections import namedtuple
 
 from sqlalchemy import inspect as sa_inspect
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import set_committed_value
 
@@ -13,7 +15,7 @@ from . import dedup, revisions
 from .landed_cost import estimate_landed_cost
 from .money import code, rates
 from .quality import assess, category_price_stats, evidence_view
-from .recommender import Ranked
+from .recommender import LISTING_COLUMNS, Ranked, active_products
 from .settings_store import get_setting
 
 RELATION_LABEL = {
@@ -25,18 +27,43 @@ RELATION_LABEL = {
 }
 
 
-# Quality assessments shared across requests, keyed by everything they depend on: products, evidence, relations,
-# settings (revisions.py) and the conversion rates. A decision changes none of those, so the feed refreshed after
-# each decision reuses them; an evidence edit, a match decision, an import or a product update recomputes them.
+# Quality assessments use per-garment signatures (including evidence, median price and equivalent offers).
+# Settings, relations, seller metadata, rates and database replacement invalidate the enclosing cache.
+# A scan can add a listing and its evidence without throwing away every other garment assessment.
 _quality_lock = threading.Lock()
 _quality_cache: dict = {"key": None, "items": {}}
 
 
-def _shared_quality(key: tuple) -> dict[int, dict]:
+def _shared_quality(key: tuple) -> dict[int, tuple]:
     with _quality_lock:
         if _quality_cache["key"] != key:
             _quality_cache.update(key=key, items={})
         return _quality_cache["items"]
+
+
+# Immutable scalar evidence records, grouped once per database revision. A newly scanned seller claim must not
+# invalidate the assessment of every other garment. Include every column in each assessment's signature.
+_EVIDENCE_COLUMNS = tuple(c.key for c in sa_inspect(Evidence).column_attrs)
+_EvidenceRow = namedtuple("EvidenceRow", _EVIDENCE_COLUMNS)
+_evidence_lock = threading.Lock()
+_evidence_cache: dict = {"key": None, "products": {}, "sellers": {}}
+
+
+def _evidence_snapshot(db: Session) -> tuple[dict, dict]:
+    key = revisions.current(db, "evidence")
+    with _evidence_lock:
+        if _evidence_cache["key"] != key:
+            products, sellers = {}, {}
+            query = select(*[c.columns[0] for c in sa_inspect(Evidence).column_attrs]).order_by(Evidence.id)
+            for row in db.execute(query):
+                e = _EvidenceRow(*row)
+                if e.product_id is not None:
+                    products.setdefault(e.product_id, []).append(e)
+                elif e.seller_id is not None:
+                    sellers.setdefault(e.seller_id, []).append(e)
+            _evidence_cache.update(key=key, products={k: tuple(v) for k, v in products.items()},
+                                   sellers={k: tuple(v) for k, v in sellers.items()})
+        return _evidence_cache["products"], _evidence_cache["sellers"]
 
 
 def _load_children(db: Session, products: list[Product], attr: str, model, order) -> None:
@@ -57,6 +84,31 @@ def load_images(db: Session, products: list[Product]) -> None:
     _load_children(db, products, "images", ProductImage, ProductImage.position)
 
 
+def rebind(db: Session, items: list, offers: dict[int, list]) -> tuple[list, dict[int, list[Product]]]:
+    """The items about to be shown (Ranked, or selective Candidates), with their listings and offers replaced by
+    copies from this session, so a card may load photos, the seller and evidence. The originals (shared, read-only
+    listings: recommender.Listing) are left untouched."""
+    import dataclasses
+
+    def product_of(it):
+        return it.ranked.product if hasattr(it, "ranked") else it.product
+
+    shown = [product_of(it).id for it in items]
+    originals = {p.id: p for p in [product_of(it) for it in items] + [o for pid in shown for o in offers.get(pid, [])]}
+    fresh = {p.id: p for p in db.query(Product).filter(Product.id.in_(originals))} if originals else {}
+    for pid in originals.keys() - fresh.keys():  # deleted since it was chosen: shown as it was, with no photos
+        fresh[pid] = Product(**{k: getattr(originals[pid], k) for k in LISTING_COLUMNS})
+    out = []
+    for it in items:
+        if hasattr(it, "ranked"):
+            out.append(
+                dataclasses.replace(it, ranked=dataclasses.replace(it.ranked, product=fresh[it.ranked.product.id]))
+            )
+        else:
+            out.append(dataclasses.replace(it, product=fresh[it.product.id]))
+    return out, {pid: [fresh[o.id] for o in offers.get(pid, [])] for pid in shown}
+
+
 class Context:
     """Per-request caches so list endpoints don't repeat expensive lookups."""
 
@@ -68,27 +120,53 @@ class Context:
         self.price_stats = category_price_stats(db, self.fx)
         self.sellers = {s.id: s for s in db.query(Seller).all()}
         self.saved = {s.product_id: s for s in db.query(SavedItem).all()}
-        self._seller_ev: dict[int, list[Evidence]] = {}
         self._quality: dict[int, dict] = {}
         self._strong: dict[int, list[int]] | None = None
         self.price_filter: dict | None = None  # the feed's price filter as applied (api/products.price_filter)
-        rev = revisions.current(db, "products", "evidence", "relations", "settings")
+        rev = revisions.current(db, "relations", "settings", "sellers")
         self._shared = _shared_quality((rev, tuple(sorted(self.fx.to_gbp.items()))))
+        self._offers: dict | None = None
+        self._quality_inputs: dict[int, tuple] = {}
+        self._evidence: tuple[dict, dict] | None = None
         self.hidden: dict | None = None  # categories you hid from Discover, and how many pieces that left out
 
     def load_evidence(self, products: list[Product]) -> None:
         """Evidence for the pieces whose quality assessment is not cached yet; a cached assessment needs none."""
-        cold = [p for p in products if p.id not in self._quality and p.id not in self._shared]
+        cold = [p for p in products if p.id not in self._quality]
         _load_children(self.db, cold, "evidence", Evidence, Evidence.id)
 
+    def _quality_input(self, p) -> tuple:
+        # Only fields read by assess(), including the current category median and other offers.
+        # Each garment and seller evidence record is included; scans invalidate just changed inputs.
+        if p.id not in self._quality_inputs:
+            if self._evidence is None:
+                self._evidence = _evidence_snapshot(self.db)
+            cheaper = self.cheaper_equivalent(p)
+            signature = (p.seller_id, p.category, p.price, p.currency,
+                         self.price_stats.get(p.category or "other"),
+                         tuple(cheaper.items()) if cheaper else None,
+                         self._evidence[0].get(p.id, ()), self._evidence[1].get(p.seller_id, ()))
+            self._quality_inputs[p.id] = (signature, cheaper)
+        return self._quality_inputs[p.id]
+
+    def prime_quality(self, products: list) -> None:
+        """Assess changed inputs only, using bulk evidence and plain listing records, without constructing
+        thousands of ORM products. Unchanged assessments survive a scan; changed medians affect their category."""
+        cold = []
+        for p in products:
+            signature, _ = self._quality_input(p)
+            hit = self._shared.get(p.id)
+            if hit is not None and hit[0] == signature:
+                self._quality[p.id] = hit[1]
+            else:
+                cold.append(p)
+        for p in cold:
+            self.quality(p)
+
     def seller_evidence(self, seller_id: int | None) -> list[Evidence]:
-        if not seller_id:
-            return []
-        if seller_id not in self._seller_ev:
-            self._seller_ev[seller_id] = (
-                self.db.query(Evidence).filter(Evidence.seller_id == seller_id, Evidence.product_id.is_(None)).all()
-            )
-        return self._seller_ev[seller_id]
+        if self._evidence is None:
+            self._evidence = _evidence_snapshot(self.db)
+        return list(self._evidence[1].get(seller_id, ()))
 
     def _strong_neighbours(self, product_id: int) -> list[int]:
         # Loaded once per request instead of one query per product (feeds rank many products).
@@ -109,7 +187,9 @@ class Context:
             return None
         best = None
         for other_id in self._strong_neighbours(p.id):
-            o = self.db.get(Product, other_id)
+            if self._offers is None:
+                self._offers = {o.id: o for o in active_products(self.db)}
+            o = self._offers.get(other_id)
             if (
                 o
                 and o.price
@@ -129,22 +209,23 @@ class Context:
         }
 
     def quality(self, p: Product, design: float | None = None, design_conf: float | None = None) -> dict:
-        """The quality assessment (shared across requests until its inputs change), with this request's taste
-        compatibility when given. Never mutate the result: it is shared."""
+        """Shared assessment with this request's design compatibility. Results are never mutated."""
         base = self._quality.get(p.id)
         if base is None:
-            base = self._shared.get(p.id)
+            signature, cheaper = self._quality_input(p)
+            hit = self._shared.get(p.id)
+            base = hit[1] if hit is not None and hit[0] == signature else None
             if base is None:
+                evidence = list(self._evidence[0].get(p.id, ()))
                 base = assess(
-                    self.db,
-                    p,
-                    seller_evidence=self.seller_evidence(p.seller_id),
-                    price_stats=self.price_stats,
-                    cheaper_equivalent=self.cheaper_equivalent(p),
-                    fx=self.fx,
+                    self.db, p, evidence=evidence,
+                    seller_evidence=self.seller_evidence(p.seller_id), price_stats=self.price_stats,
+                    cheaper_equivalent=cheaper, fx=self.fx,
                 )
                 with _quality_lock:
-                    self._shared[p.id] = base
+                    self._shared[p.id] = (signature, base)
+                    if len(self._shared) > 50000:
+                        self._shared.pop(next(iter(self._shared)))
             self._quality[p.id] = base
         if design is None:
             return base

@@ -3,6 +3,8 @@ time, and does each mode deliver what it aims for?
 
 Usage (from backend/):
     .venv/bin/python -m eval.selective               # both protocols, on a copy of your database
+    .venv/bin/python -m eval.selective --benchmark pilot@v1   # Evaluate grades from a frozen benchmark version, trained
+                                                              # on its snapshot (or --training live [--cutoff ISO])
     .venv/bin/python -m eval.selective --db PATH     # another database file
     .venv/bin/python -m eval.selective --block 20    # rolling-origin block size (default 10)
     .venv/bin/python -m eval.selective --labels approval-v1   # the earlier reading of decisions, for comparison
@@ -18,7 +20,9 @@ Protocols
    describe that population, not the whole catalogue, and no inverse-propensity correction is claimed for it
    (the main feed is deterministic; only Learning picks log inclusion probabilities).
 2. **Representative.** Your Evaluate-page grades: pieces drawn uniformly from readable undecided listings,
-   graded for taste alone (2-3 = approval). Training uses every decision except those about graded families.
+   graded for taste alone (2-3 = approval), one record per garment (eval/heldout.py). Training uses everything
+   except what is linked to a graded garment (decisions under any of its listings or addresses, linked wardrobe
+   pieces, inspiration photos that are its photographs; services/provenance.py).
    Coverage here estimates the share of candidates a mode would show. Thresholds are suggested on one half of
    the graded families and reported on the other.
 
@@ -31,8 +35,10 @@ unfamiliar-seller slice). Comparisons at the same coverage count tied scores at 
 ties were ordered at random, so no method gains from an arbitrary tie order.
 
 3. **Served feeds**, from Discover's own logs: how often a feed request came back empty, approvals per piece you
-   actually saw (useful discoveries per inspection), and how often a piece you had already seen was shown again
-   (repetition), each with counts and intervals.
+   actually saw (useful discoveries per exposure) and how often a piece you had already seen was seen again
+   (repetition), each with counts and intervals. "Saw" is an exposure under app/services/exposure.py's versioned
+   definition (on screen long enough, or decided about while on screen); older records of rendered tiles are
+   reported, never used as a denominator.
 
 Refusals: no calibration metric below MIN_PREDICTIONS predictions or MIN_EACH of either outcome; no precision
 below MIN_SELECTED selected pieces. Nothing here uses synthetic data; tests/test_eval_selective.py checks the
@@ -73,6 +79,9 @@ class Prediction:
     bounds: dict[str, float] = field(default_factory=dict)  # conservative bound per mode
     score: float | None = None  # representative protocol: the full Discover score
     familiar_seller: bool | None = None  # had you rated a piece from its seller before? (None: seller unknown)
+    unit: str | None = None  # split unit: garments that may become one share it (eval/heldout.py)
+    profile: float | None = None  # representative protocol: your written profile's score alone (no learning)
+    category: str | None = None  # the piece's garment type, for slices
 
 
 # ----------------------------------------------------------------- metrics
@@ -190,6 +199,7 @@ def rolling_origin(
 ) -> list[Prediction]:
     from app.services import calibration
     from app.services.approval_data import LABEL_VERSION, rated_outcomes
+    from app.services.provenance import Identity
     from app.services.settings_store import get_setting
 
     version = version or LABEL_VERSION
@@ -197,12 +207,13 @@ def rolling_origin(
     outcomes = rated_outcomes(db, version=version)
     space = calibration._space(db)
     seller = _sellers(db, outcomes)
+    ident = Identity(db)  # identity as it is now: a later match or re-import widens what is held out
     preds: list[Prediction] = []
     for b, i in enumerate(range(first, len(outcomes), block)):
         test = outcomes[i : i + block]
         cutoff = test[0].created_at
-        held = frozenset(o.family for o in test)
-        train = [o for o in rated_outcomes(db, before=cutoff, version=version) if o.family not in held]
+        held = ident.resolve(families={o.family for o in test})
+        train = [o for o in rated_outcomes(db, before=cutoff, version=version) if not held.covers_outcome(o)]
         new = predict(db, space, cfg, test, train=train, exclude=held, before=cutoff, block=b, n_train=len(train),
                       version=version)  # fmt: skip
         known = {seller.get(o.feedback_id) for o in train} - {None}
@@ -310,51 +321,78 @@ def unfamiliar_slice(preds: list[Prediction], cfg: dict) -> dict:
 
 
 # ----------------------------------------------------------------- representative protocol
-def representative(db, seed: int = 0) -> dict:
-    """Train on everything except graded families; test on your uniformly sampled Evaluate grades.
+def representative(db, seed: int = 0, test=None) -> dict:
+    """Train on everything not linked to a graded garment; test on your uniformly sampled Evaluate grades, one record
+    per garment (eval/heldout.py). ``test``: an eval/heldout.TestSet (a frozen benchmark's records); default, your
+    current grades, unfrozen.
 
-    Deletes the graded families' decisions from the session's database: run it on a copy, and last."""
-    from app.models import Feedback, Judgement, Product
+    Deletes everything linked to the graded garments from the session's database: run it on a copy, and last."""
+    from app.models import Product
     from app.services import calibration
-    from app.services.approval_data import rated_outcomes
-    from app.services.recommender import rank_products
+    from app.services.approval_data import RatedOutcome, rated_outcomes
+    from app.services.provenance import Identity
+    from app.services.recommender import rank_products, rules_component
     from app.services.settings_store import get_setting
 
+    from .heldout import describe, purge_copy, unfrozen
+
     cfg = get_setting(db, "selective")
-    judged = [j for j in db.query(Judgement).order_by(Judgement.id) if j.product_id is not None]
-    products = {p.id: p for p in db.query(Product).filter(Product.id.in_([j.product_id for j in judged]))}
-    judged = [j for j in judged if j.product_id in products]
-    liked = sum(j.taste >= 2 for j in judged)
-    summary = {"judgements": len(judged), "liked": liked}
-    if len(judged) < MIN_JUDGEMENTS or liked < MIN_LIKED:
-        return {"summary": summary | {"refused": f"needs {MIN_JUDGEMENTS} graded pieces including {MIN_LIKED} liked"}}
-    families = frozenset(j.family_key for j in judged)
-    members = {p.id for p in db.query(Product) if (f"g{p.group_id}" if p.group_id else f"p{p.id}") in families}
-    removed = db.query(Feedback).filter(Feedback.product_id.in_(members)).delete(synchronize_session=False)
-    db.commit()  # the copy: nothing about a graded family can reach training, the background or the ranking
-    summary["training_decisions_removed"] = removed
+    ident = Identity(db)
+    test = test or unfrozen(db, ident)
+    scored = [g for g in test.garments if g.product_id is not None]
+    summary = describe(test)
+    if len(scored) < MIN_JUDGEMENTS or summary["liked"] < MIN_LIKED:
+        return {"summary": summary | {"refused": f"needs {MIN_JUDGEMENTS} graded garments including {MIN_LIKED} liked"}}
+    held = ident.resolve(**test.seeds)
+    removed = purge_copy(db, held)  # the copy: nothing linked to a graded garment can reach any method
+    summary |= {"training_decisions_removed": removed["decisions"], "training_removed": removed,
+                "held_out": held.summary()}  # fmt: skip
+    products = {p.id: p for p in db.query(Product).filter(Product.id.in_([g.product_id for g in scored]))}
     space = calibration._space(db)
     train = rated_outcomes(db)
-    from app.services.approval_data import RatedOutcome
-
-    test = [RatedOutcome(j.family_key, j.product_id, -j.id, int(j.taste >= 2), "graded", [], j.created_at)
-            for j in judged]  # fmt: skip
-    preds = predict(db, space, cfg, test, train=train, exclude=frozenset(), before=None, block=0, n_train=len(train))
-    ranked = {r.product.id: r.score for r in rank_products(db, [products[j.product_id] for j in judged])}
+    graded = [RatedOutcome(g.family, g.product_id, -g.judgement_ids[0], g.approved, "graded", [], g.created_at,
+                           snapshot=g.snapshot) for g in scored]  # fmt: skip
+    preds = predict(db, space, cfg, graded, train=train, exclude=frozenset(), before=None, block=0, n_train=len(train))
+    ranked = {r.product.id: r.score for r in rank_products(db, [products[g.product_id] for g in scored])}
+    taste = get_setting(db, "taste_profile")
     known = set(_sellers(db, train).values())
-    for p, j in zip(preds, judged, strict=True):
-        p.score = ranked.get(j.product_id)
-        seller = products[j.product_id].seller
-        p.familiar_seller = None if seller is None else seller.name in known
+    for p, g in zip(preds, scored, strict=True):
+        product = products[g.product_id]
+        p.score = ranked.get(g.product_id)
+        p.profile = rules_component(product, taste)[0]
+        p.category = (g.snapshot or {}).get("category") or product.category
+        p.unit = g.unit
+        p.familiar_seller = None if product.seller is None else product.seller.name in known
     out = {"summary": summary, **summarise(preds, cfg)}
+    out["categories"] = category_slices(preds, cfg)
     cal = [p for p in preds if p.estimate is not None]
     if not cal:
         return out
-    for mode, (t, _) in _modes(cfg).items():  # the full Discover score (taste, quality, value, ...) as baseline
+    for mode, (t, _) in _modes(cfg).items():
+        # At the gate's own coverage: your written profile alone, the learned taste ranking (already reported, within
+        # each block) and the full Discover score (taste, quality, value, ...), each taking as many pieces.
         n = sum(1 for p in cal if p.bounds[mode] >= t)
+        y = [p.y for p in cal]
         score = [p.score if p.score is not None else -1e9 for p in cal]
-        out["modes"][mode]["discover_score_same_coverage"] = precision_of(expected_top(score, [p.y for p in cal], n), n)
-    out["suggested_thresholds"] = suggest_thresholds(cal, cfg, seed)
+        out["modes"][mode]["discover_score_same_coverage"] = precision_of(expected_top(score, y, n), n)
+        out["modes"][mode]["written_profile_same_coverage"] = precision_of(expected_top([p.profile for p in cal], y, n), n)
+    # A benchmark's halves are the ones frozen with it.
+    out["suggested_thresholds"] = suggest_thresholds(cal, cfg, test.source.get("split_seed", seed))
+    return out
+
+
+def category_slices(preds: list[Prediction], cfg: dict) -> dict:
+    """Per garment type: how many graded pieces, how many approved, and what each mode's gate selects (with refusals
+    below the minimum sample, as everywhere)."""
+    out: dict = {}
+    for cat in sorted({p.category or "unknown" for p in preds}):
+        ps = [p for p in preds if (p.category or "unknown") == cat]
+        cal = [p for p in ps if p.estimate is not None]
+        row = {"predictions": len(ps), "approvals": int(sum(p.y for p in ps)), "all": precision([p.y for p in ps])}
+        for mode, (t, _) in _modes(cfg).items():
+            chosen = [p.y for p in cal if p.bounds[mode] >= t]
+            row[mode] = precision(chosen) | {"coverage": round(len(chosen) / len(cal), 4) if cal else None}
+        out[cat] = row
     return out
 
 
@@ -362,11 +400,11 @@ def suggest_thresholds(preds: list[Prediction], cfg: dict, seed: int = 0) -> dic
     """Per mode: on a validation half (by family), the lowest bound threshold whose precision reaches the
     target with at least MIN_SELECTED pieces; then that threshold's precision on the other half."""
 
-    def half(f: str) -> int:
-        return int(hashlib.sha256(f"{seed}:{f}".encode()).hexdigest(), 16) % 2
+    def half(p: Prediction) -> int:  # by split unit: garments that may become one stay on one side
+        return int(hashlib.sha256(f"{seed}:{p.unit or p.family}".encode()).hexdigest(), 16) % 2
 
-    val = [p for p in preds if half(p.family) == 0]
-    test = [p for p in preds if half(p.family) == 1]
+    val = [p for p in preds if half(p) == 0]
+    test = [p for p in preds if half(p) == 1]
     out = {}
     for mode, (t, _) in _modes(cfg).items():
         found = None
@@ -399,10 +437,17 @@ def served_feeds(db) -> dict:
 
     * Empty feeds: feed requests that returned nothing, by policy and mode. Discover asks for a feed on every visit
       and after every decision, so these are requests, not sessions.
-    * Useful discoveries per inspection: of the garment families you actually saw, the share you then approved
-      (love, like or purchased, decided after first seeing it), once per family, by the feed that first showed it.
-    * Repetition: a family shown again in a later feed after you had already seen it."""
+    * Useful discoveries per exposure: of the garment families you actually saw (an exposure under the current
+      definition, services/exposure.py: on screen long enough, or decided about while on screen), the share you then
+      approved (love, like or purchased, decided after first seeing it), once per family, by the feed that first
+      showed it.
+    * Repetition: a family seen again in a later feed after you had already seen it. One continuous stretch on screen
+      is one exposure however many feed answers arrive meanwhile, so a refresh is not a repeat.
+
+    Records made before the current definition (rendered tiles, visible or not) are counted and reported, never used
+    as a denominator: with no exposure under the current definition both rates are reported as unavailable."""
     from app.models import FeedRequest, Impression, Product
+    from app.services import exposure
     from app.services.approval_data import rated_outcomes
 
     feeds = {f.id: f for f in db.query(FeedRequest)}
@@ -411,18 +456,26 @@ def served_feeds(db) -> dict:
         r = requests.setdefault(f.policy if not f.mode else f"{f.policy}:{f.mode}", [0, 0])
         r[0] += 1
         r[1] += not f.items
+    legacy = db.query(Impression).filter(Impression.definition.is_(None)).count()
+    out = {"empty_feeds": {k: _rate(e, n) for k, (n, e) in sorted(requests.items())},
+           "exposure_definition": exposure.DEFINITION, "legacy_records": legacy}  # fmt: skip
+    query = db.query(Impression).filter(Impression.product_id.isnot(None), Impression.definition == exposure.DEFINITION)
+    events = query.order_by(Impression.shown_at, Impression.id).all()
+    if not events:
+        why = (f"no exposure recorded under {exposure.DEFINITION} yet"
+               + (f"; {legacy} earlier records counted rendered tiles, visible or not, and are not used" if legacy else ""))  # fmt: skip
+        return out | {"discoveries_per_exposure": {"unavailable": why}, "repetition": {"unavailable": why}}
     group_of = dict(db.query(Product.id, Product.group_id))
     labels = {o.family: o for o in rated_outcomes(db)}
     first: dict[str, tuple] = {}  # family -> (first seen, the feed policy that showed it)
     seen_in: dict[str, set] = {}
     displays = repeats = 0
-    query = db.query(Impression).filter(Impression.product_id.isnot(None))
-    for imp in query.order_by(Impression.shown_at, Impression.id):
+    for imp in events:
         gid = group_of.get(imp.product_id)
         family = f"g{gid}" if gid is not None else f"p{imp.product_id}"
         feeds_seen = seen_in.setdefault(family, set())
         if imp.feed_id in feeds_seen:
-            continue  # shown twice by one feed (as a card and in the grid): one display
+            continue  # seen twice within one feed (as a card and in the grid, or scrolled back to): one display
         displays += 1
         repeats += bool(feeds_seen)
         feeds_seen.add(imp.feed_id)
@@ -436,9 +489,8 @@ def served_feeds(db) -> dict:
         f[0] += bool(o is not None and o.y == 1 and o.created_at >= at)
         f[1] += 1
     total = [sum(v[0] for v in found.values()), sum(v[1] for v in found.values())]
-    return {
-        "empty_feeds": {k: _rate(e, n) for k, (n, e) in sorted(requests.items())},
-        "discoveries_per_inspection": {"all": _rate(*total), **{k: _rate(*v) for k, v in sorted(found.items())}},
+    return out | {
+        "discoveries_per_exposure": {"all": _rate(*total), **{k: _rate(*v) for k, v in sorted(found.items())}},
         "repetition": _rate(repeats, displays),
     }
 
@@ -464,7 +516,20 @@ def _cal_line(name: str, c: dict) -> str:
 
 def report(result: dict) -> str:
     lines = ["# Selective recommendation: measured on your own outcomes", "",
-             f"Decisions read as `{result.get('labels', 'aesthetic-v2')}` (approval_data.py).", ""]  # fmt: skip
+             f"Decisions read as `{result.get('labels', 'aesthetic-v2')}` (approval_data.py)."]  # fmt: skip
+    src = ((result.get("representative") or {}).get("summary") or {}).get("test_set") or {"kind": "unfrozen"}
+    if src["kind"] == "benchmark":
+        lines.append(f"Evaluate grades: benchmark {src['benchmark']} (frozen {src['frozen_at'][:19]}, hash "
+                     f"{src['hash'][:16]}); training data: "
+                     + ("its snapshot." if src["training"] == "snapshot" else
+                        f"your database now{' before ' + src['cutoff'] if src.get('cutoff') else ''}."))  # fmt: skip
+    else:
+        lines.append("Evaluate grades: your current grades, not frozen (python -m eval.benchmark freeze).")
+    if (run := result.get("run")) is not None:
+        lines.append(f"Engine {run['engine']}, photo analysis {run['image_backend']} "
+                     f"({', '.join(f'{k}: {v}' for k, v in run['data']['photo_analysis'].items())} listings), "
+                     f"settings {run['settings_sha256'][:12]}, code {run['code'].get('git_commit', '?')[:12]}.")  # fmt: skip
+    lines.append("")
     for key, title in (("logged", "Logged decisions, rolling origin"), ("representative", "Evaluate grades")):
         r = result.get(key) or {}
         lines += [f"## {title}", ""]
@@ -497,13 +562,24 @@ def report(result: dict) -> str:
                       _cal_line("raw σ(m)", u["raw"]), _cal_line("calibrated", u["calibrated"]), ""]  # fmt: skip
     served = result.get("served")
     if served:
-        lines += ["## Served feeds (Discover's logs)", "", "| | Count | Rate [95% CI] |", "|---|---|---|"]
+        lines += ["## Served feeds (Discover's logs)", "",
+                  f"Exposure: `{served.get('exposure_definition', '?')}` (app/services/exposure.py)."
+                  + (f" {served['legacy_records']} earlier records counted rendered tiles and are not used."
+                     if served.get("legacy_records") else ""), "",
+                  "| | Count | Rate [95% CI] |", "|---|---|---|"]  # fmt: skip
         for k, r in served["empty_feeds"].items():
             lines.append(f"| Empty feed requests, {k} | {r['count']} of {r['of']} | {_share(r)} |")
-        for k, r in served["discoveries_per_inspection"].items():
-            lines.append(f"| Approved after first seeing it, {k} | {r['count']} of {r['of']} | {_share(r)} |")
+        disc = served["discoveries_per_exposure"]
+        if "unavailable" in disc:
+            lines.append(f"| Approved after first seeing it | – | unavailable: {disc['unavailable']} |")
+        else:
+            for k, r in disc.items():
+                lines.append(f"| Approved after first seeing it, {k} | {r['count']} of {r['of']} | {_share(r)} |")
         r = served["repetition"]
-        lines += [f"| Shown again after you had seen it | {r['count']} of {r['of']} | {_share(r)} |", ""]
+        if "unavailable" in r:
+            lines += [f"| Seen again after you had seen it | – | unavailable: {r['unavailable']} |", ""]
+        else:
+            lines += [f"| Seen again after you had seen it | {r['count']} of {r['of']} | {_share(r)} |", ""]
     lines += ["Targets are aspirations: a mode meets its target only when the lower end of its interval clears it. "
               "Rates below the minimum sample are shown as counts only."]  # fmt: skip
     return "\n".join(lines)
@@ -515,7 +591,7 @@ def _share(r: dict) -> str:
     return f"{_pct(r['rate'])} [{_pct(r['interval'][0])}, {_pct(r['interval'][1])}]"
 
 
-def run_all(db, *, block: int = BLOCK, seed: int = 0, labels: str | None = None) -> dict:
+def run_all(db, *, block: int = BLOCK, seed: int = 0, labels: str | None = None, test=None) -> dict:
     from app.services.approval_data import LABEL_VERSION
     from app.services.preference_model import ENGINE_VERSION
     from app.services.settings_store import get_setting
@@ -529,13 +605,17 @@ def run_all(db, *, block: int = BLOCK, seed: int = 0, labels: str | None = None)
     served = served_feeds(db)  # before the representative protocol, which deletes decisions from the copy
     return {"engine_version": ENGINE_VERSION, "labels": labels_version, "settings": cfg, "block": block,
             "label_set_hash": label_hash, "logged": logged, "served": served,
-            "representative": representative(db, seed)}  # fmt: skip
+            "representative": representative(db, seed, test)}  # fmt: skip
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--db", help="database file (default: this installation's)")
-    ap.add_argument("--data-dir", help="where results are saved (default: WS_DATA_DIR)")
+    ap.add_argument("--data-dir", help="where benchmarks and results are kept (default: WS_DATA_DIR)")
+    ap.add_argument("--benchmark", help="a frozen benchmark version for the representative protocol, e.g. pilot@v1")
+    ap.add_argument("--training", choices=("snapshot", "live"), default="snapshot",
+                    help="with --benchmark: train on its snapshot (default) or on your database now")
+    ap.add_argument("--cutoff", help="with --training live: only what was known before this time (ISO 8601)")
     ap.add_argument("--block", type=int, default=BLOCK)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--labels", choices=("approval-v1", "aesthetic-v2"), help="reading of decisions (default: current)")
@@ -543,26 +623,51 @@ def main(argv: list[str] | None = None) -> int:
 
     from app.config import get_settings
 
-    from .dbcopy import open_copy, source_database
+    from . import benchmark as bm
+    from .dbcopy import close_copy, open_copy, source_database
 
     src = source_database(args.db)
     if not src.is_file():
         print(f"database not found: {src}", file=sys.stderr)
         return 2
-    out_dir = (Path(args.data_dir) if args.data_dir else get_settings().data_dir) / "evaluation"
-    with tempfile.TemporaryDirectory(prefix="ws-eval-") as tmp:
-        db = open_copy(src, Path(tmp))
-        try:
-            result = run_all(db, block=args.block, seed=args.seed, labels=args.labels)
-        finally:
-            db.close()
+    data_dir = Path(args.data_dir) if args.data_dir else get_settings().data_dir
+    out_dir = data_dir / "evaluation"
+    cutoff = datetime.fromisoformat(args.cutoff) if args.cutoff else None
+    try:
+        bench = bm.load(data_dir, args.benchmark) if args.benchmark else None
+        with tempfile.TemporaryDirectory(prefix="ws-eval-") as tmp:
+            if bench is not None:
+                db = bm.open_training(bench, args.training, src, Path(tmp), cutoff)
+            elif cutoff is not None or args.training != "snapshot":
+                print("--training and --cutoff need --benchmark", file=sys.stderr)
+                return 2
+            else:
+                db = open_copy(src, Path(tmp))
+            try:
+                test = None
+                if bench is not None:
+                    test = bm.test_set(db, bench, args.training)
+                    test.source["cutoff"] = cutoff.isoformat() if cutoff else None
+                entry = bm.run_entry(db, "eval.selective", args.training if bench else "live", cutoff, None)
+                result = run_all(db, block=args.block, seed=args.seed, labels=args.labels, test=test)
+            finally:
+                close_copy(db)
+    except bm.BenchmarkError as e:
+        print(str(e), file=sys.stderr)
+        return 3
+    result["run"] = entry
     print(report(result))
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"selective-{datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}.json"
     path.write_text(json.dumps(result, indent=1, default=str))
     print(f"\nSaved: {path}")
+    if bench is not None:
+        bm.append_run(bench, {**entry, "result": str(path)})
     return 0
 
 
 if __name__ == "__main__":
+    from .console import configure_console
+
+    configure_console()
     sys.exit(main())

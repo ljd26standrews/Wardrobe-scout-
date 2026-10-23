@@ -33,7 +33,7 @@ const FLAGS = [
 export default function EvaluatePage() {
   const { data, error, isLoading, mutate } = useSWR<NextResponse>("/api/eval/next");
   const [flags, setFlags] = useState<Record<string, boolean>>({});
-  const [last, setLast] = useState<number | null>(null);
+  const [last, setLast] = useState<{ id: number; productId: number } | null>(null);
   const [busy, setBusy] = useState(false);
   const product = data?.product;
   const status = data?.status;
@@ -44,7 +44,7 @@ export default function EvaluatePage() {
       setBusy(true);
       try {
         const r = await api.post<{ id: number }>("/api/eval/judgements", { product_id: product.id, taste, ...flags });
-        setLast(r.id);
+        setLast({ id: r.id, productId: product.id });
         setFlags({});
         await mutate();
       } catch (e) {
@@ -57,10 +57,18 @@ export default function EvaluatePage() {
   );
 
   const undo = async () => {
-    if (last == null) return;
-    await api.del(`/api/eval/judgements/${last}`);
-    setLast(null);
-    toast("Last judgement removed");
+    if (last == null || busy) return;
+    setBusy(true);
+    try {
+      // With the graded piece, a repeated Undo (or an id since reused by a newer grade) changes nothing.
+      await api.del(`/api/eval/judgements/${last.id}?product_id=${last.productId}`);
+      setLast(null);
+      toast("Last judgement removed");
+    } catch (e) {
+      toast.error(e instanceof Error ? `Not undone: ${e.message}` : "Not undone", { action: { label: "Retry", onClick: () => void undo() } });
+    } finally {
+      setBusy(false);
+    }
     mutate();
   };
 

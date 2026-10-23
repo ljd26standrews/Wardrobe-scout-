@@ -3,7 +3,7 @@ import useSWR from "swr";
 import { toast } from "sonner";
 import { RefreshCw } from "lucide-react";
 import type { ObservedRate, ReliabilityBin, SelectiveStatus } from "@/lib/api";
-import { api, MODE_LABEL, MODES } from "@/lib/api";
+import { api, MODE_LABEL, MODES, staleReason } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, Tip } from "@/components/ui/misc";
@@ -172,7 +172,7 @@ export function SelectiveInsights() {
           sub={
             cal.calibration
               ? `${cal.calibration.map === "identity" ? "Model probabilities kept" : "Platt-scaled"} · ${timeAgo(cal.calibration.created_at)}` +
-                (cal.state === "stale" ? ` · ${cal.since?.new_decisions ?? 0} newer decisions not yet included` : "")
+                (cal.state === "stale" ? ` · ${staleReason(cal.since)}` : "")
               : cal.state === "pending"
                 ? "Calibrating now" + (cal.withdrawn ? ` (the last one was withdrawn: ${cal.withdrawn.label})` : "")
                 : cal.state === "failed"

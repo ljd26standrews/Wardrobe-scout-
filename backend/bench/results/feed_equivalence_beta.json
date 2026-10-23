@@ -1,0 +1,34 @@
+{
+  "synthetic": true,
+  "products": 3000,
+  "stages": {
+    "initial": {
+      "ranked": 2459,
+      "rankings_sha256": "4a7bf945a4b373fc0f9c2d61f09dd9822d78d682983438e0989e51cba3cf4556",
+      "features_sha256": "47002eafae067213fc1e8e22c4c67d7b9832b4c3130a3b93dd1bfe3cdc940c61",
+      "/api/feed": "c5438ae5854275fc8cdcf89b319cd9334441d35a91956a30fd5519781bd2a702",
+      "/api/feed/learning": "d195a3b28935bad01d319c0aa5746e75dc8fcf788fecb56044f5969fae9cce86"
+    },
+    "decision": {
+      "ranked": 2458,
+      "rankings_sha256": "134a26a4a17ab81480eab3c4dd631d00cf808804610cc7d628bcab19aadecafd",
+      "features_sha256": "47002eafae067213fc1e8e22c4c67d7b9832b4c3130a3b93dd1bfe3cdc940c61",
+      "/api/feed": "78fbf8757794f9369209bc04181c185a7cb26334afa8706fc54169d007d289ec",
+      "/api/feed/learning": "1aa73fbc6798517a2bc34837b2cf316d0ad175651708508e2856d18b7c90f28f"
+    },
+    "price": {
+      "ranked": 2458,
+      "rankings_sha256": "3fd0d3fe6f4ae063888a9c64727398008aa353652ef106ad970fc5e02f70934b",
+      "features_sha256": "47002eafae067213fc1e8e22c4c67d7b9832b4c3130a3b93dd1bfe3cdc940c61",
+      "/api/feed": "78fbf8757794f9369209bc04181c185a7cb26334afa8706fc54169d007d289ec",
+      "/api/feed/learning": "1aa73fbc6798517a2bc34837b2cf316d0ad175651708508e2856d18b7c90f28f"
+    },
+    "deleted": {
+      "ranked": 2457,
+      "rankings_sha256": "be646405ddb75364c3a83a5d62595179bbd6d5f28edc02ca1baf9b46d9ca824b",
+      "features_sha256": "63504b1b7072ccad5e02de0487a4db247319665b835f93c0bd57526c5feb8941",
+      "/api/feed": "5b559977494222f1910995a2b95efe18adbf797820d9b85f915c840aeb7c009a",
+      "/api/feed/learning": "9705526e13f642385f40fc587c6721a79918950b0a17540657903a0260d16e26"
+    }
+  }
+}

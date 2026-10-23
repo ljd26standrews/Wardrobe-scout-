@@ -23,6 +23,7 @@ import secrets
 from sqlalchemy.orm import Session
 
 from ..models import Feedback, Judgement, Product
+from .provenance import live_families_by_url
 from .settings_store import get_setting, set_setting
 
 MIN_TEST_JUDGEMENTS = 40  # below this, the evaluator reports nothing
@@ -49,11 +50,14 @@ def eligible_families(db: Session) -> dict[str, Product]:
     """Readable, undecided listings, one per family: the pool test items are drawn from.
 
     Readable means a title, a stated price and at least one analysed photo. Undecided means no Discover
-    decision on any listing of the family (skips don't count: they teach nothing)."""
+    decision on any listing of the family, nor on a deleted listing at the address of one (skips don't count: they
+    teach nothing)."""
     decided = {
         pid
         for (pid,) in db.query(Feedback.product_id).filter(Feedback.product_id.isnot(None), Feedback.action != "skip")
     }
+    orphans = db.query(Feedback.snapshot).filter(Feedback.product_id.is_(None), Feedback.action != "skip")
+    relinked = set(live_families_by_url(db, [(snap or {}).get("source_url") for (snap,) in orphans]).values())
     products = (
         db.query(Product)
         .filter(
@@ -65,7 +69,7 @@ def eligible_families(db: Session) -> dict[str, Product]:
         .all()
     )
     groups = db.query(Product.group_id).filter(Product.id.in_(decided), Product.group_id.isnot(None)) if decided else []
-    decided_families = {f"p{pid}" for pid in decided} | {f"g{g}" for (g,) in groups}
+    decided_families = {f"p{pid}" for pid in decided} | {f"g{g}" for (g,) in groups} | relinked
     pool: dict[str, Product] = {}
     for p in sorted(products, key=lambda p: p.id):
         k = family_key(p)
@@ -75,13 +79,16 @@ def eligible_families(db: Session) -> dict[str, Product]:
 
 
 def judged_families(db: Session) -> set[str]:
-    """Families already judged: as recorded, and as they are now (a later match can merge two families)."""
+    """Families already judged: as recorded, as they are now (a later match can merge two families), and the family
+    of a listing now at a judged listing's address (a re-import)."""
     out: set[str] = set()
+    urls = []
     for j, p in db.query(Judgement, Product).outerjoin(Product, Judgement.product_id == Product.id):
         out.add(j.family_key)
         if p is not None:
             out.add(family_key(p))
-    return out
+        urls.append((j.snapshot or {}).get("source_url"))
+    return out | set(live_families_by_url(db, urls).values())
 
 
 def next_product(db: Session) -> Product | None:

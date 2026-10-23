@@ -144,13 +144,14 @@ def assess(
     p: Product,
     *,
     seller_evidence: list[Evidence] | None = None,
+    evidence: list[Evidence] | None = None,
     price_stats: dict[str, float] | None = None,
     cheaper_equivalent: dict | None = None,
     design_score: float | None = None,
     design_confidence: float | None = None,
     fx: Rates | None = None,
 ) -> dict:
-    ev = list(p.evidence)
+    ev = list(p.evidence) if evidence is None else evidence
     if seller_evidence is None and p.seller_id:
         seller_evidence = (
             db.query(Evidence).filter(Evidence.seller_id == p.seller_id, Evidence.product_id.is_(None)).all()

@@ -18,6 +18,12 @@ Measured through the real app, per request kind:
 - warm: 20 repeats with nothing changed (p50, p95);
 - SQL statements executed and response bytes for one warm request;
 - peak resident memory of the process at the end.
+And for Discover's Balanced feed:
+- after a decision: 12 rounds of "decide about a piece (like or dislike), then ask for the feed", p50 and p95 of the
+  feed request (what you wait for after every decision); then 12 more with the job queue running as in use, so the
+  calibration refits those decisions queue run in the background meanwhile;
+- during a scan: 20 warm feed requests while another thread writes listings as a scan does (new listings with
+  photos, updated prices and titles, a commit every few listings), p50 and p95.
 Timings depend on this machine (cores, disk): compare sizes and request kinds with each other.
 """
 
@@ -45,6 +51,9 @@ def _pct(xs: list[float], q: float) -> float:
     return xs[min(len(xs) - 1, max(0, round(q * (len(xs) - 1))))]
 
 
+_REAL_ENQUEUE = None  # the app's job queue, set aside while timing
+
+
 def build(n: int, decisions: int = 400, seed: int = 0):
     """A fresh app on a temporary database with the catalogue above. Returns (client, product ids)."""
     tmp = tempfile.mkdtemp(prefix="wsfeed")
@@ -66,7 +75,9 @@ def build(n: int, decisions: int = 400, seed: int = 0):
     from app.models import Evidence, Feedback, Product, ProductImage, ProductRelation, Seller
     from app.services import calibration, jobs
 
-    jobs.enqueue = lambda kind, params=None: 0  # no background work during timing
+    global _REAL_ENQUEUE
+    _REAL_ENQUEUE = _REAL_ENQUEUE or jobs.enqueue
+    jobs.enqueue = lambda kind, params=None: 0  # no background work during timing (see after_decision)
     rng = np.random.default_rng(seed)
     client = TestClient(create_app(), headers={"X-WS-Token": "bench"})
     client.__enter__()
@@ -176,18 +187,124 @@ def run_size(n: int) -> dict:
             "warm_p95_ms": round(1000 * _pct(warm, 0.95), 1), "sql_statements": statements["n"],
             "response_kb": round(size / 1024, 1),
         }  # fmt: skip
+    out["after_decision"] = after_decision(client, get, undecided, urls["feed_balanced"])
+    out["after_decision_with_refits"] = after_decision(client, get, undecided, urls["feed_balanced"], refits=True)
+    out["during_scan"] = during_scan(get, urls["feed_balanced"], n)
     out["peak_rss_mb"] = round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024, 1)
     client.__exit__(None, None, None)
     return out
 
 
+def after_decision(client, get, undecided, url: str, rounds: int = 12, refits: bool = False) -> dict:
+    """Decide (like or dislike, both teach the model), then time the feed request that follows. With ``refits``, the
+    app's job queue runs as it does in use: every few decisions queue a calibration refit, which runs in the
+    background while the feed is computed."""
+    from app.models import Job
+    from app.services import jobs
+
+    times = []
+    if refits:
+        jobs.enqueue = _REAL_ENQUEUE
+    try:
+        for i in range(rounds):
+            action = "like" if i % 2 else "dislike"
+            r = client.post("/api/feedback", json={"product_id": next(undecided), "action": action})
+            assert r.status_code == 200, r.text[:300]
+            t = time.perf_counter()
+            get(url)
+            times.append(time.perf_counter() - t)
+    finally:
+        jobs.enqueue = lambda kind, params=None: 0
+    refitted = 0
+    if refits:  # let the last refit finish, so what follows is measured without it
+        from app.db import SessionLocal
+
+        with SessionLocal() as db:
+            for _ in range(600):
+                if not db.query(Job).filter(Job.status.in_(("queued", "running"))).count():
+                    break
+                time.sleep(0.1)
+                db.expire_all()
+            refitted = db.query(Job).filter(Job.kind == "recalibrate", Job.status == "succeeded").count()
+    out = {"rounds": rounds, "p50_ms": round(1000 * st.median(times), 1), "p95_ms": round(1000 * _pct(times, 0.95), 1),
+           "max_ms": round(1000 * max(times), 1)}  # fmt: skip
+    if refits:
+        out["refits_done"] = refitted
+        assert refitted > 0, "No background refit completed: this is not a valid refit-contention benchmark"
+    return out
+
+
+def during_scan(get, url: str, n: int, requests: int = 20) -> dict:
+    """Warm feed requests while another thread writes listings the way a scan does."""
+    import threading
+
+    import numpy as np
+
+    from app.db import SessionLocal
+    from app.ingestion.base import RawListing
+    from app.ingestion.pipeline import upsert_listing
+    from app.models import Product, Seller
+    from app.services import embeddings as emb
+
+    stop = threading.Event()
+    written = {"n": 0}
+
+    def scan():
+        rng = np.random.default_rng(7)
+        with SessionLocal() as db:
+            seller = db.query(Seller).first()
+            backend = emb.get_image_backend().name
+            k = 0
+            while not stop.is_set():
+                raw = RawListing(f"scan{k}", f"https://shop.example/scan{k}", f"navy wool overcoat scan {k}",
+                                 price=float(rng.integers(20, 200) * 10))  # fmt: skip
+                p = upsert_listing(db, seller, raw).product
+                p.image_embedding = emb.to_bytes(emb.normalise(rng.standard_normal(192).astype(np.float32)))
+                p.embedding_backend = backend
+                old = db.get(Product, int(rng.integers(1, n)))
+                if old is not None:
+                    old.price = float(rng.integers(20, 200) * 10)  # a scan seeing a new price
+                k += 1
+                if k % 5 == 0:
+                    db.commit()
+                    written["n"] = k
+                time.sleep(0.02)
+            db.commit()
+            written["n"] = k
+
+    t = threading.Thread(target=scan, daemon=True)
+    t.start()
+    time.sleep(0.5)
+    times = []
+    try:
+        for _ in range(requests):
+            s = time.perf_counter()
+            get(url)
+            times.append(time.perf_counter() - s)
+    finally:
+        stop.set()
+        t.join(timeout=30)
+    return {"requests": requests, "listings_written": written["n"], "p50_ms": round(1000 * st.median(times), 1),
+            "p95_ms": round(1000 * _pct(times, 0.95), 1)}  # fmt: skip
+
+
 def profile(n: int, url: str = "/api/feed?limit=24&mode=balanced", top: int = 30) -> str:
     client, ids = build(n)
-    client.post("/api/feedback", json={"product_id": ids[-1], "action": "skip"})  # cold
+    from app.api.products import feed, feed_filters
+    from app.db import SessionLocal
+    from app.models import Product
+
+    # TestClient runs the route in another thread: profiling client.get measures waiting, not the feed.
+    # Call the same route in this thread after changing catalogue content, to profile the actual cold work.
     pr = cProfile.Profile()
-    pr.enable()
-    client.get(url)
-    pr.disable()
+    with SessionLocal() as db:
+        db.get(Product, ids[-1]).price += 1
+        db.commit()
+        flt = feed_filters(brand=None, seller_id=None, category=None, material=None, price_currency="CNY")
+        pr.enable()
+        feed(limit=24, mode="balanced", flt=flt, db=db)
+        pr.disable()
+    client.__exit__(None, None, None)
     s = io.StringIO()
     pstats.Stats(pr, stream=s).sort_stats("cumulative").print_stats(top)
     return s.getvalue()

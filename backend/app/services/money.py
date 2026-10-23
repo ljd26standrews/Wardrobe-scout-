@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from functools import lru_cache
 
 from sqlalchemy.orm import Session
 
@@ -23,8 +24,10 @@ ALIASES = {"RMB": "CNY", "CNH": "CNY", "YUAN": "CNY", "元": "CNY", "UKP": "GBP"
            "US$": "USD", "€": "EUR"}  # fmt: skip
 
 
+@lru_cache(maxsize=512)
 def code(currency: str | None) -> str | None:
-    """The ISO code of a stated currency (RMB and CNH are CNY), or None when none is stated or it is ambiguous."""
+    """The ISO code of a stated currency (RMB and CNH are CNY), or None when none is stated or it is ambiguous.
+    (Remembered per spelling: a feed converts every listing's price.)"""
     c = (currency or "").strip().upper()
     c = ALIASES.get(c, c)
     return c if re.fullmatch(r"[A-Z]{3}", c) else None

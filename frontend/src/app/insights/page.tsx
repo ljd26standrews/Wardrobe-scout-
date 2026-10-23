@@ -4,7 +4,8 @@ import useSWR from "swr";
 import { toast } from "sonner";
 import { Undo2 } from "lucide-react";
 import type { Confidence, Gate } from "@/lib/api";
-import { api, hasEstimates } from "@/lib/api";
+import { hasEstimates } from "@/lib/api";
+import { guarded, undoDecision, undoFailed } from "@/components/product/use-feedback";
 import { ConfidenceBadge } from "@/components/product/confidence";
 import { SelectiveInsights } from "@/components/selective-insights";
 import { PageHeader } from "@/components/app-shell";
@@ -37,7 +38,7 @@ type InsightsResponse = {
   top_explained: { id: number; title: string; score: number; contributions: Record<string, number>; reasons: string[]; cautions: string[]; image: string | null; confidence: Confidence | null }[];
   top_gate?: Gate;
 };
-type FeedbackRow = { id: number; product_id: number | null; action: string; reasons: string[]; note: string | null; title: string | null; seller: string | null; created_at: string };
+type FeedbackRow = { id: number; product_id: number | null; action: string; reasons: string[]; note: string | null; title: string | null; seller: string | null; created_at: string; undo_token?: string | null };
 
 const GROUP_LABEL: Record<string, string> = { colour: "Colours", category: "Garment types", fibre: "Materials", brand: "Brands / styles", seller: "Sellers", fit: "Fit & silhouette", logo: "Branding visibility" };
 const COMPONENT_LABEL: Record<string, string> = {
@@ -119,6 +120,20 @@ const MODEL_GROUP_LABEL: Record<string, string> = { colour: "Colours", category:
 export default function InsightsPage() {
   const { data, error, isLoading, mutate } = useSWR<InsightsResponse>("/api/insights");
   const { data: history, mutate: mutateHistory } = useSWR<FeedbackRow[]>("/api/feedback?limit=60");
+  // Undo from the history: refused, with the reason, when a newer decision or a change in Saved would be overwritten.
+  const removeDecision = (f: FeedbackRow) => {
+    const run = guarded(async () => {
+      try {
+        await undoDecision({ feedback_id: f.id, undo_token: f.undo_token });
+        toast("Decision removed");
+      } catch (e) {
+        undoFailed(e, run);
+      }
+      mutateHistory();
+      mutate();
+    });
+    return run;
+  };
   const { data: evalStatus } = useSWR<{ judgements: number; needed: number; ready: boolean }>("/api/eval/status");
 
   if (error) return <ErrorState error={error} retry={() => mutate()} />;
@@ -345,12 +360,7 @@ export default function InsightsPage() {
             <button
               aria-label="Undo decision"
               className="text-muted-foreground hover:text-foreground"
-              onClick={async () => {
-                await api.del(`/api/feedback/${f.id}`);
-                toast("Decision removed");
-                mutateHistory();
-                mutate();
-              }}
+              onClick={removeDecision(f)}
             >
               <Undo2 className="size-4" />
             </button>

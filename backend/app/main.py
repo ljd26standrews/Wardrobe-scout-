@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -102,7 +103,15 @@ class APITokenMiddleware:
         return await self.app(scope, receive, send)
 
 
+# A feed ranks every listing and allocates hundreds of thousands of short-lived objects while long-lived caches hold
+# hundreds of thousands more; with the default thresholds the cycle collector scanned them several times per request
+# (about 2 s of a 20,000-listing feed: docs/beta/04-performance.md). Collecting less often keeps that cost low;
+# reference counting still frees almost everything at once.
+GC_THRESHOLDS = (50_000, 50, 50)
+
+
 def create_app() -> FastAPI:
+    gc.set_threshold(*GC_THRESHOLDS)
     app = FastAPI(title="Wardrobe Scout API", version="1.0.0", lifespan=lifespan)
     # Added first so CORS wraps it: even 401 responses carry CORS headers for the bookmarklet.
     app.add_middleware(APITokenMiddleware)

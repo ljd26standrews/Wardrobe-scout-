@@ -63,6 +63,7 @@ from sqlalchemy.orm import Session
 from ..models import Feedback, InspirationImage, Product, WardrobeItem
 from . import embeddings as emb
 from .approval_data import LABEL_VERSION, WITHDRAW, reading
+from .provenance import HeldOut, Identity, live_families_by_url, norm_url
 
 # Recorded with every feed served (impression log), so evaluations can tell model versions apart.
 # s1: full-covariance posterior, logo-only logo rejections, new reasons; s2: aesthetic-v2 reading of decisions
@@ -209,7 +210,7 @@ def build_feature_space(db: Session, taste: dict, backend: str) -> FeatureSpace:
     """Feature matrix for every product. Cached until products (their content: services/revisions.py), wardrobe,
     taste profile or image model change; a decision or a piece being marked as seen does not rebuild it."""
     from . import revisions
-    from .recommender import rules_component
+    from .recommender import catalogue_products, photo_matrix, rules_component, rules_lookup
 
     products_rev = revisions.current(db, "products")
     wardrobe_keys = sorted({k for w in db.query(WardrobeItem) for k in attr_keys(w)})
@@ -224,8 +225,9 @@ def build_feature_space(db: Session, taste: dict, backend: str) -> FeatureSpace:
     with _cache_lock:
         if key in _space_cache:
             return _space_cache[key]
-    products = db.query(Product).all()
-    vocab_keys = {k for p in products for k in attr_keys(p)}
+    products = catalogue_products(db)  # shared with the ranking and equivalent offers
+    keys = [attr_keys(p) for p in products]
+    vocab_keys = {k for ks in keys for k in ks}
     # Wardrobe attributes, and those of decided products since deleted, extend the vocabulary so owned
     # pieces and past decisions can inform taste.
     vocab_keys = sorted(vocab_keys | set(wardrobe_keys) | set(history_keys))
@@ -233,14 +235,15 @@ def build_feature_space(db: Session, taste: dict, backend: str) -> FeatureSpace:
     d = 1 + len(vocab) + PCA_DIM + 1  # prior, attributes, image PCs, bias
 
     ids = [p.id for p in products]
-    vecs = {
-        p.id: emb.from_bytes(p.image_embedding)
-        for p in products
-        if p.image_embedding is not None and p.embedding_backend == backend
-    }
+    photographed = [
+        r for r, p in enumerate(products) if p.image_embedding is not None and p.embedding_backend == backend
+    ]
+    vecs: dict[int, np.ndarray] = {}
     pca_mean = pca_components = pca_scale = None
+    if photographed:
+        E = photo_matrix(products, photographed)
+        vecs = dict(zip(photographed, E, strict=True))  # row -> its photo vector
     if len(vecs) >= MIN_PCA_PRODUCTS:  # a small catalogue gets fewer components, not none
-        E = np.vstack(list(vecs.values()))
         pca_mean = E.mean(0)
         _, _, vt = np.linalg.svd(E - pca_mean, full_matrices=False)
         pca_components = vt[: min(PCA_DIM, len(vecs) - 1)]
@@ -258,9 +261,11 @@ def build_feature_space(db: Session, taste: dict, backend: str) -> FeatureSpace:
         d,
         key,
     )
+    rules_seen = rules_lookup(db, taste)  # the written-profile scores feeds use, keyed by the same revisions
     for r, p in enumerate(products):
-        rules, _ = rules_component(p, taste)
-        space.X[r] = space.vector(attr_keys(p), prior=(rules - 0.5) * PRIOR_SCALE, image=vecs.get(p.id))
+        if (hit := rules_seen.get(p.id)) is None:
+            hit = rules_seen[p.id] = rules_component(p, taste)
+        space.X[r] = space.vector(keys[r], prior=(hit[0] - 0.5) * PRIOR_SCALE, image=vecs.get(r))
     with _cache_lock:
         _space_cache.clear()  # keep only the current space
         _space_cache[key] = space
@@ -377,13 +382,6 @@ def observations(db: Session, space: FeatureSpace) -> tuple[list[np.ndarray], li
     return rows, ys, ws, n_real
 
 
-def _family_of_key(key: int | tuple, group_of: dict[int, int]) -> str:
-    """The approval-label family of a decision key (a product id, or ("deleted", source url))."""
-    if isinstance(key, tuple):
-        return f"d{key[1]}"
-    return f"g{group_of[key]}" if key in group_of else f"p{key}"
-
-
 def family_key(family: tuple) -> str:
     """The garment-family key used by approval labels ("g<group>", "p<product>", "d<url>")."""
     kind, value = family
@@ -394,65 +392,145 @@ def family_key(family: tuple) -> str:
     return f"p{value}"
 
 
-def observations_with_families(
-    db: Session,
-    space: FeatureSpace,
-    *,
-    exclude: frozenset[str] = frozenset(),
-    before: datetime | None = None,
-    version: str = LABEL_VERSION,
-) -> tuple[list, list, list, int, list]:
-    """``observations`` plus, for each row, the garment family of the decision it came from (None for
-    inspiration, wardrobe and background rows).
-
-    ``exclude``: garment families (approval-label keys "g…", "p…", "d…") left out entirely, as if never decided:
-    their pieces become undecided, exactly like candidates being served. ``before``: only what was known before
-    that time. Either way the background sample and its weight are built from what remains, so a left-out label
-    cannot leak back in through them (out-of-fold calibration, rolling-origin evaluation)."""
+def _latest_decisions(db: Session, held: HeldOut, before: datetime | None, version: str):
+    """The latest decision about the look per listing (a deleted listing: per address), leaving out what ``held``
+    covers, and a function giving each one's garment family."""
     group_of = dict(db.query(Product.id, Product.group_id).filter(Product.group_id.isnot(None)))
     query = db.query(Feedback)
     if before is not None:
         query = query.filter(Feedback.created_at < before)
-    labels = LABEL if version != "approval-v1" else LABEL_V1
     latest: dict[int | tuple, Feedback] = {}
-    for fb in query.order_by(Feedback.created_at):
+    for fb in query.order_by(Feedback.created_at, Feedback.id):
         if fb.product_id is not None:
             key: int | tuple = fb.product_id
         elif fb.snapshot:
             key = ("deleted", fb.snapshot.get("source_url") or fb.id)
         else:
             continue
-        if exclude and _family_of_key(key, group_of) in exclude:
+        if held and held.covers_feedback(fb):
             continue
         said = reading(fb.action, fb.reasons, version)  # the latest decision about the look counts
         if said == WITHDRAW:
             latest.pop(key, None)
         elif said is not None:
             latest[key] = fb
+    # A decision about a deleted listing belongs to the garment now listed at its address, if any (a re-import).
+    relinked = live_families_by_url(db, [k[1] for k in latest if isinstance(k, tuple) and isinstance(k[1], str)])
+
+    def family(key: int | tuple) -> str:
+        if isinstance(key, tuple):
+            url = key[1]
+            return relinked.get(norm_url(url) or "", f"d{url}") if isinstance(url, str) else f"d{url}"
+        return f"g{group_of[key]}" if key in group_of else f"p{key}"
+
+    return latest, family
+
+
+def teaches(fb: Feedback, version: str = LABEL_VERSION) -> tuple[int, float, list[str] | None] | None:
+    """What one decision teaches the taste model: (label, weight, the feature groups it may move, None for all), or
+    None (nothing: a non-taste rejection, or an action the reading does not learn from)."""
+    labels = LABEL if version != "approval-v1" else LABEL_V1
+    if fb.action not in labels:
+        return None
+    reasons = set(fb.reasons or [])
+    if fb.action == "dislike" and reasons and reasons <= NON_TASTE_REASONS:
+        return None  # value/redundancy/construction/this-item-only judgements are not taste
+    y, w = labels[fb.action]
+    specific = reasons - NON_TASTE_REASONS - GENERAL_REASONS
+    if fb.action == "dislike" and specific:
+        return y, w, sorted(set().union(*(REASON_GROUPS.get(r, set()) for r in specific)))
+    return y, w, None
+
+
+def _digest(value) -> str:
+    return hashlib.sha1(json.dumps(value, sort_keys=True, default=str).encode()).hexdigest()[:12]
+
+
+def content_fingerprint(obj) -> str:
+    """What a piece contributes as features: its attributes and its photo vector (with how it was computed). Being
+    marked as seen, a price or a description change does not change it."""
+    g = obj.get if isinstance(obj, dict) else (lambda k, _o=obj: getattr(_o, k, None))
+    vec = g("image_embedding") if not isinstance(obj, dict) else None
+    if vec is None and not isinstance(obj, dict):
+        vec = g("embedding")
+    return _digest([sorted(attr_keys(obj)), hashlib.sha1(vec).hexdigest() if vec else None,
+                    g("embedding_backend")])  # fmt: skip
+
+
+def training_fingerprints(db: Session, version: str = LABEL_VERSION) -> list[str]:
+    """For every decision the taste model learns from now: "<decision id>:<fingerprint>:<listing>". The fingerprint
+    covers what it contributes: its label and weight, the features it may move (a reason narrows them), its garment
+    family (listings of one garment share a weight) and the content of the piece. Editing a reason, re-analysing the
+    piece's photo, regrouping it or changing its attributes changes it; a newer decision about the listing replaces
+    the entry; marking a piece as seen changes nothing."""
+    from sqlalchemy.orm import load_only
+
+    latest, family = _latest_decisions(db, HeldOut(), None, version)
+    pids = [k for k in latest if isinstance(k, int)]
+    content: dict[int, str] = {}
+    cols = (Product.id, Product.colours, Product.materials, Product.fit_tags, Product.category, Product.brand,
+            Product.logo_level, Product.image_embedding, Product.embedding_backend)  # fmt: skip
+    for i in range(0, len(pids), 500):
+        for p in db.query(Product).options(load_only(*cols)).filter(Product.id.in_(pids[i : i + 500])):
+            content[p.id] = content_fingerprint(p)
+    out = []
+    for key, fb in latest.items():
+        taught = teaches(fb, version)
+        if taught is None:
+            continue
+        piece = content.get(key) if isinstance(key, int) else content_fingerprint(fb.snapshot or {})
+        listing = f"p{key}" if isinstance(key, int) else f"d{key[1]}"
+        out.append(f"{fb.id}:{_digest([*taught, family(key), piece])}:{listing}")
+    return sorted(out)
+
+
+def observations_with_families(
+    db: Session,
+    space: FeatureSpace,
+    *,
+    exclude: frozenset[str] | HeldOut = frozenset(),
+    before: datetime | None = None,
+    version: str = LABEL_VERSION,
+) -> tuple[list, list, list, int, list]:
+    """``observations`` plus, for each row, the garment family of the decision it came from (None for
+    inspiration, wardrobe and background rows).
+
+    ``exclude``: what is held out (a provenance.HeldOut, or garment family keys "g…", "p…", "d…", resolved by
+    services/provenance.py), left out entirely, as if never decided: decisions about those garments (under any of
+    their listings or addresses), wardrobe pieces linked to them and inspiration photos that are their photographs.
+    Their listings become undecided, exactly like candidates being served. ``before``: only what was known before
+    that time. Either way the background sample and its weight are built from what remains, so a left-out label
+    cannot leak back in through them (out-of-fold calibration, rolling-origin evaluation)."""
+    if isinstance(exclude, HeldOut):
+        held = exclude
+    else:
+        held = Identity(db).resolve(families=exclude) if exclude else HeldOut()
+    latest, family = _latest_decisions(db, held, before, version)
+    group_of = dict(db.query(Product.id, Product.group_id).filter(Product.group_id.isnot(None)))
     decisions = []  # (family, x, y, w)
     for pid, fb in latest.items():
-        if fb.action not in labels or (isinstance(pid, int) and pid not in space.row):
+        if isinstance(pid, int) and pid not in space.row:
             continue
-        reasons = set(fb.reasons or [])
-        if fb.action == "dislike" and reasons and reasons <= NON_TASTE_REASONS:
-            continue  # value/redundancy/construction/this-item-only judgements are not taste
-        y, w = labels[fb.action]
+        taught = teaches(fb, version)
+        if taught is None:
+            continue
+        y, w, groups = taught
         x = space.X[space.row[pid]].copy() if isinstance(pid, int) else space.vector(attr_keys(fb.snapshot))
-        specific = reasons - NON_TASTE_REASONS - GENERAL_REASONS
-        if fb.action == "dislike" and specific:
-            groups = set().union(*(REASON_GROUPS.get(r, set()) for r in specific))
-            x *= space.group_mask(groups)  # learn only about what the reason names
-        decisions.append((("group", group_of[pid]) if pid in group_of else ("item", pid), x, y, w))
+        if groups is not None:
+            x *= space.group_mask(set(groups))  # learn only about what the reason names
+        decisions.append((family(pid), x, y, w))
     # One garment listed by several sellers is one piece of evidence: its listings share one decision's weight.
     family_size = Counter(f for f, *_ in decisions)
     rows, ys, ws, families = [], [], [], []
-    for family, x, y, w in decisions:
+    for fam, x, y, w in decisions:
         rows.append(x)
         ys.append(y)
-        ws.append(w / family_size[family])
-        families.append(family_key(family))
+        ws.append(w / family_size[fam])
+        families.append(fam)
     n_real = len(family_size)
     for img in db.query(InspirationImage).filter(InspirationImage.embedding.isnot(None)):
+        if img.id in held.inspiration_ids:
+            continue
         if img.embedding_backend == space.backend and (before is None or img.added_at < before):
             rows.append(space.vector([], image=emb.from_bytes(img.embedding)))
             ys.append(1 if img.polarity > 0 else 0)
@@ -460,14 +538,15 @@ def observations_with_families(
             n_real += 1
     for item in db.query(WardrobeItem):
         rating = item.rating or 3
-        if rating == 3 or (before is not None and item.added_at >= before):
+        if rating == 3 or (before is not None and item.added_at >= before) or item.id in held.wardrobe_ids:
             continue
         image = emb.from_bytes(item.embedding) if item.embedding_backend == space.backend else None
         rows.append(space.vector(attr_keys(item), image=image))
         ys.append(1 if rating > 3 else 0)
         ws.append(0.5)
         n_real += 1
-    rows, ys, ws, n_real = _with_background(space, latest, group_of, rows, ys, ws, n_real)
+    decided = {family(k) for k in latest}
+    rows, ys, ws, n_real = _with_background(space, decided, group_of, rows, ys, ws, n_real)
     return rows, ys, ws, n_real, families + [None] * (len(rows) - len(families))
 
 
@@ -475,23 +554,20 @@ def _stable_rank(pid: int) -> int:
     return int(hashlib.blake2b(str(pid).encode(), digest_size=8).hexdigest(), 16)
 
 
-def _with_background(space, latest, group_of, rows, ys, ws, n_real):
+def _with_background(space, decided, group_of, rows, ys, ws, n_real):
     """Positive-unlabelled background: weak "typical, not chosen" observations from undecided items.
 
     It only makes sense against something you chose: with no positive decisions it would just teach that
     every common attribute is disliked (a single colour rejection moved trousers and cotton). So its total
     weight grows with your positive evidence, up to BACKGROUND_WEIGHT. The sample is a stable function of
     the undecided set (a hash order), so one more decision changes it by one item, not entirely. Listings of
-    a garment you decided on are never background: they are the same piece."""
+    a garment you decided on (``decided``: family keys) are never background: they are the same piece."""
     positive = sum(w for w, y in zip(ws, ys, strict=True) if y == 1)
     if BACKGROUND_SCALES_WITH_POSITIVES:
         total = min(BACKGROUND_WEIGHT, positive)
     else:  # the earlier rule: full weight as soon as there is any observation
         total = BACKGROUND_WEIGHT if rows else 0.0
-    decided_groups = {group_of[pid] for pid in latest if isinstance(pid, int) and pid in group_of}
-    undecided = [
-        pid for pid in space.row if pid not in latest and group_of.get(pid, -1) not in decided_groups
-    ]  # fmt: skip
+    undecided = [pid for pid in space.row if (f"g{group_of[pid]}" if pid in group_of else f"p{pid}") not in decided]
     pick = sorted(undecided, key=_stable_rank)[:BACKGROUND_SAMPLE]
     if total > 0 and pick:
         for pid in pick:
@@ -519,9 +595,31 @@ def prior(space: FeatureSpace) -> tuple[np.ndarray, np.ndarray]:
     return m0, q0
 
 
+_fit_memo: OrderedDict[str, Posterior] = OrderedDict()
+
+
 def fit(db: Session, space: FeatureSpace) -> Posterior:
-    """Fit the taste model to your current evidence. A fit is reused while its inputs are unchanged."""
-    return fit_rows(space, *observations(db, space))
+    """Fit the taste model to your current evidence. A fit is reused while its inputs are unchanged: the data it
+    reads (services/revisions.py) and the feature space, so a feed that asks twice (ranking, then the gate) reads
+    your decisions once."""
+    from . import revisions
+
+    key = json.dumps([revisions.current(db, "feedback", "products", "addresses", "wardrobe", "inspiration"),
+                      space.key])  # fmt: skip
+    with _post_lock:
+        if key in _fit_memo:
+            _fit_memo.move_to_end(key)
+            hit = _fit_memo[key]
+            return hit if hit.space is space else dataclasses.replace(hit, space=space)
+    post = fit_rows(space, *observations(db, space))
+    with _post_lock:
+        for old_key in list(_fit_memo):
+            if _fit_memo[old_key].space.key != space.key:
+                del _fit_memo[old_key]
+        _fit_memo[key] = post
+        while len(_fit_memo) > 4:
+            _fit_memo.popitem(last=False)
+    return post
 
 
 def fit_rows(space: FeatureSpace, rows: list, ys: list, ws: list, n_real: int) -> Posterior:
@@ -540,6 +638,11 @@ def fit_rows(space: FeatureSpace, rows: list, ys: list, ws: list, n_real: int) -
             return hit if hit.space is space else dataclasses.replace(hit, space=space)
     post = _fit(space, m0, q0, A, y, c, n_real)
     with _post_lock:
+        # A catalogue change creates a new matrix. Old fits cannot be reused at that revision, and retaining
+        # eight different catalogue matrices during a scan costs far more than retaining eight sets of weights.
+        for old_key in list(_post_cache):
+            if _post_cache[old_key].space.key != space.key:
+                del _post_cache[old_key]
         _post_cache[key] = post
         while len(_post_cache) > 8:
             _post_cache.popitem(last=False)
